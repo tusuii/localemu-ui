@@ -1,3 +1,8 @@
+# One command:  docker compose up -d
+#   LocalEmu gateway  -> http://localhost:4566
+#   LocalEmu Console  -> http://localhost:4321   (the console image is built on first run)
+name: localemu
+
 services:
   localemu:
     container_name: "${LOCALEMU_DOCKER_NAME:-localemu-main}"
@@ -25,8 +30,11 @@ services:
   # AWS-console style web UI for LocalEmu (Astro + Tailwind). See ui/README.md.
   console:
     container_name: "${LOCALEMU_CONSOLE_DOCKER_NAME:-localemu-console}"
-    build: ./ui
-    # Or skip the local build and pull the prebuilt multi-arch image:
+    # Built automatically the first time you run `docker compose up -d`.
+    # LOCALEMU_CONSOLE_CONTEXT lets you build straight from GitHub without cloning, see README.
+    build:
+      context: "${LOCALEMU_CONSOLE_CONTEXT:-./ui}"
+    # Or skip the build and pull the prebuilt multi-arch image instead:
     # image: ghcr.io/tusuii/localemu-console:latest
     restart: unless-stopped
     depends_on:

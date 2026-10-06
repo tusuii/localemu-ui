@@ -161,3 +161,10 @@ clean-dist:				  ## Clean up python distribution directories
 	rm -rf src/*.egg-info
 
 .PHONY: ui-install ui-dev ui-build ui-start usage freeze install-basic install-runtime install-test install-dev install entrypoints dist publish coveralls start docker-run-tests docker-cp-coverage test test-coverage lint lint-modified format format-modified asf-regenerate init-precommit clean clean-dist upgrade-pinned-dependencies
+
+.PHONY: up down
+up:   ## start LocalEmu + the web console (http://localhost:4321)
+	docker compose up -d
+
+down: ## stop LocalEmu + the web console
+	docker compose down

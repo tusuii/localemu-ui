@@ -164,9 +164,23 @@ EventBridge, Step Functions, CloudFormation and more, with region and account sw
 theme.
 
 ```bash
-docker compose up --build        # LocalEmu on :4566 + the console on http://localhost:4321
-# (or use the prebuilt image: uncomment `image: ghcr.io/tusuii/localemu-console:latest` for `console`
-#  in docker-compose.yml and run `docker compose pull && docker compose up`)
+git clone https://github.com/tusuii/localemu-ui && cd localemu-ui
+docker compose up -d             # LocalEmu on :4566 + the console on http://localhost:4321
+```
+
+The console image is built on the first run (a minute or two); later starts are instant.
+`make up` / `make down` do the same. Stop with `docker compose down`, update with
+`git pull && docker compose up -d --build`. To use the prebuilt image instead of building,
+uncomment `image: ghcr.io/tusuii/localemu-console:latest` for `console` in `docker-compose.yml`.
+
+Prefer not to clone? Compose can read the file and build context straight from GitHub (needs
+Docker Compose v2.20+ and the branch to contain `ui/`):
+
+```bash
+REF=main  # branch or tag
+LOCALEMU_CONSOLE_CONTEXT="https://github.com/tusuii/localemu-ui.git#$REF:ui" \
+  docker compose -f "https://raw.githubusercontent.com/tusuii/localemu-ui/$REF/docker-compose.yml" up -d
+```
 
 # or, against a LocalEmu you already run:
 cd ui && npm ci && npm run dev
