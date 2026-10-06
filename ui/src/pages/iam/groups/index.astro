@@ -24,7 +24,7 @@ if (post.response) return post.response;
 const res = await load(async () => {
   const out: any[] = []; let marker: string | undefined;
   do { const r = await iam.send(new ListGroupsCommand({ Marker: marker })); out.push(...(r.Groups ?? [])); marker = r.IsTruncated ? r.Marker : undefined; } while (marker);
-  return out.map((g) => ({ id: g.GroupName, name: g.GroupName, path: g.Path, created: g.CreateDate, arn: g.Arn }));
+  return out.map((g) => ({ id: g.GroupName, name: g.GroupName, path: g.Path, created: g.CreateDate, arn: g.Arn })).sort((a, b) => a.name.localeCompare(b.name));
 });
 ---
 <Console title="User groups" crumbs={[{ label: 'User groups' }]} error={post.error}>

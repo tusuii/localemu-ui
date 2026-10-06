@@ -28,7 +28,7 @@ const trusted = (doc: unknown): string[] => {
 const res = await load(async () => {
   const out: any[] = []; let marker: string | undefined;
   do { const r = await iam.send(new ListRolesCommand({ Marker: marker })); out.push(...(r.Roles ?? [])); marker = r.IsTruncated ? r.Marker : undefined; } while (marker);
-  return out.map((r) => ({ id: r.RoleName, name: r.RoleName, path: r.Path, trusted: trusted(decodeDoc(r.AssumeRolePolicyDocument)), created: r.CreateDate, lastUsed: r.RoleLastUsed?.LastUsedDate }));
+  return out.map((r) => ({ id: r.RoleName, name: r.RoleName, path: r.Path, trusted: trusted(decodeDoc(r.AssumeRolePolicyDocument)), created: r.CreateDate, lastUsed: r.RoleLastUsed?.LastUsedDate })).sort((a, b) => a.name.localeCompare(b.name));
 });
 ---
 <Console title="Roles" crumbs={[{ label: 'Roles' }]} error={post.error}>

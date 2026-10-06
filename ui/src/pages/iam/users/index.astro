@@ -23,7 +23,7 @@ if (post.response) return post.response;
 const res = await load(async () => {
   const out: any[] = []; let marker: string | undefined;
   do { const r = await iam.send(new ListUsersCommand({ Marker: marker })); out.push(...(r.Users ?? [])); marker = r.IsTruncated ? r.Marker : undefined; } while (marker);
-  return out.map((u) => ({ id: u.UserName, name: u.UserName, path: u.Path, created: u.CreateDate, lastUsed: u.PasswordLastUsed, arn: u.Arn }));
+  return out.map((u) => ({ id: u.UserName, name: u.UserName, path: u.Path, created: u.CreateDate, lastUsed: u.PasswordLastUsed, arn: u.Arn })).sort((a, b) => a.name.localeCompare(b.name));
 });
 ---
 <Console title="Users" crumbs={[{ label: 'Users' }]} error={post.error}>
