@@ -6,16 +6,18 @@ import Details from '../../components/Details.astro';
 import DataTable from '../../components/DataTable.astro';
 import FormField from '../../components/FormField.astro';
 import Flash from '../../components/Flash.astro';
+import TagsPanel from '../../components/TagsPanel.astro';
 import {
   DescribeRepositoriesCommand, DescribeImagesCommand, BatchDeleteImageCommand, GetRepositoryPolicyCommand, SetRepositoryPolicyCommand,
   DeleteRepositoryPolicyCommand, GetLifecyclePolicyCommand, PutLifecyclePolicyCommand, DeleteLifecyclePolicyCommand, DeleteRepositoryCommand,
-  PutImageTagMutabilityCommand, PutImageScanningConfigurationCommand,
+  PutImageTagMutabilityCommand, ListTagsForResourceCommand, TagResourceCommand, UntagResourceCommand, PutImageScanningConfigurationCommand,
 } from '@aws-sdk/client-ecr';
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
-import { handlePost, jsonOf, str, strs } from '../../lib/action';
+import { handlePost, jsonOf, required, str, strs } from '../../lib/action';
 import { bulk } from '../../lib/bulk';
 import { load, soft } from '../../lib/errors';
+import { guard } from '../../lib/unsupported';
 import { bytes, dateTime, pretty } from '../../lib/format';
 import { badge, copyable, mono } from '../../lib/html';
 import { LIFECYCLE_TEMPLATE, POLICY_TEMPLATE, pushCommands } from '../../lib/ecr';
@@ -24,12 +26,13 @@ const name = Astro.params.repo!;
 const ctx = getCtx(Astro.cookies);
 const ecr = aws.ecr(ctx);
 const tabId = Astro.url.searchParams.get('tab') ?? '';
-const tab = ['images', 'permissions', 'lifecycle', 'details'].includes(tabId) ? tabId : 'images';
+const tab = ['images', 'permissions', 'lifecycle', 'tags', 'details'].includes(tabId) ? tabId : 'images';
 const to = (t: string) => `${Astro.url.pathname}?tab=${t}`;
 
 const repoRes = await load(async () => (await ecr.send(new DescribeRepositoriesCommand({ repositoryNames: [name] }))).repositories?.[0]);
 if (repoRes.error && /RepositoryNotFound|does not exist/i.test(repoRes.error)) return new Response(`Repository "${name}" does not exist`, { status: 404 });
 const repo = repoRes.data;
+const repoArn = repo?.repositoryArn ?? `arn:aws:ecr:${ctx.region}:${ctx.account}:repository/${name}`;
 
 const post = await handlePost(Astro, {
   deleteImages: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'image' }, async (d) => {
@@ -53,6 +56,14 @@ const post = await handlePost(Astro, {
     await ecr.send(new PutImageScanningConfigurationCommand({ repositoryName: name, imageScanningConfiguration: { scanOnPush: str(f, 'scan') === '1' } }));
     return { message: 'Repository settings updated.', redirect: to('details') };
   },
+  addTag: async (f) => {
+    await guard('TagResource', () => ecr.send(new TagResourceCommand({ resourceArn: repoArn, tags: [{ Key: required(f, 'key', 'Tag key'), Value: str(f, 'value') }] })));
+    return { message: 'Tag added.', redirect: to('tags') };
+  },
+  removeTag: async (f) => {
+    const r = await bulk(strs(f, 'id'), { verb: 'Removed', noun: 'tag' }, (k) => guard('UntagResource', () => ecr.send(new UntagResourceCommand({ resourceArn: repoArn, tagKeys: [k] }))));
+    return { ...r, redirect: to('tags') };
+  },
   deleteRepo: async () => { await ecr.send(new DeleteRepositoryCommand({ repositoryName: name, force: true })); return { message: `Deleted repository "${name}".`, redirect: '/ecr' }; },
 });
 if (post.response) return post.response;
@@ -70,7 +81,8 @@ const images = tab === 'images' ? await load(async () => {
 }) : null;
 const policy = tab === 'permissions' ? await soft(async () => (await ecr.send(new GetRepositoryPolicyCommand({ repositoryName: name }))).policyText) : null;
 const lifecycle = tab === 'lifecycle' ? await soft(async () => (await ecr.send(new GetLifecyclePolicyCommand({ repositoryName: name }))).lifecyclePolicyText) : null;
-const tabs = [{ id: 'images', label: 'Images' }, { id: 'permissions', label: 'Permissions' }, { id: 'lifecycle', label: 'Lifecycle policy' }, { id: 'details', label: 'Details and push commands' }];
+const tags = tab === 'tags' ? await load(async () => ((await guard('ListTagsForResource', () => ecr.send(new ListTagsForResourceCommand({ resourceArn: repoArn })))).tags ?? []).filter((t) => t.Key).map((t) => ({ Key: t.Key!, Value: t.Value ?? '' }))) : null;
+const tabs = [{ id: 'images', label: 'Images' }, { id: 'permissions', label: 'Permissions' }, { id: 'lifecycle', label: 'Lifecycle policy' }, { id: 'tags', label: 'Tags' }, { id: 'details', label: 'Details and push commands' }];
 const v = post.values;
 ---
 <Console title={name} crumbs={[{ label: 'Repositories', href: '/ecr' }, { label: name }]} error={post.error ?? repoRes.error}>
@@ -124,6 +136,8 @@ const v = post.values;
         </form>
       </div>
     )}
+
+    {tab === 'tags' && <div class="p-5"><TagsPanel tags={tags?.data ?? []} error={tags?.error} /></div>}
 
     {tab === 'details' && repo && (
       <div class="space-y-6 p-5">

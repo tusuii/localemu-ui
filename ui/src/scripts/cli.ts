@@ -7,8 +7,9 @@
  * The LocalEmu endpoint (from <meta name="lemu-endpoint">) and region are appended.
  */
 import { $, $$, copyText } from './util';
+import { expandTemplate } from '../lib/clitemplate';
+import { cliToSdk } from '../lib/clisdk';
 
-const quote = (v: string) => (/^[\w@%+=:,./-]+$/.test(v) ? v : `'${v.replace(/'/g, `'\\''`)}'`);
 
 function fieldValue(form: HTMLFormElement | null, name: string): string {
   const root: ParentNode = form ?? document;
@@ -21,15 +22,11 @@ function fieldValue(form: HTMLFormElement | null, name: string): string {
   return '';
 }
 
+const meta = (n: string, d: string) => document.querySelector<HTMLMetaElement>(`meta[name="${n}"]`)?.content ?? d;
+
 export function fillTemplate(tpl: string, form: HTMLFormElement | null): string {
-  const body = tpl.replace(/\{([\w.-]+)(?:\|([^}]*))?\}/g, (_m, name: string, flag?: string) => {
-    const v = fieldValue(form, name);
-    if (flag !== undefined) return v ? (flag.endsWith('=') ? flag + quote(v) : `${flag} ${quote(v)}`.trim()) : '';
-    return v ? quote(v) : `<${name}>`;
-  }).replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
-  const endpoint = document.querySelector<HTMLMetaElement>('meta[name="lemu-endpoint"]')?.content ?? 'http://localhost:4566';
-  const region = document.querySelector<HTMLMetaElement>('meta[name="lemu-region"]')?.content ?? 'us-east-1';
-  return `${body} --endpoint-url ${endpoint} --region ${region}`;
+  const body = expandTemplate(tpl, (name) => fieldValue(form, name));
+  return `${body} --endpoint-url ${meta('lemu-endpoint', 'http://localhost:4566')} --region ${meta('lemu-region', 'us-east-1')}`;
 }
 
 export function initCli() {
@@ -42,18 +39,34 @@ export function initCli() {
     const id = `cli-box-${n}`;
     wrap.innerHTML = `<button type="button" class="btn btn-normal" aria-expanded="false" aria-controls="${id}"><span class="icon" style="width:16px;height:16px" aria-hidden="true"></span> Show CLI</button>
       <div class="cli-box" id="${id}" role="region" aria-label="AWS CLI equivalent" hidden>
+        <div class="mb-2 flex gap-1" role="tablist" aria-label="Format">
+          <button type="button" class="btn btn-normal btn-sm" role="tab" aria-selected="true" data-cli-tab="cli">AWS CLI</button>
+          <button type="button" class="btn btn-normal btn-sm" role="tab" aria-selected="false" data-cli-tab="sdk">SDK for JavaScript</button>
+        </div>
         <pre class="code-block" data-cli-text tabindex="0"></pre>
-        <div class="mt-2 flex items-center justify-between gap-2"><span class="text-[12px] text-muted">Includes <code>--endpoint-url</code> for LocalEmu. Placeholders in &lt;angle brackets&gt; are still empty.</span><button type="button" class="btn btn-normal btn-sm" data-cli-copy>Copy as CLI</button></div>
+        <div class="mt-2 flex items-center justify-between gap-2"><span class="text-[12px] text-muted">Includes the LocalEmu endpoint. Placeholders in &lt;angle brackets&gt; are still empty.</span><button type="button" class="btn btn-normal btn-sm" data-cli-copy>Copy as CLI</button></div>
       </div>`;
-    const btn = $<HTMLButtonElement>('button', wrap)!;
+    const btn = $<HTMLButtonElement>(':scope > button', wrap)!;
     const box = $(`#${id}`, wrap)!;
     const pre = $('[data-cli-text]', wrap)!;
-    const upd = () => { pre.textContent = fillTemplate(tpl, form); };
+    let mode: 'cli' | 'sdk' = 'cli';
+    const copyBtn = $<HTMLButtonElement>('[data-cli-copy]', wrap)!;
+    const upd = () => {
+      const cli = fillTemplate(tpl, form);
+      pre.textContent = mode === 'cli' ? cli : cliToSdk(cli, { account: meta('lemu-account', '') || undefined });
+      copyBtn.textContent = mode === 'cli' ? 'Copy as CLI' : 'Copy SDK code';
+      pre.dataset.mode = mode;
+    };
+    $$<HTMLButtonElement>('[data-cli-tab]', wrap).forEach((tb) => tb.addEventListener('click', () => {
+      mode = tb.dataset.cliTab as 'cli' | 'sdk';
+      $$('[data-cli-tab]', wrap).forEach((x) => x.setAttribute('aria-selected', String(x === tb)));
+      upd();
+    }));
     btn.addEventListener('click', () => { upd(); const o = box.hidden; box.hidden = !o; btn.setAttribute('aria-expanded', String(o)); });
     $('[data-cli-copy]', wrap)!.addEventListener('click', async (e) => {
       const b = e.currentTarget as HTMLElement;
       upd(); await copyText(pre.textContent ?? '');
-      const t = b.textContent; b.textContent = 'Copied'; setTimeout(() => { b.textContent = t; }, 1200);
+      b.textContent = 'Copied'; setTimeout(upd, 1200);
     });
     form?.addEventListener('input', () => { if (!box.hidden) upd(); });
     form?.addEventListener('change', () => { if (!box.hidden) upd(); });

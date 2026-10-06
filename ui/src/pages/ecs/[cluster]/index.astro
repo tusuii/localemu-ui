@@ -4,9 +4,10 @@ import PageHeader from '../../../components/PageHeader.astro';
 import Tabs from '../../../components/Tabs.astro';
 import DataTable from '../../../components/DataTable.astro';
 import FormField from '../../../components/FormField.astro';
+import TagsPanel from '../../../components/TagsPanel.astro';
 import {
   DescribeClustersCommand, ListServicesCommand, DescribeServicesCommand, CreateServiceCommand, UpdateServiceCommand, DeleteServiceCommand,
-  ListTasksCommand, DescribeTasksCommand, RunTaskCommand, StopTaskCommand, ListContainerInstancesCommand, DescribeContainerInstancesCommand, DeleteClusterCommand,
+  ListTasksCommand, DescribeTasksCommand, RunTaskCommand, StopTaskCommand, ListContainerInstancesCommand, ListTagsForResourceCommand, TagResourceCommand, UntagResourceCommand, DescribeContainerInstancesCommand, DeleteClusterCommand,
 } from '@aws-sdk/client-ecs';
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
@@ -15,18 +16,21 @@ import { bulk } from '../../../lib/bulk';
 import { UserError, load } from '../../../lib/errors';
 import { dateTime, num } from '../../../lib/format';
 import { badge, mono, stateStatus } from '../../../lib/html';
-import { awsvpc, lastSeg, listTaskDefinitions, networkChoices, tdShort } from '../../../lib/ecs';
+import { guard } from '../../../lib/unsupported';
+import { awsvpc, ecsTagRows, lastSeg, listTaskDefinitions, networkChoices, tdShort } from '../../../lib/ecs';
 
 const name = Astro.params.cluster!;
 const ctx = getCtx(Astro.cookies);
 const ecs = aws.ecs(ctx);
 const tabId = Astro.url.searchParams.get('tab') ?? '';
-const tab = ['services', 'tasks', 'infrastructure'].includes(tabId) ? tabId : 'services';
+const tab = ['services', 'tasks', 'infrastructure', 'tags'].includes(tabId) ? tabId : 'services';
 const to = (t: string) => `${Astro.url.pathname}?tab=${t}`;
 
 const cl = await load(async () => (await ecs.send(new DescribeClustersCommand({ clusters: [name], include: ['STATISTICS'] }))).clusters?.[0]);
 const cluster = cl.data;
 if (!cl.error && (!cluster || cluster.status === 'INACTIVE')) return new Response(`Cluster "${name}" does not exist`, { status: 404 });
+
+const clusterArn = cluster?.clusterArn ?? `arn:aws:ecs:${ctx.region}:${ctx.account}:cluster/${name}`;
 
 async function network(f: FormData, launch: string) {
   if (launch !== 'FARGATE') return undefined;
@@ -49,6 +53,14 @@ const post = await handlePost(Astro, {
     const svc = required(f, 'service', 'Service');
     await ecs.send(new UpdateServiceCommand({ cluster: name, service: svc, desiredCount: intOf(f, 'desired', 'Desired count'), taskDefinition: str(f, 'taskDefinition') || undefined }));
     return { message: `Service ${svc} updated.`, redirect: to('services') };
+  },
+  addTag: async (f) => {
+    await guard('TagResource', () => ecs.send(new TagResourceCommand({ resourceArn: clusterArn, tags: [{ key: required(f, 'key', 'Tag key'), value: str(f, 'value') }] })));
+    return { message: 'Tag added.', redirect: to('tags') };
+  },
+  removeTag: async (f) => {
+    const r = await bulk(strs(f, 'id'), { verb: 'Removed', noun: 'tag' }, (k) => guard('UntagResource', () => ecs.send(new UntagResourceCommand({ resourceArn: clusterArn, tagKeys: [k] }))));
+    return { ...r, redirect: to('tags') };
   },
   deleteService: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'service' }, (s) => ecs.send(new DeleteServiceCommand({ cluster: name, service: s, force: true }))),
   runTask: async (f) => {
@@ -93,11 +105,13 @@ const infra = tab === 'infrastructure' ? await load(async () => {
   return (d.containerInstances ?? []).map((c) => ({ id: lastSeg(c.containerInstanceArn), ec2: c.ec2InstanceId, status: c.status, running: c.runningTasksCount ?? 0, agent: c.agentConnected ? 'Connected' : 'Disconnected' }));
 }) : null;
 
+const tags = tab === 'tags' ? await load(async () => ecsTagRows((await guard('ListTagsForResource', () => ecs.send(new ListTagsForResourceCommand({ resourceArn: clusterArn })))).tags)) : null;
+
 const tdArns = tab === 'services' || tab === 'tasks' ? await load(async () => (await listTaskDefinitions(ctx)).map(tdShort).sort()) : null;
 const tds = tdArns?.data ?? [];
 const net = tab === 'services' || tab === 'tasks' ? await networkChoices(ctx) : { subnets: [], groups: [] };
 const v = post.values;
-const tabs = [{ id: 'services', label: 'Services' }, { id: 'tasks', label: 'Tasks' }, { id: 'infrastructure', label: 'Infrastructure' }];
+const tabs = [{ id: 'services', label: 'Services' }, { id: 'tasks', label: 'Tasks' }, { id: 'infrastructure', label: 'Infrastructure' }, { id: 'tags', label: 'Tags' }];
 ---
 <Console title={name} crumbs={[{ label: 'Clusters', href: '/ecs' }, { label: name }]} error={post.error ?? cl.error}>
   <PageHeader title={name} badge={cluster?.status}>
@@ -118,7 +132,7 @@ const tabs = [{ id: 'services', label: 'Services' }, { id: 'tasks', label: 'Task
         <DataTable title="Services" bare id="services" select="multi" nameKey="id" rows={services?.data ?? []} error={services?.error} pageSize={15} filter="Search services"
           emptyTitle="No services" emptyText="Create a service to keep a desired number of tasks running."
           columns={[
-            { key: 'id', label: 'Service name' }, { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
+            { key: 'id', label: 'Service name', href: (r) => `/ecs/${encodeURIComponent(name)}/services/${encodeURIComponent(r.id)}` }, { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
             { key: 'td', label: 'Task definition', mono: true }, { key: 'launch', label: 'Launch type' },
             { key: 'desired', label: 'Desired' }, { key: 'running', label: 'Running' }, { key: 'pending', label: 'Pending' },
             { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created) },
@@ -182,6 +196,8 @@ const tabs = [{ id: 'services', label: 'Services' }, { id: 'tasks', label: 'Task
         </form>
       </div>
     )}
+
+    {tab === 'tags' && <div class="p-5"><TagsPanel tags={tags?.data ?? []} error={tags?.error} /></div>}
 
     {tab === 'infrastructure' && (
       <div class="p-5">

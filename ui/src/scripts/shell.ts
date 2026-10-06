@@ -17,6 +17,8 @@ if (panel) {
   try { history = JSON.parse(store.get('lemu.shell.history') ?? '[]'); } catch { /* ignore */ }
   let hpos = history.length;
   let busy = false;
+  let done = 0; // completed commands, exposed as data-done so tests can wait without timing races
+  out.dataset.done = '0';
 
   const layout = () => {
     panel.hidden = !open;
@@ -51,15 +53,15 @@ if (panel) {
 
   async function run(line: string) {
     print(`$ ${line}`, 'cmd');
-    if (line === 'clear' || line === 'cls') { out.textContent = ''; return; }
+    if (line === 'clear' || line === 'cls') { out.textContent = ''; out.dataset.done = String(++done); return; }
     busy = true; input.disabled = true;
     try {
       const r = await post({ command: line });
       if (r.stdout) print(r.stdout);
-      if (r.stderr) print(r.stderr, 'err');
+      if (r.stderr) print(r.stderr, r.code === 0 ? 'dim' : 'err');
     } catch (e) {
       print('Request failed: ' + (e as Error).message, 'err');
-    } finally { busy = false; input.disabled = false; input.focus(); }
+    } finally { busy = false; input.disabled = false; input.focus(); out.dataset.done = String(++done); }
   }
 
   form.addEventListener('submit', (e) => {

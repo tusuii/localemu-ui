@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { S3Client, CreateBucketCommand, PutObjectCommand, DeleteBucketCommand, GetBucketLifecycleConfigurationCommand, GetBucketNotificationConfigurationCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutBucketVersioningCommand, GetBucketReplicationCommand, GetBucketLoggingCommand, CreateBucketCommand, PutObjectCommand, DeleteBucketCommand, GetBucketLifecycleConfigurationCommand, GetBucketNotificationConfigurationCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { SQSClient, CreateQueueCommand, DeleteQueueCommand, GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
 import { unzipSync } from 'fflate';
 import { start, BASE } from './lib.mjs';
@@ -158,9 +158,66 @@ try {
   await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd-ok]')]);
   const left = (await s3.send(new ListObjectsV2Command({ Bucket: B, Prefix: 's' }))).KeyCount + (await s3.send(new ListObjectsV2Command({ Bucket: B, Prefix: 'other' }))).KeyCount;
   ok(left === 0, 'bulk delete removed folder recursively and plain object');
+
+  // ---- replication + server access logging editors ----
+  const D = 'ui-adv-bucket-dst';
+  try { await s3.send(new CreateBucketCommand({ Bucket: D })); } catch { /* exists */ }
+  const page = async () => (await p.innerText('body')).replace(/\s+/g, ' ');
+  const unsupported = (txt) => /does not support/i.test(txt);
+  await t.go(`/s3/${B}?tab=management`);
+  await p.fill('#rep-id', 'r1'); await p.fill('#rep-dest', D); await p.fill('#rep-prefix', 'logs/');
+  await t.submit('#rep-form button[type=submit]');
+  ok((await page()).includes('Replication requires versioning'), 'replication without versioning explains the requirement');
+  for (const b of [B, D]) await s3.send(new PutBucketVersioningCommand({ Bucket: b, VersioningConfiguration: { Status: 'Enabled' } }));
+  await t.go(`/s3/${B}?tab=management`);
+  await p.fill('#rep-id', 'r1'); await p.fill('#rep-dest', D); await p.fill('#rep-prefix', 'logs/'); await p.selectOption('#rep-class', 'STANDARD_IA');
+  await t.submit('#rep-form button[type=submit]');
+  const repTxt = await page();
+  if (unsupported(repTxt)) {
+    ok(true, 'replication reported as unsupported by LocalEmu with a clear message');
+  } else {
+    ok((await t.flash()).includes('Replication rule "r1" saved'), 'replication rule saved: ' + await t.flash());
+    const rc = (await s3.send(new GetBucketReplicationCommand({ Bucket: B }))).ReplicationConfiguration;
+    ok(rc.Rules.length === 1 && rc.Rules[0].Destination.Bucket.endsWith(D) && rc.Rules[0].Destination.StorageClass === 'STANDARD_IA', 'replication rule persisted: ' + JSON.stringify(rc.Rules[0]));
+    ok((await p.locator('tr[data-rep-rule="r1"]').innerText()).includes('logs/'), 'replication rule listed with prefix');
+    await p.click('tr[data-rep-rule="r1"] a');
+    await p.waitForLoadState('load');
+    ok((await p.inputValue('#rep-prefix')) === 'logs/' && (await p.inputValue('#rep-dest')) === D, 'replication edit form prefilled');
+    await p.fill('#rep-prefix', 'data/');
+    await t.submit('#rep-form button[type=submit]');
+    const rc2 = (await s3.send(new GetBucketReplicationCommand({ Bucket: B }))).ReplicationConfiguration;
+    ok(rc2.Rules.length === 1 && rc2.Rules[0].Filter?.Prefix === 'data/', 'replication rule edited in place');
+    await t.submit('tr[data-rep-rule="r1"] button[value=repToggle]');
+    const rc3 = (await s3.send(new GetBucketReplicationCommand({ Bucket: B }))).ReplicationConfiguration;
+    ok(rc3.Rules[0].Status === 'Disabled', 'replication rule disabled');
+    await p.click('tr[data-rep-rule="r1"] button[value=repDelete]');
+    await p.waitForSelector('#confirm-dialog[open]');
+    await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd-ok]')]);
+    const gone = await s3.send(new GetBucketReplicationCommand({ Bucket: B })).then((r) => !r.ReplicationConfiguration?.Rules?.length, () => true);
+    ok(gone && (await p.locator('tr[data-rep-rule]').count()) === 0, 'replication rule deleted');
+  }
+  await t.go(`/s3/${B}?tab=management`);
+  await p.fill('#log-target', D); await p.fill('#log-prefix', 'access/');
+  await t.submit('button[value=logSave]');
+  if (unsupported(await page())) {
+    ok(true, 'server access logging reported as unsupported by LocalEmu with a clear message');
+  } else {
+    const lg = (await s3.send(new GetBucketLoggingCommand({ Bucket: B }))).LoggingEnabled;
+    ok(lg?.TargetBucket === D && lg?.TargetPrefix === 'access/', 'logging enabled: ' + JSON.stringify(lg));
+    ok((await p.innerText('[data-logging-state]')).includes(`s3://${D}/access/`), 'logging state shown');
+    await p.click('button[value=logDisable]');
+    await p.waitForSelector('#confirm-dialog[open]');
+    await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd-ok]')]);
+    ok(!(await s3.send(new GetBucketLoggingCommand({ Bucket: B }))).LoggingEnabled, 'logging disabled');
+  }
+  await t.go(`/s3/${B}?tab=management`);
+  await p.fill('#log-target', 'no-such-bucket-zzz');
+  await t.submit('button[value=logSave]');
+  ok((await page()).includes('does not exist'), 'logging to a missing bucket gives a clear error');
 } finally {
   // cleanup
   try {
+    await s3.send(new DeleteBucketCommand({ Bucket: 'ui-adv-bucket-dst' })).catch(() => {});
     let token;
     do {
       const r = await s3.send(new ListObjectsV2Command({ Bucket: B, ContinuationToken: token }));

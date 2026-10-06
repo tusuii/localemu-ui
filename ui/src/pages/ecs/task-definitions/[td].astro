@@ -5,12 +5,15 @@ import Card from '../../../components/Card.astro';
 import Details from '../../../components/Details.astro';
 import DataTable from '../../../components/DataTable.astro';
 import JsonView from '../../../components/JsonView.astro';
-import { DescribeTaskDefinitionCommand, DeregisterTaskDefinitionCommand } from '@aws-sdk/client-ecs';
+import TagsPanel from '../../../components/TagsPanel.astro';
+import { DescribeTaskDefinitionCommand, DeregisterTaskDefinitionCommand, ListTagsForResourceCommand, TagResourceCommand, UntagResourceCommand } from '@aws-sdk/client-ecs';
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
-import { handlePost } from '../../../lib/action';
+import { handlePost, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { guard } from '../../../lib/unsupported';
 import { load } from '../../../lib/errors';
-import { cpuMem } from '../../../lib/ecs';
+import { cpuMem, ecsTagRows } from '../../../lib/ecs';
 import { copyable, stateStatus } from '../../../lib/html';
 
 const id = decodeURIComponent(Astro.params.td!);
@@ -20,8 +23,14 @@ const ecs = aws.ecs(ctx);
 const res = await load(async () => (await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: id }))).taskDefinition!);
 if (res.error && /Unable to describe|not found|ClientException/i.test(res.error)) return new Response(`Task definition "${id}" does not exist`, { status: 404 });
 const td = res.data;
+const tdArn = td?.taskDefinitionArn ?? '';
 
 const post = await handlePost(Astro, {
+  addTag: async (f) => {
+    await guard('TagResource', () => ecs.send(new TagResourceCommand({ resourceArn: tdArn, tags: [{ key: required(f, 'key', 'Tag key'), value: str(f, 'value') }] })));
+    return 'Tag added.';
+  },
+  removeTag: (f) => bulk(strs(f, 'id'), { verb: 'Removed', noun: 'tag' }, (k) => guard('UntagResource', () => ecs.send(new UntagResourceCommand({ resourceArn: tdArn, tagKeys: [k] })))),
   deregister: async () => {
     await ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: `${td!.family}:${td!.revision}` }));
     return { message: `Deregistered ${td!.family}:${td!.revision}.`, redirect: '/ecs/task-definitions' };
@@ -29,6 +38,7 @@ const post = await handlePost(Astro, {
 });
 if (post.response) return post.response;
 
+const tags = td ? await load(async () => ecsTagRows((await guard('ListTagsForResource', () => ecs.send(new ListTagsForResourceCommand({ resourceArn: tdArn })))).tags)) : null;
 const title = td ? `${td.family}:${td.revision}` : id;
 const containers = (td?.containerDefinitions ?? []).map((c) => ({
   name: c.name, image: c.image, memory: c.memory ? `${c.memory} MiB` : '-', cpu: c.cpu ?? 0,
@@ -56,6 +66,7 @@ const containers = (td?.containerDefinitions ?? []).map((c) => ({
           { key: 'name', label: 'Name' }, { key: 'image', label: 'Image', mono: true }, { key: 'memory', label: 'Memory' }, { key: 'cpu', label: 'CPU' },
           { key: 'ports', label: 'Ports', mono: true }, { key: 'env', label: 'Environment', mono: true }, { key: 'essential', label: 'Essential', render: (r) => (r.essential ? 'Yes' : 'No') },
         ]} />
+      <Card title="Tags"><TagsPanel tags={tags?.data ?? []} error={tags?.error} /></Card>
       <Card title="JSON"><JsonView value={td} maxHeight="420px" /></Card>
     </div>
   )}

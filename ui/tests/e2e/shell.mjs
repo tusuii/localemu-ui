@@ -8,12 +8,14 @@ t.ok(await p.locator('#shell-panel').isHidden(), 'shell hidden initially');
 await p.keyboard.press('Alt+c');
 await p.waitForSelector('#shell-panel:not([hidden])');
 t.ok(await p.evaluate(() => document.activeElement?.id === 'shell-input'), 'input focused on open');
+// Each finished command bumps data-done on the output element, so waiting on it has no timing race
+// (no matter how many lines a command prints, or whether it prints none).
 const run = async (cmd) => {
-  const n = await p.locator('[data-shell-out] > div').count();
+  const n = Number(await p.locator('[data-shell-out]').getAttribute('data-done'));
   await p.fill('#shell-input', cmd); await p.keyboard.press('Enter');
-  await p.waitForFunction((n0) => document.querySelectorAll('[data-shell-out] > div').length > n0 && !document.querySelector('#shell-input').disabled, n);
-  return p.evaluate(() => [...document.querySelectorAll('[data-shell-out] > div')].slice(-1)[0]);
+  await p.waitForFunction((n0) => Number(document.querySelector('[data-shell-out]').dataset.done) > n0 && !document.querySelector('#shell-input').disabled, n);
 };
+const outText = async () => p.locator('[data-shell-out]').innerText();
 const lastText = async () => p.locator('[data-shell-out] > div').last().innerText();
 
 await run('aws s3 mb s3://shell-e2e'); t.ok((await lastText()).includes('make_bucket: shell-e2e'), 's3 mb');
@@ -27,6 +29,21 @@ await run('aws sqs list-queues'); t.ok((await lastText()).includes('shell-q'), '
 await run('aws dynamodb list-tables --region us-east-1'); t.ok((await lastText()).includes('TableNames'), 'dynamodb list-tables');
 await run('aws sqs delete-queue --queue-url http://localhost:4566/000000000000/shell-q');
 await run('aws s3 rb s3://shell-e2e --force'); t.ok((await lastText()).includes('remove_bucket'), 's3 rb --force');
+
+// auto-pagination (default on, --no-paginate off), cap with a note, richer --query
+for (const i of [1, 2, 3]) await run(`aws sqs create-queue --queue-name shell-pg-${i}`);
+const pg = '--queue-name-prefix shell-pg- --page-size 1';
+await run(`aws sqs list-queues ${pg} --no-paginate`);
+t.ok((await lastText()).includes('shell-pg-1') && !(await lastText()).includes('shell-pg-2') && (await lastText()).includes('NextToken'), '--no-paginate returns one page with its token');
+await run(`aws sqs list-queues ${pg} --query "length(QueueUrls)"`); t.ok((await lastText()).trim() === '3', 'auto-pagination follows NextToken across pages');
+await run(`aws sqs list-queues ${pg} --max-items 2`);
+t.ok((await outText()).includes('stopped after 2 items'), 'truncation is noted when the cap is hit');
+await run(`aws sqs list-queues ${pg} --query "QueueUrls[?contains(@, 'pg-2')] | [0]" --output text`); t.ok((await lastText()).includes('shell-pg-2'), 'query: [?contains()]');
+await run(`aws sqs list-queues ${pg} --query "sort_by(QueueUrls[].{u: @}, &u)[-1].u" --output text`); t.ok((await lastText()).includes('shell-pg-3'), 'query: sort_by on a projection');
+await run('aws sqs get-queue-attributes --queue-url http://localhost:4566/000000000000/shell-pg-1 --attribute-names All --query "length(keys(Attributes)) > `3`"'); t.ok((await lastText()).trim() === 'true', 'query: length(keys())');
+await run(`aws sqs list-queues ${pg} --query "QueueUrls[?@ != 'x'] | length(@)"`); t.ok((await lastText()).trim() === '3', 'query: != filter');
+await run('aws sqs list-queues --query "nope("'); t.ok((await p.locator('[data-shell-out] .err').last().innerText()).includes('Unsupported --query'), 'bad query is a red error');
+for (const i of [1, 2, 3]) await run(`aws sqs delete-queue --queue-url http://localhost:4566/000000000000/shell-pg-${i}`);
 
 // errors are red; security
 await run('aws sqs nope'); t.ok(await p.locator('[data-shell-out] .err').last().innerText().then((s) => s.includes('Invalid choice')), 'unknown op is an error (red)');

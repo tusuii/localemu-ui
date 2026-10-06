@@ -180,6 +180,7 @@ describe('bulk', () => {
   it('summarises full success', async () => {
     expect((await bulk(['a', 'b'], { ...o, tail: 'Bye.' }, async () => 1)).message).toBe('Deleted 2 queues. Bye.');
     expect((await bulk(['a'], o, async () => 1)).message).toBe('Deleted 1 queue.');
+    expect((await bulk(['a'], o, async () => 1)).type).toBeUndefined();
   });
   it('reports partial failure with detail and keeps going', async () => {
     const seen: string[] = [];
@@ -187,6 +188,7 @@ describe('bulk', () => {
     expect(seen).toEqual(['a', 'b', 'c']);
     expect(r.message).toBe('Deleted 2 of 3 (1 failed: locked)');
     expect(r.detail).toBe('Q:b: locked');
+    expect(r.type).toBe('warning');
   });
   it('throws when everything fails, dedupes reasons', async () => {
     await expect(bulk(['a', 'b'], o, async () => { throw new Error('nope'); })).rejects.toThrow('Deleted 0 of 2 (2 failed: nope)');

@@ -5,20 +5,30 @@ import Card from '../../../../components/Card.astro';
 import Details from '../../../../components/Details.astro';
 import DataTable from '../../../../components/DataTable.astro';
 import Icon from '../../../../components/Icon.astro';
-import { GetJobCommand, GetJobRunsCommand, StartJobRunCommand, BatchStopJobRunCommand, DeleteJobCommand } from '@aws-sdk/client-glue';
+import FormField from '../../../../components/FormField.astro';
+import { GetJobCommand, GetJobRunsCommand, StartJobRunCommand, BatchStopJobRunCommand, DeleteJobCommand, UpdateJobCommand } from '@aws-sdk/client-glue';
 import { aws } from '../../../../lib/aws';
 import { getCtx } from '../../../../lib/context';
-import { handlePost, strs } from '../../../../lib/action';
+import { handlePost, required, str, strs } from '../../../../lib/action';
 import { UserError, load } from '../../../../lib/errors';
 import { dateTime, duration } from '../../../../lib/format';
 import { copyable, mono, stateStatus } from '../../../../lib/html';
-import { isNoSuch, roleName } from '../../../../lib/glue';
+import { guard } from '../../../../lib/unsupported';
+import { isNoSuch, jobUpdateFrom, pairsText, parsePairs, roleName } from '../../../../lib/glue';
 
 const name = Astro.params.name!;
 const ctx = getCtx(Astro.cookies);
 const glue = aws.glue(ctx);
 
 const post = await handlePost(Astro, {
+  update: async (f) => {
+    const script = required(f, 'script', 'Script location');
+    if (!script.startsWith('s3://')) throw new UserError('The script location must start with s3://.');
+    const cur = (await glue.send(new GetJobCommand({ JobName: name }))).Job!;
+    const update = jobUpdateFrom(cur, { role: required(f, 'role', 'IAM role'), script, description: str(f, 'description'), args: parsePairs(str(f, 'args'), 'Default arguments') });
+    await guard('UpdateJob', () => glue.send(new UpdateJobCommand({ JobName: name, JobUpdate: update })));
+    return { message: `Job ${name} updated.`, redirect: Astro.url.pathname };
+  },
   run: async () => { const r = await glue.send(new StartJobRunCommand({ JobName: name })); return { message: 'Job run started.', detail: `Run ID: ${r.JobRunId}` }; },
   stop: async (f) => {
     const ids = strs(f, 'id');
@@ -66,6 +76,16 @@ const runs = await load(async () => {
         ]}>
         <button slot="actions" class="btn btn-normal" name="intent" value="stop" data-min="1" data-confirm="Selected runs that are still running will be stopped." data-confirm-title="Stop runs?" data-confirm-ok="Stop run">Stop run</button>
       </DataTable>
+      <Card title="Edit job" description="Changes the script, IAM role, description and default arguments. Capacity settings are kept.">
+        <form method="post" class="max-w-3xl space-y-1">
+          <input type="hidden" name="intent" value="update" />
+          <FormField label="Script location" for="e-script"><input id="e-script" name="script" class="input" required value={post.values.script ?? job.Command?.ScriptLocation ?? ''} /></FormField>
+          <FormField label="IAM role" for="e-role"><input id="e-role" name="role" class="input" required autocomplete="off" value={post.values.role ?? job.Role ?? ''} /></FormField>
+          <FormField label="Description" for="e-description" optional><input id="e-description" name="description" class="input" value={post.values.description ?? job.Description ?? ''} /></FormField>
+          <FormField label="Default arguments" for="e-args" optional hint="One per line: --key=value."><textarea id="e-args" name="args" class="textarea code-area" rows="5">{post.values.args ?? pairsText(job.DefaultArguments)}</textarea></FormField>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </form>
+      </Card>
       <Card title="Delete job">
         <form method="post"><input type="hidden" name="intent" value="delete" />
           <button class="btn btn-danger" data-confirm="The job and its run history will be permanently deleted." data-confirm-title="Delete job?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete job"><Icon name="trash-2" size={16} /> Delete job</button></form>

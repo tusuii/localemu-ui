@@ -1,0 +1,240 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import DataTable from '../../components/DataTable.astro';
+import FormField from '../../components/FormField.astro';
+import Icon from '../../components/Icon.astro';
+import {
+  GetApiKeysCommand, GetApiKeyCommand, CreateApiKeyCommand, DeleteApiKeyCommand, UpdateApiKeyCommand,
+  GetUsagePlansCommand, CreateUsagePlanCommand, DeleteUsagePlanCommand, UpdateUsagePlanCommand,
+  GetUsagePlanKeysCommand, CreateUsagePlanKeyCommand, DeleteUsagePlanKeyCommand, GetRestApisCommand, GetStagesCommand,
+  type UsagePlan,
+} from '@aws-sdk/client-api-gateway';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge, copyable } from '../../lib/html';
+import { USAGE_PERIODS } from '../../lib/apigateway';
+import { guard } from '../../lib/unsupported';
+
+const ctx = getCtx(Astro.cookies);
+const ag = aws.apigw(ctx);
+const tabId = Astro.url.searchParams.get('tab') ?? '';
+const tab = tabId === 'plans' ? 'plans' : 'keys';
+const to = (t: string) => `${Astro.url.pathname}?tab=${t}`;
+
+const setEnabled = (ids: string[], on: boolean) => bulk(ids, { verb: on ? 'Enabled' : 'Disabled', noun: 'API key' }, (k) =>
+  guard('UpdateApiKey', () => ag.send(new UpdateApiKeyCommand({ apiKey: k, patchOperations: [{ op: 'replace', path: '/enabled', value: on ? 'true' : 'false' }] }))));
+
+const post = await handlePost(Astro, {
+  createKey: async (f) => {
+    const name = required(f, 'name', 'Key name');
+    const value = str(f, 'value');
+    if (value && value.length < 20) throw new UserError('A custom key value must be 20 to 128 characters long.');
+    await guard('CreateApiKey', () => ag.send(new CreateApiKeyCommand({ name, description: str(f, 'description') || undefined, enabled: str(f, 'enabled') !== '0', value: value || undefined })));
+    return { message: `API key ${name} created.`, redirect: to('keys') };
+  },
+  deleteKey: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'API key' }, (k) => guard('DeleteApiKey', () => ag.send(new DeleteApiKeyCommand({ apiKey: k })))),
+  enableKey: (f) => setEnabled(strs(f, 'id'), true),
+  disableKey: (f) => setEnabled(strs(f, 'id'), false),
+  reveal: async (f) => {
+    const ids = strs(f, 'id');
+    if (ids.length !== 1) throw new UserError('Select exactly one API key to show its value.');
+    const r = await guard('GetApiKey', () => ag.send(new GetApiKeyCommand({ apiKey: ids[0], includeValue: true })));
+    return { stay: true, data: { id: r.id, name: r.name, value: r.value } };
+  },
+  createPlan: async (f) => {
+    const name = required(f, 'name', 'Usage plan name');
+    const rate = str(f, 'rate'), burst = str(f, 'burst');
+    const limit = intOf(f, 'quota', 'Quota');
+    const throttle = rate || burst ? { rateLimit: Number(rate || 0), burstLimit: intOf(f, 'burst', 'Burst limit') ?? 0 } : undefined;
+    if (throttle && Number.isNaN(throttle.rateLimit)) throw new UserError('Rate limit must be a number.');
+    await guard('CreateUsagePlan', () => ag.send(new CreateUsagePlanCommand({
+      name, description: str(f, 'description') || undefined, throttle,
+      quota: limit ? { limit, period: (str(f, 'period') || 'DAY') as 'DAY' } : undefined,
+    })));
+    return { message: `Usage plan ${name} created.`, redirect: to('plans') };
+  },
+  deletePlan: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'usage plan' }, (p) => guard('DeleteUsagePlan', () => ag.send(new DeleteUsagePlanCommand({ usagePlanId: p })))),
+  attachStage: async (f) => {
+    const plan = required(f, 'plan', 'Usage plan');
+    const stage = required(f, 'stage', 'API stage');
+    await guard('UpdateUsagePlan', () => ag.send(new UpdateUsagePlanCommand({ usagePlanId: plan, patchOperations: [{ op: 'add', path: '/apiStages', value: stage }] })));
+    return { message: `Stage ${stage} attached to the usage plan.`, redirect: to('plans') };
+  },
+  detachStage: (f) => bulk(strs(f, 'id'), { verb: 'Detached', noun: 'stage' }, (s) => {
+    const [plan, stage] = s.split('|');
+    return guard('UpdateUsagePlan', () => ag.send(new UpdateUsagePlanCommand({ usagePlanId: plan, patchOperations: [{ op: 'remove', path: '/apiStages', value: stage }] })));
+  }),
+  associate: async (f) => {
+    const plan = required(f, 'plan', 'Usage plan');
+    const key = required(f, 'key', 'API key');
+    await guard('CreateUsagePlanKey', () => ag.send(new CreateUsagePlanKeyCommand({ usagePlanId: plan, keyId: key, keyType: 'API_KEY' })));
+    return { message: 'API key associated with the usage plan.', redirect: to('plans') };
+  },
+  disassociate: (f) => bulk(strs(f, 'id'), { verb: 'Removed', noun: 'association' }, (s) => {
+    const [plan, key] = s.split('|');
+    return guard('DeleteUsagePlanKey', () => ag.send(new DeleteUsagePlanKeyCommand({ usagePlanId: plan, keyId: key })));
+  }),
+});
+if (post.response) return post.response;
+
+const revealed = post.result?.data as { id: string; name: string; value: string } | undefined;
+
+async function allKeys() {
+  const out = [];
+  let pos: string | undefined;
+  do {
+    const r = await ag.send(new GetApiKeysCommand({ limit: 500, position: pos }));
+    out.push(...(r.items ?? []));
+    pos = r.position;
+  } while (pos && out.length < 2000);
+  return out.map((k) => ({ id: k.id!, name: k.name ?? k.id!, enabled: !!k.enabled, description: k.description, created: k.createdDate, stages: (k.stageKeys ?? []).join(', ') }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const keys = await load(allKeys);
+const plans = tab === 'plans' ? await load(async () => {
+  const items: UsagePlan[] = [];
+  let pos: string | undefined;
+  do {
+    const r = await ag.send(new GetUsagePlansCommand({ limit: 500, position: pos }));
+    items.push(...(r.items ?? []));
+    pos = r.position;
+  } while (pos && items.length < 500);
+  const keyNames = new Map((keys.data ?? []).map((k) => [k.id, k.name]));
+  const rows = [], stageRows = [], assoc = [];
+  for (const p of items) {
+    let planKeys: { id?: string; name?: string }[] = [];
+    try { planKeys = (await ag.send(new GetUsagePlanKeysCommand({ usagePlanId: p.id!, limit: 500 }))).items ?? []; } catch { /* optional */ }
+    rows.push({
+      id: p.id!, name: p.name ?? p.id!, description: p.description,
+      throttle: p.throttle ? `${p.throttle.rateLimit ?? 0} req/s, burst ${p.throttle.burstLimit ?? 0}` : 'None',
+      quota: p.quota?.limit ? `${p.quota.limit} / ${(p.quota.period ?? 'DAY').toLowerCase()}` : 'None',
+      stages: (p.apiStages ?? []).length, keys: planKeys.length,
+    });
+    for (const s of p.apiStages ?? []) stageRows.push({ id: `${p.id}|${s.apiId}:${s.stage}`, plan: p.name ?? p.id, api: s.apiId, stage: s.stage });
+    for (const k of planKeys) assoc.push({ id: `${p.id}|${k.id}`, plan: p.name ?? p.id, key: k.name ?? keyNames.get(k.id!) ?? k.id, keyId: k.id });
+  }
+  return { rows: rows.sort((a, b) => a.name.localeCompare(b.name)), stageRows, assoc };
+}) : null;
+
+// REST API stages that can be attached to a plan.
+const stageChoices = tab === 'plans' ? await load(async () => {
+  const apis = (await ag.send(new GetRestApisCommand({ limit: 100 }))).items ?? [];
+  const out: { value: string; label: string }[] = [];
+  for (const a of apis.slice(0, 25)) {
+    try { for (const s of (await ag.send(new GetStagesCommand({ restApiId: a.id! }))).item ?? []) out.push({ value: `${a.id}:${s.stageName}`, label: `${a.name} (${a.id}) / ${s.stageName}` }); } catch { /* ignore */ }
+  }
+  return out;
+}) : null;
+
+const planOpts = plans?.data?.rows ?? [];
+const keyOpts = keys.data ?? [];
+const v = post.values;
+const tabs = [{ id: 'keys', label: 'API keys' }, { id: 'plans', label: 'Usage plans' }];
+---
+<Console title="API keys" crumbs={[{ label: 'APIs', href: '/apigateway' }, { label: 'API keys and usage plans' }]} error={post.error}>
+  <PageHeader title="API keys and usage plans" description="API keys identify callers of REST APIs; usage plans set throttling and quota for the stages and keys attached to them." />
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'keys' && (
+      <div class="space-y-6 p-5">
+        {revealed && (
+          <div class="card p-4" id="key-reveal">
+            <div class="kv-label">Value of {revealed.name}</div>
+            <pre class="code-block mt-2" id="key-value">{revealed.value}</pre>
+            <div class="mt-2 flex items-center gap-3 text-muted"><button type="button" class="btn btn-normal btn-sm" data-copy={revealed.value}><Icon name="copy" size={14} /> Copy</button><a href={to('keys')}>Hide</a></div>
+          </div>
+        )}
+        <DataTable title="API keys" rows={keyOpts} error={keys.error} bare select="multi" id="keys" nameKey="name" pageSize={15} filter="Search API keys"
+          emptyTitle="No API keys" emptyText="Create a key and associate it with a usage plan."
+          columns={[
+            { key: 'name', label: 'Name' }, { key: 'id', label: 'Key ID', mono: true },
+            { key: 'enabled', label: 'Status', render: (r) => badge(r.enabled ? 'Enabled' : 'Disabled', r.enabled ? 'green' : undefined) },
+            { key: 'value', label: 'API key', render: () => '••••••••' },
+            { key: 'description', label: 'Description' },
+            { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+          ]}>
+          <Fragment slot="actions">
+            <button class="btn btn-normal" name="intent" value="reveal" data-min="1" data-max="1"><Icon name="eye" size={16} /> Show value</button>
+            <button class="btn btn-normal" name="intent" value="enableKey" data-min="1">Enable</button>
+            <button class="btn btn-normal" name="intent" value="disableKey" data-min="1">Disable</button>
+            <button class="btn btn-normal" name="intent" value="deleteKey" data-min="1" data-confirm="The selected API keys will be deleted. Callers using them will be rejected." data-confirm-title="Delete API keys?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+          </Fragment>
+        </DataTable>
+        <form method="post" class="max-w-3xl space-y-1 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="createKey" />
+          <h3 class="card-title mb-3">Create API key</h3>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <FormField label="Name" for="k-name"><input id="k-name" name="name" class="input" required autocomplete="off" value={v.name ?? ''} /></FormField>
+            <FormField label="Description" for="k-desc" optional><input id="k-desc" name="description" class="input" value={v.description ?? ''} /></FormField>
+            <FormField label="Custom value" for="k-value" optional hint="20 to 128 characters. Leave blank to generate one."><input id="k-value" name="value" class="input" autocomplete="off" value={v.value ?? ''} /></FormField>
+            <label class="mt-7 flex items-center gap-2"><input type="checkbox" class="checkbox" name="enabled" value="1" checked /> Enabled</label>
+          </div>
+          <button class="btn btn-primary" type="submit">Create API key</button>
+        </form>
+      </div>
+    )}
+
+    {tab === 'plans' && (
+      <div class="space-y-6 p-5">
+        <DataTable title="Usage plans" rows={planOpts} error={plans?.error} bare select="multi" id="plans" nameKey="name" pageSize={15} filter="Search usage plans"
+          emptyTitle="No usage plans" emptyText="Create a usage plan to throttle and meter API keys."
+          columns={[
+            { key: 'name', label: 'Name' }, { key: 'id', label: 'Plan ID', mono: true }, { key: 'throttle', label: 'Throttle' }, { key: 'quota', label: 'Quota' },
+            { key: 'stages', label: 'Stages' }, { key: 'keys', label: 'Keys' }, { key: 'description', label: 'Description' },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deletePlan" data-min="1" data-confirm="The selected usage plans will be deleted." data-confirm-title="Delete usage plans?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        <DataTable title="Attached stages" rows={plans?.data?.stageRows ?? []} bare select="multi" id="plan-stages" nameKey="stage" pageSize={10} filter={false}
+          emptyTitle="No stages attached" emptyText="Attach a deployed REST API stage to a usage plan below."
+          columns={[{ key: 'plan', label: 'Usage plan' }, { key: 'api', label: 'API ID', mono: true }, { key: 'stage', label: 'Stage', render: (r) => badge(r.stage, 'green') }]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="detachStage" data-min="1" data-confirm="The selected stages will be detached from their usage plans." data-confirm-title="Detach stages?" data-confirm-ok="Detach">Detach</button>
+        </DataTable>
+
+        <DataTable title="Associated API keys" rows={plans?.data?.assoc ?? []} bare select="multi" id="plan-keys" nameKey="key" pageSize={10} filter={false}
+          emptyTitle="No keys associated" emptyText="Associate an API key with a usage plan below."
+          columns={[{ key: 'plan', label: 'Usage plan' }, { key: 'key', label: 'API key' }, { key: 'keyId', label: 'Key ID', mono: true }]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="disassociate" data-min="1" data-confirm="The selected keys will be removed from their usage plans." data-confirm-title="Remove associations?" data-confirm-ok="Remove">Remove</button>
+        </DataTable>
+
+        <div class="grid gap-6 border-t border-line pt-5 xl:grid-cols-3">
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="createPlan" />
+            <h3 class="card-title mb-3">Create usage plan</h3>
+            <FormField label="Name" for="p-name"><input id="p-name" name="name" class="input" required autocomplete="off" value={v.name ?? ''} /></FormField>
+            <FormField label="Description" for="p-desc" optional><input id="p-desc" name="description" class="input" /></FormField>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <FormField label="Rate (requests/s)" for="p-rate" optional><input id="p-rate" name="rate" type="number" min="0" step="any" class="input" /></FormField>
+              <FormField label="Burst" for="p-burst" optional><input id="p-burst" name="burst" type="number" min="0" class="input" /></FormField>
+              <FormField label="Quota (requests)" for="p-quota" optional><input id="p-quota" name="quota" type="number" min="1" class="input" /></FormField>
+              <FormField label="Per" for="p-period"><select id="p-period" name="period" class="select">{USAGE_PERIODS.map((x) => <option value={x}>{x.toLowerCase()}</option>)}</select></FormField>
+            </div>
+            <button class="btn btn-primary" type="submit">Create usage plan</button>
+          </form>
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="attachStage" />
+            <h3 class="card-title mb-3">Attach stage</h3>
+            <FormField label="Usage plan" for="a-plan"><select id="a-plan" name="plan" class="select">{planOpts.map((p) => <option value={p.id}>{p.name}</option>)}</select></FormField>
+            <FormField label="API stage" for="a-stage" hint="Deployed REST API stages."><select id="a-stage" name="stage" class="select">{(stageChoices?.data ?? []).map((s) => <option value={s.value}>{s.label}</option>)}</select></FormField>
+            <button class="btn btn-primary" type="submit" disabled={!planOpts.length || !(stageChoices?.data ?? []).length}>Attach stage</button>
+          </form>
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="associate" />
+            <h3 class="card-title mb-3">Associate API key</h3>
+            <FormField label="Usage plan" for="k-plan"><select id="k-plan" name="plan" class="select">{planOpts.map((p) => <option value={p.id}>{p.name}</option>)}</select></FormField>
+            <FormField label="API key" for="k-key"><select id="k-key" name="key" class="select">{keyOpts.map((k) => <option value={k.id}>{k.name}</option>)}</select></FormField>
+            <button class="btn btn-primary" type="submit" disabled={!planOpts.length || !keyOpts.length}>Associate key</button>
+          </form>
+        </div>
+      </div>
+    )}
+  </div>
+</Console>

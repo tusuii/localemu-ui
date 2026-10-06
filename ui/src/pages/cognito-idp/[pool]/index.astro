@@ -11,14 +11,18 @@ import {
   AdminEnableUserCommand, AdminDisableUserCommand, AdminResetUserPasswordCommand, AdminDeleteUserCommand, AdminSetUserPasswordCommand,
   ListGroupsCommand, CreateGroupCommand, DeleteGroupCommand, ListUsersInGroupCommand, AdminAddUserToGroupCommand, AdminRemoveUserFromGroupCommand,
   ListUserPoolClientsCommand, DescribeUserPoolClientCommand, CreateUserPoolClientCommand, DeleteUserPoolClientCommand,
+  UpdateUserPoolClientCommand, UpdateUserPoolCommand, GetUserPoolMfaConfigCommand, SetUserPoolMfaConfigCommand, AddCustomAttributesCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
 import { handlePost, intOf, required, str, strs } from '../../../lib/action';
-import { UserError, load } from '../../../lib/errors';
+import { UserError, load, soft } from '../../../lib/errors';
 import { dateTime, plural } from '../../../lib/format';
 import { badge, copyable, esc, mono, raw, stateStatus } from '../../../lib/html';
-import { AUTH_FLOWS, attr, describeUsernameMode, listAll } from '../../../lib/cognito';
+import {
+  ATTR_TYPES, AUTH_FLOWS, OAUTH_FLOWS, OAUTH_SCOPES, TOKEN_UNITS, attr, clientToForm, clientUpdateInput, customAttributeFromForm, describeUsernameMode, listAll,
+  passwordPolicyUpdateInput, supported,
+} from '../../../lib/cognito';
 
 const poolId = Astro.params.pool!;
 const ctx = getCtx(Astro.cookies);
@@ -26,6 +30,7 @@ const cognito = aws.cognito(ctx);
 const TABS = ['users', 'groups', 'clients', 'properties'];
 const tab = TABS.includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'users';
 const group = Astro.url.searchParams.get('group') ?? '';
+const editClient = Astro.url.searchParams.get('client') ?? '';
 const here = (t = tab, extra = '') => `${Astro.url.pathname}?tab=${t}${extra}`;
 const sel = (f: FormData, what: string) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError(`Select at least one ${what}.`); return ids; };
 
@@ -84,6 +89,34 @@ const post = await handlePost(Astro, {
     }));
     return { message: `App client ${name} created.`, detail: `Client ID: ${r.UserPoolClient?.ClientId}`, redirect: here('clients') };
   },
+  updateClient: async (f) => {
+    const id = required(f, 'clientId', 'App client');
+    const cur = (await cognito.send(new DescribeUserPoolClientCommand({ UserPoolId: poolId, ClientId: id }))).UserPoolClient;
+    if (!cur) throw new UserError('App client not found.');
+    const input = clientUpdateInput(poolId, cur as Record<string, any>, f);
+    await supported('editing app clients', () => cognito.send(new UpdateUserPoolClientCommand(input as never)));
+    return { message: `App client ${input.ClientName} updated.`, redirect: here('clients') };
+  },
+  updatePolicy: async (f) => {
+    const input = passwordPolicyUpdateInput(poolId, (pool ?? {}) as Record<string, any>, f);
+    await supported('editing the password policy', () => cognito.send(new UpdateUserPoolCommand(input as never)));
+    return { message: 'Password policy updated.', redirect: here('properties') };
+  },
+  setMfa: async (f) => {
+    const mode = str(f, 'mfa');
+    if (!['OFF', 'OPTIONAL', 'ON'].includes(mode)) throw new UserError('Choose an MFA setting.');
+    const totp = str(f, 'totp') === '1';
+    if (mode !== 'OFF' && !totp) throw new UserError('Enable authenticator apps (TOTP) to turn on MFA; SMS MFA is not configurable here.');
+    await supported('multi-factor authentication settings', () => cognito.send(new SetUserPoolMfaConfigCommand({
+      UserPoolId: poolId, MfaConfiguration: mode as never, SoftwareTokenMfaConfiguration: { Enabled: totp },
+    })));
+    return { message: `Multi-factor authentication set to ${mode}.`, redirect: here('properties') };
+  },
+  addAttribute: async (f) => {
+    const a = customAttributeFromForm(f);
+    await supported('adding custom attributes', () => cognito.send(new AddCustomAttributesCommand({ UserPoolId: poolId, CustomAttributes: [a as never] })));
+    return { message: `Custom attribute custom:${a.Name} added.`, redirect: here('properties') };
+  },
   deleteClient: async (f) => { const ids = sel(f, 'app client'); for (const c of ids) await cognito.send(new DeleteUserPoolClientCommand({ UserPoolId: poolId, ClientId: c })); return { message: `Deleted ${plural(ids.length, 'app client')}.`, redirect: here('clients') }; },
   deletePool: async () => { await cognito.send(new DeleteUserPoolCommand({ UserPoolId: poolId })); return { message: `Deleted user pool "${pool?.Name ?? poolId}".`, redirect: '/cognito-idp' }; },
 });
@@ -108,10 +141,18 @@ const clients = tab === 'clients' ? await load(async () => {
   });
   return Promise.all(list.map(async (c) => {
     const d = (await cognito.send(new DescribeUserPoolClientCommand({ UserPoolId: poolId, ClientId: c.ClientId! })).catch(() => undefined))?.UserPoolClient;
-    return { id: c.ClientId!, name: c.ClientName ?? c.ClientId!, secret: d?.ClientSecret, flows: d?.ExplicitAuthFlows ?? [], created: d?.CreationDate };
+    return { id: c.ClientId!, name: c.ClientName ?? c.ClientId!, secret: d?.ClientSecret, flows: d?.ExplicitAuthFlows ?? [], created: d?.CreationDate, detail: d };
   }));
 }) : undefined;
 
+const mfa = tab === 'properties' ? await soft(() => cognito.send(new GetUserPoolMfaConfigCommand({ UserPoolId: poolId }))) : undefined;
+const mfaMode = (mfa?.value as any)?.MfaConfiguration ?? pool?.MfaConfiguration ?? 'OFF';
+const mfaTotp = (mfa?.value as any)?.SoftwareTokenMfaConfiguration?.Enabled === true;
+const editing = clients?.data?.find((c) => c.id === editClient);
+const cf: Record<string, string> = post.intent === 'updateClient' ? post.values : clientToForm(editing?.detail);
+const editFlows = new Set<string>(editing?.detail?.ExplicitAuthFlows ?? []);
+const editOauth = new Set<string>(editing?.detail?.AllowedOAuthFlows ?? []);
+const editScopes = editing?.detail?.AllowedOAuthScopes ?? [];
 const v = post.values;
 const poolName = pool?.Name ?? poolId;
 const tabs = [
@@ -226,13 +267,47 @@ const secretCell = (s?: string) => (s ? raw(`<details><summary class="cursor-poi
         <DataTable title="App clients" rows={clients?.data ?? []} error={clients?.error} bare select="multi" idKey="id" nameKey="name" id="clients" pageSize={15}
           emptyTitle="No app clients" emptyText="App clients let your applications call the user pool's APIs."
           columns={[
-            { key: 'name', label: 'App client name' },
+            { key: 'name', label: 'App client name', href: (r) => here('clients', `&client=${encodeURIComponent(r.id)}`) + '#client-edit' },
             { key: 'id', label: 'Client ID', render: (r) => copyable(r.id) },
             { key: 'secret', label: 'Client secret', render: (r) => secretCell(r.secret), sort: (r) => (r.secret ? 1 : 0) },
             { key: 'flows', label: 'Auth flows', render: (r) => (r.flows.length ? r.flows.map((x: string) => badge(x.replace('ALLOW_', ''))) : '-') },
           ]}>
           <button slot="actions" class="btn btn-normal" name="intent" value="deleteClient" data-min="1" data-confirm="The selected app clients will be deleted. Applications using them will no longer be able to authenticate." data-confirm-title="Delete app clients?" data-confirm-ok="Delete">Delete</button>
         </DataTable>
+
+        {editClient && (editing ? (
+          <form method="post" id="client-edit" class="border-t border-line pt-5" data-client-edit>
+            <input type="hidden" name="intent" value="updateClient" />
+            <input type="hidden" name="clientId" value={editClient} />
+            <h3 class="card-title mb-3">Edit app client {editing.name}</h3>
+            <div class="max-w-2xl">
+              <FormField label="App client name" for="ecname"><input id="ecname" name="name" class="input" required autocomplete="off" value={cf.name ?? ''} /></FormField>
+              <p class="field-label">Authentication flows</p>
+              <div class="mb-4 space-y-1.5">
+                {AUTH_FLOWS.map(([val, label]) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="flows" value={val} checked={editFlows.has(val)} /> {label}</label>)}
+              </div>
+              <div class="mb-4 grid gap-3 sm:grid-cols-3">
+                {[['access', 'Access token validity', 'accessUnit'], ['idToken', 'ID token validity', 'idTokenUnit'], ['refresh', 'Refresh token validity', 'refreshUnit']].map(([k, label, u]) => (
+                  <FormField label={label} for={`ec-${k}`} class="!mb-0">
+                    <div class="flex gap-2"><input id={`ec-${k}`} name={k} type="number" min="1" class="input" value={cf[k] ?? ''} /><select name={u} class="select" aria-label={`${label} unit`}>{TOKEN_UNITS.map((x) => <option value={x} selected={cf[u] === x}>{x}</option>)}</select></div>
+                  </FormField>
+                ))}
+              </div>
+              <FormField label="Allowed callback URLs" for="eccb" optional hint="One per line."><textarea id="eccb" name="callbackUrls" class="input" rows="3">{cf.callbackUrls ?? ''}</textarea></FormField>
+              <FormField label="Allowed sign-out URLs" for="eclo" optional hint="One per line."><textarea id="eclo" name="logoutUrls" class="input" rows="2">{cf.logoutUrls ?? ''}</textarea></FormField>
+              <p class="field-label">OAuth 2.0 grant types</p>
+              <div class="mb-4 space-y-1.5">
+                {OAUTH_FLOWS.map(([val, label]) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="oauthFlows" value={val} checked={editOauth.has(val)} /> {label}</label>)}
+              </div>
+              <p class="field-label">OpenID Connect scopes</p>
+              <div class="mb-4 flex flex-wrap gap-x-4 gap-y-1.5">
+                {OAUTH_SCOPES.map((sc) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="scopes" value={sc} checked={editScopes.includes(sc)} /> {sc}</label>)}
+              </div>
+              <FormField label="Custom scopes" for="ecsc" optional hint="Space or comma separated, e.g. api/read."><input id="ecsc" name="customScopes" class="input" autocomplete="off" value={editScopes.filter((sc: string) => !OAUTH_SCOPES.includes(sc)).join(' ')} /></FormField>
+              <div class="flex gap-2"><button class="btn btn-primary" type="submit">Save changes</button><a class="btn btn-normal" href={here('clients')}>Cancel</a></div>
+            </div>
+          </form>
+        ) : <p class="border-t border-line pt-5 text-muted">App client "{editClient}" was not found.</p>)}
 
         <form method="post" class="border-t border-line pt-5">
           <input type="hidden" name="intent" value="createClient" />
@@ -265,6 +340,47 @@ const secretCell = (s?: string) => (s ? raw(`<details><summary class="cursor-poi
             { label: 'Minimum length', value: pp?.MinimumLength }, { label: 'Temporary password validity', value: pp?.TemporaryPasswordValidityDays !== undefined ? `${pp.TemporaryPasswordValidityDays} days` : undefined },
             { label: 'Requires', value: [pp?.RequireLowercase && 'lowercase', pp?.RequireUppercase && 'uppercase', pp?.RequireNumbers && 'numbers', pp?.RequireSymbols && 'special characters'].filter(Boolean).join(', ') || 'Nothing' },
           ]} />
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Edit password policy</h3>
+          <form method="post" class="max-w-2xl" data-policy-form>
+            <input type="hidden" name="intent" value="updatePolicy" />
+            <div class="grid gap-3 sm:grid-cols-2">
+              <FormField label="Minimum length" for="pp-min"><input id="pp-min" name="minLength" type="number" min="6" max="99" class="input" required value={v.minLength ?? String(pp?.MinimumLength ?? 8)} /></FormField>
+              <FormField label="Temporary password validity (days)" for="pp-days"><input id="pp-days" name="tempDays" type="number" min="0" max="365" class="input" value={v.tempDays ?? String(pp?.TemporaryPasswordValidityDays ?? 7)} /></FormField>
+            </div>
+            <div class="mb-4 grid gap-1.5 sm:grid-cols-2">
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="lower" value="1" checked={post.intent === 'updatePolicy' ? v.lower === '1' : pp?.RequireLowercase} /> Require lowercase letters</label>
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="upper" value="1" checked={post.intent === 'updatePolicy' ? v.upper === '1' : pp?.RequireUppercase} /> Require uppercase letters</label>
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="numbers" value="1" checked={post.intent === 'updatePolicy' ? v.numbers === '1' : pp?.RequireNumbers} /> Require numbers</label>
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="symbols" value="1" checked={post.intent === 'updatePolicy' ? v.symbols === '1' : pp?.RequireSymbols} /> Require special characters</label>
+            </div>
+            <button class="btn btn-normal" type="submit">Save password policy</button>
+          </form>
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Multi-factor authentication</h3>
+          {mfa?.error && <p class="mb-3 text-[13px] text-muted">Couldn't read the MFA configuration: {mfa.error}</p>}
+          <form method="post" class="max-w-2xl" data-mfa-form>
+            <input type="hidden" name="intent" value="setMfa" />
+            <FormField label="MFA enforcement" for="mfa-mode"><select id="mfa-mode" name="mfa" class="select">{[['OFF', 'No MFA'], ['OPTIONAL', 'Optional MFA'], ['ON', 'Require MFA']].map(([val, label]) => <option value={val} selected={mfaMode === val}>{label}</option>)}</select></FormField>
+            <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="totp" value="1" checked={mfaTotp} /> Authenticator apps (TOTP)</label>
+            <button class="btn btn-normal" type="submit">Save MFA settings</button>
+          </form>
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Add custom attribute</h3>
+          <form method="post" class="max-w-2xl" data-attr-form>
+            <input type="hidden" name="intent" value="addAttribute" />
+            <div class="grid gap-3 sm:grid-cols-2">
+              <FormField label="Name" for="at-name" hint="Saved as custom:<name>. Attributes cannot be removed or renamed later."><input id="at-name" name="attrName" class="input" required autocomplete="off" value={v.attrName ?? ''} /></FormField>
+              <FormField label="Type" for="at-type"><select id="at-type" name="attrType" class="select">{ATTR_TYPES.map((t) => <option value={t} selected={v.attrType === t}>{t}</option>)}</select></FormField>
+              <FormField label="Minimum" for="at-min" optional hint="String length or number value."><input id="at-min" name="attrMin" class="input" autocomplete="off" value={v.attrMin ?? ''} /></FormField>
+              <FormField label="Maximum" for="at-max" optional><input id="at-max" name="attrMax" class="input" autocomplete="off" value={v.attrMax ?? ''} /></FormField>
+            </div>
+            <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="attrMutable" value="1" checked /> Mutable (users and admins can change the value)</label>
+            <button class="btn btn-normal" type="submit">Add attribute</button>
+          </form>
         </div>
         <div class="border-t border-line pt-5">
           <DataTable title="Attributes" bare filter={false} refresh={false} id="schema" pageSize={50} rows={(pool.SchemaAttributes ?? []).map((s) => ({ id: s.Name, name: s.Name, type: s.AttributeDataType, required: s.Required ? 'Yes' : 'No', mutable: s.Mutable ? 'Yes' : 'No' }))}

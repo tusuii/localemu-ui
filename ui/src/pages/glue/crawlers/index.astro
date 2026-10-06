@@ -47,7 +47,7 @@ const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
     title="Crawlers" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
     filter="Filter crawlers" emptyTitle="No crawlers" emptyText="You don't have any crawlers in this region."
     columns={[
-      { key: 'name', label: 'Name' },
+      { key: 'name', label: 'Name', href: (r) => `/glue/crawlers/${encodeURIComponent(r.name)}` },
       { key: 'state', label: 'State', render: (r) => stateStatus(r.state, { ready: 'success', running: 'progress', stopping: 'progress' }) },
       { key: 'db', label: 'Database' },
       { key: 'targets', label: 'Targets', mono: true },

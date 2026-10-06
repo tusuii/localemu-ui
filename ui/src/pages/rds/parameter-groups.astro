@@ -53,7 +53,7 @@ const families = tab === 'cluster' ? CLUSTER_FAMILIES : FAMILIES;
       title={tab === 'cluster' ? 'DB cluster parameter groups' : 'DB parameter groups'} rows={rows} error={res.error} select="multi" nameKey="id" pageSize={20}
       filter="Search parameter groups" emptyTitle="No parameter groups" emptyText="Create a parameter group to customize engine settings."
       columns={[
-        { key: 'id', label: 'Name' }, { key: 'family', label: 'Family' }, { key: 'description', label: 'Description' }, { key: 'arn', label: 'ARN', mono: true },
+        { key: 'id', label: 'Name', href: (r) => `/rds/parameter-groups/${encodeURIComponent(r.id)}${tab === 'cluster' ? '?type=cluster' : ''}` }, { key: 'family', label: 'Family' }, { key: 'description', label: 'Description' }, { key: 'arn', label: 'ARN', mono: true },
       ]}
     >
       <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected parameter groups will be deleted. Default groups cannot be deleted." data-confirm-title="Delete parameter groups?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>

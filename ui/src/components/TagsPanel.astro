@@ -1,0 +1,27 @@
+---
+import DataTable from './DataTable.astro';
+import FormField from './FormField.astro';
+
+interface Props {
+  tags: { Key: string; Value?: string }[];
+  error?: string | null;
+  /** Table / form id prefix, so several panels never clash. */
+  id?: string;
+}
+const { tags, error = null, id = 'tags' } = Astro.props;
+---
+<div class="space-y-5">
+  <DataTable title="Tags" bare select="multi" id={id} idKey="Key" nameKey="Key" rows={tags} error={error} filter={false}
+    emptyTitle="No tags" emptyText="Tags help you organize and find resources."
+    columns={[{ key: 'Key', label: 'Key' }, { key: 'Value', label: 'Value' }]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="removeTag" data-min="1" data-confirm="The selected tags will be removed." data-confirm-title="Remove tags?" data-confirm-ok="Remove">Remove</button>
+  </DataTable>
+  <form method="post" class="border-t border-line pt-5">
+    <input type="hidden" name="intent" value="addTag" />
+    <div class="grid gap-4 md:grid-cols-[1fr_1fr_auto] md:items-end">
+      <FormField label="Key" for={`${id}-key`} class="!mb-0"><input id={`${id}-key`} name="key" class="input" required autocomplete="off" /></FormField>
+      <FormField label="Value" for={`${id}-value`} class="!mb-0" optional><input id={`${id}-value`} name="value" class="input" autocomplete="off" /></FormField>
+      <button class="btn btn-primary mb-[22px]" type="submit">Add tag</button>
+    </div>
+  </form>
+</div>

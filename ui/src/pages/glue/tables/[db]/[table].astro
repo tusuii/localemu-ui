@@ -5,20 +5,32 @@ import Card from '../../../../components/Card.astro';
 import Details from '../../../../components/Details.astro';
 import DataTable from '../../../../components/DataTable.astro';
 import Icon from '../../../../components/Icon.astro';
-import { GetTableCommand, GetPartitionsCommand, DeleteTableCommand } from '@aws-sdk/client-glue';
+import FormField from '../../../../components/FormField.astro';
+import { GetTableCommand, GetPartitionsCommand, DeleteTableCommand, UpdateTableCommand } from '@aws-sdk/client-glue';
 import { aws } from '../../../../lib/aws';
 import { getCtx } from '../../../../lib/context';
-import { handlePost } from '../../../../lib/action';
-import { load, soft } from '../../../../lib/errors';
+import { handlePost, str } from '../../../../lib/action';
+import { guard } from '../../../../lib/unsupported';
+import { UserError, load, soft } from '../../../../lib/errors';
 import { dateTime } from '../../../../lib/format';
 import { badge, copyable, link, mono } from '../../../../lib/html';
-import { formatOf, isNoSuch } from '../../../../lib/glue';
+import { columnsText, formatOf, isNoSuch, parseColumns, tableInputFrom } from '../../../../lib/glue';
 
 const { db, table } = Astro.params as { db: string; table: string };
 const ctx = getCtx(Astro.cookies);
 const glue = aws.glue(ctx);
 
 const post = await handlePost(Astro, {
+  update: async (f) => {
+    const cur = (await glue.send(new GetTableCommand({ DatabaseName: db, Name: table }))).Table!;
+    const location = str(f, 'location');
+    if (location && !/^s3[an]?:\/\//.test(location)) throw new UserError('The location must start with s3://.');
+    const columns = parseColumns(str(f, 'columns'));
+    if (!columns.length) throw new UserError('A table needs at least one column.');
+    if (new Set(columns.map((c) => c.Name)).size !== columns.length) throw new UserError('Column names must be unique.');
+    await guard('UpdateTable', () => glue.send(new UpdateTableCommand({ DatabaseName: db, TableInput: tableInputFrom(cur, { description: str(f, 'description'), location, columns }) })));
+    return { message: `Table ${table} updated.`, redirect: Astro.url.pathname };
+  },
   delete: async () => { await glue.send(new DeleteTableCommand({ DatabaseName: db, Name: table })); return { message: `Deleted table "${table}".`, redirect: `/glue/tables?db=${encodeURIComponent(db)}` }; },
 });
 if (post.response) return post.response;
@@ -60,6 +72,15 @@ const params = Object.entries(t?.Parameters ?? {}).map(([k, v]) => ({ id: k, key
       )}
       <DataTable title="Table properties" rows={params} filter={false} refresh={false} id="props" pageSize={50} emptyTitle="No properties" emptyText="This table has no properties."
         columns={[{ key: 'key', label: 'Key', mono: true }, { key: 'value', label: 'Value' }]} />
+      <Card title="Edit table" description="Changes columns, location and description. Partition keys, format and properties are kept.">
+        <form method="post" class="max-w-3xl space-y-1">
+          <input type="hidden" name="intent" value="update" />
+          <FormField label="Description" for="e-description" optional><input id="e-description" name="description" class="input" value={post.values.description ?? t.Description ?? ''} /></FormField>
+          <FormField label="Location" for="e-location" hint="An s3:// path."><input id="e-location" name="location" class="input" value={post.values.location ?? sd?.Location ?? ''} /></FormField>
+          <FormField label="Columns" for="e-columns" hint="One column per line: name type (for example: id int)."><textarea id="e-columns" name="columns" class="textarea code-area" rows="8" required>{post.values.columns ?? columnsText(sd?.Columns)}</textarea></FormField>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </form>
+      </Card>
       <Card title="Delete table">
         <form method="post"><input type="hidden" name="intent" value="delete" />
           <button class="btn btn-danger" data-confirm="The table will be removed from the Data Catalog. Data in S3 is not deleted." data-confirm-title="Delete table?" data-confirm-name={table} data-confirm-type="delete" data-confirm-ok="Delete table"><Icon name="trash-2" size={16} /> Delete table</button></form>

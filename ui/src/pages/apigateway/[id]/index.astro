@@ -9,7 +9,7 @@ import Flash from '../../../components/Flash.astro';
 import Icon from '../../../components/Icon.astro';
 import {
   GetRestApiCommand, GetResourcesCommand, CreateResourceCommand, DeleteResourceCommand, PutMethodCommand, DeleteMethodCommand,
-  PutIntegrationCommand, PutMethodResponseCommand, PutIntegrationResponseCommand, GetStagesCommand, GetDeploymentsCommand,
+  UpdateMethodCommand, PutIntegrationCommand, PutMethodResponseCommand, PutIntegrationResponseCommand, GetStagesCommand, GetDeploymentsCommand,
   CreateDeploymentCommand, DeleteStageCommand, DeleteDeploymentCommand, DeleteRestApiCommand,
   type Resource,
 } from '@aws-sdk/client-api-gateway';
@@ -25,6 +25,7 @@ import { bulk } from '../../../lib/bulk';
 import { UserError, load, soft } from '../../../lib/errors';
 import { dateTime } from '../../../lib/format';
 import { badge, copyable, mono, raw, tagList } from '../../../lib/html';
+import { guard } from '../../../lib/unsupported';
 import { HTTP_METHODS, lambdaArn, lambdaIntegrationUri, restInvokeUrl, v2InvokeUrl } from '../../../lib/apigateway';
 
 const ctx = getCtx(Astro.cookies);
@@ -56,6 +57,12 @@ const apiName: string = (isRest ? restApi.name : httpApi.Name) ?? id;
 const tabIds = isRest ? ['resources', 'stages', 'details'] : ['routes', 'stages', 'details'];
 const reqTab = Astro.url.searchParams.get('tab') ?? '';
 const tab = tabIds.includes(reqTab) ? reqTab : tabIds[0];
+
+const setKeyRequired = (ids: string[], on: boolean) =>
+  bulk(ids, { verb: 'Updated', noun: 'method', tail: 'Deploy the API for the change to take effect.' }, (m) => {
+    const [resourceId, httpMethod] = m.split('|');
+    return guard('UpdateMethod', () => v1.send(new UpdateMethodCommand({ restApiId: id, resourceId, httpMethod, patchOperations: [{ op: 'replace', path: '/apiKeyRequired', value: on ? 'true' : 'false' }] })));
+  });
 
 const post = await handlePost(Astro, {
   deleteApi: async () => {
@@ -98,6 +105,8 @@ const post = await handlePost(Astro, {
       const [resourceId, httpMethod] = m.split('|');
       return v1.send(new DeleteMethodCommand({ restApiId: id, resourceId, httpMethod }));
     }),
+  requireKey: (f) => setKeyRequired(strs(f, 'id'), true),
+  optionalKey: (f) => setKeyRequired(strs(f, 'id'), false),
   deploy: async (f) => {
     const stage = required(f, 'stageName', 'Stage name');
     if (!/^[A-Za-z0-9_-]+$/.test(stage)) throw new UserError('Stage names can contain letters, numbers, hyphens and underscores.');
@@ -235,7 +244,12 @@ const typeLabel = isRest ? 'REST' : isWs ? 'WebSocket' : 'HTTP';
             { key: 'auth', label: 'Authorization' },
             { key: 'apiKey', label: 'API key' },
           ]}>
-          <button slot="actions" class="btn btn-normal" name="intent" value="deleteMethod" data-min="1" data-confirm="The selected methods and their integrations will be deleted." data-confirm-title="Delete methods?" data-confirm-ok="Delete">Delete</button>
+          <Fragment slot="actions">
+            <button class="btn btn-normal" name="intent" value="requireKey" data-min="1">Require API key</button>
+            <button class="btn btn-normal" name="intent" value="optionalKey" data-min="1">Don't require API key</button>
+            <a class="btn btn-normal" href="/apigateway/keys">API keys and usage plans</a>
+            <button class="btn btn-normal" name="intent" value="deleteMethod" data-min="1" data-confirm="The selected methods and their integrations will be deleted." data-confirm-title="Delete methods?" data-confirm-ok="Delete">Delete</button>
+          </Fragment>
         </DataTable>
 
         <div class="grid gap-6 border-t border-line pt-5 xl:grid-cols-2">

@@ -17,6 +17,7 @@ import {
   GetBucketNotificationConfigurationCommand, GetBucketEncryptionCommand, HeadBucketCommand, DeleteObjectsCommand,
   PutBucketLifecycleConfigurationCommand, DeleteBucketLifecycleCommand, PutBucketNotificationConfigurationCommand,
   GetBucketWebsiteCommand, PutBucketWebsiteCommand, DeleteBucketWebsiteCommand, GetBucketReplicationCommand, GetBucketLoggingCommand,
+  PutBucketReplicationCommand, DeleteBucketReplicationCommand, PutBucketLoggingCommand,
 } from '@aws-sdk/client-s3';
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
@@ -29,6 +30,7 @@ import { pageState, pageLinks } from '../../../lib/paging';
 import {
   EVENT_TYPES, STORAGE_CLASSES, addNotification, cleanNotifications, flattenNotifications, lifecycleRuleFromForm,
   removeNotification, ruleActions, ruleFilterText, ruleToForm, upsertRule,
+  REPLICATION_CLASSES, bucketOfArn, replicationRuleFromForm, replicationSummary, replicationToForm, supported, upsertReplicationRule,
 } from '../../../lib/s3-config';
 import { PUBLIC_ENDPOINT } from '../../../lib/config';
 
@@ -42,6 +44,7 @@ const PAGE_SIZE = 100;
 const pg = pageState(Astro.url);
 const search = sp.get('q') ?? '';
 const editRule = sp.get('edit') ?? '';
+const editRep = sp.get('repEdit') ?? '';
 const here = (p: Record<string, string | undefined>) => {
   const u = new URLSearchParams();
   for (const [k, v] of Object.entries({ tab: tab === 'objects' ? undefined : tab, ...p })) if (v) u.set(k, v);
@@ -151,6 +154,53 @@ const post = await handlePost(Astro, {
     return { message: 'Static website hosting saved.', redirect: here({ tab: 'management' }) };
   },
   deleteWebsite: async () => { await s3.send(new DeleteBucketWebsiteCommand({ Bucket: bucket })); return { message: 'Static website hosting disabled.', redirect: here({ tab: 'management' }) }; },
+  repSave: async (f) => {
+    const rule = replicationRuleFromForm(f);
+    const dst = bucketOfArn(rule.Destination.Bucket);
+    const srcV = await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: bucket })));
+    if ((srcV.value as any)?.Status !== 'Enabled') throw new UserError(`Replication requires versioning on the source bucket. Enable it on the Properties tab of "${bucket}" first.`);
+    const dstV = await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: dst })));
+    if (dstV.missing) throw new UserError(`Destination bucket "${dst}" does not exist. Create it first (with versioning enabled).`);
+    if (!dstV.error && (dstV.value as any)?.Status !== 'Enabled') throw new UserError(`Replication requires versioning on the destination bucket too. Enable versioning on "${dst}" first.`);
+    const cur = await soft(() => s3.send(new GetBucketReplicationCommand({ Bucket: bucket })));
+    const old = (cur.value as any)?.ReplicationConfiguration;
+    const role = str(f, 'role') || old?.Role || `arn:aws:iam::${ctx.account}:role/s3-replication`;
+    const rules = upsertReplicationRule((old?.Rules ?? []) as any[], rule);
+    await supported('bucket replication', () => s3.send(new PutBucketReplicationCommand({ Bucket: bucket, ReplicationConfiguration: { Role: role, Rules: rules as never } })));
+    return { message: `Replication rule "${rule.ID}" saved.`, redirect: here({ tab: 'management' }) };
+  },
+  repToggle: async (f) => {
+    const id = required(f, 'ruleId', 'Rule');
+    const cur = await soft(() => s3.send(new GetBucketReplicationCommand({ Bucket: bucket })));
+    const old = (cur.value as any)?.ReplicationConfiguration;
+    const rules = (old?.Rules ?? []) as any[];
+    const rule = rules.find((r) => r.ID === id);
+    if (!rule) throw new UserError(`Rule "${id}" no longer exists.`);
+    rule.Status = rule.Status === 'Enabled' ? 'Disabled' : 'Enabled';
+    await supported('bucket replication', () => s3.send(new PutBucketReplicationCommand({ Bucket: bucket, ReplicationConfiguration: { Role: old.Role, Rules: rules as never } })));
+    return { message: `Replication rule "${id}" ${rule.Status === 'Enabled' ? 'enabled' : 'disabled'}.`, redirect: here({ tab: 'management' }) };
+  },
+  repDelete: async (f) => {
+    const id = required(f, 'ruleId', 'Rule');
+    const cur = await soft(() => s3.send(new GetBucketReplicationCommand({ Bucket: bucket })));
+    const old = (cur.value as any)?.ReplicationConfiguration;
+    const rules = ((old?.Rules ?? []) as any[]).filter((r) => r.ID !== id);
+    if (rules.length) await supported('bucket replication', () => s3.send(new PutBucketReplicationCommand({ Bucket: bucket, ReplicationConfiguration: { Role: old.Role, Rules: rules as never } })));
+    else await supported('bucket replication', () => s3.send(new DeleteBucketReplicationCommand({ Bucket: bucket })));
+    return { message: `Deleted replication rule "${id}".`, redirect: here({ tab: 'management' }) };
+  },
+  logSave: async (f) => {
+    const target = required(f, 'targetBucket', 'Target bucket');
+    const tp = str(f, 'targetPrefix');
+    const chk = await soft(() => s3.send(new HeadBucketCommand({ Bucket: target })));
+    if (chk.missing) throw new UserError(`Target bucket "${target}" does not exist. Create it first.`);
+    await supported('server access logging', () => s3.send(new PutBucketLoggingCommand({ Bucket: bucket, BucketLoggingStatus: { LoggingEnabled: { TargetBucket: target, TargetPrefix: tp } } })));
+    return { message: `Server access logging enabled (logs go to s3://${target}/${tp}).`, redirect: here({ tab: 'management' }) };
+  },
+  logDisable: async () => {
+    await supported('server access logging', () => s3.send(new PutBucketLoggingCommand({ Bucket: bucket, BucketLoggingStatus: {} })));
+    return { message: 'Server access logging disabled.', redirect: here({ tab: 'management' }) };
+  },
   empty: async () => { const n = await deletePrefix(s3, bucket); return `Emptied bucket (${plural(n, 'object')} removed).`; },
   deleteBucket: async (f) => {
     if (str(f, 'force') === '1') await deletePrefix(s3, bucket);
@@ -188,7 +238,7 @@ const links = pageLinks(Astro.url, pg, nextToken);
 
 // ---- Properties / permissions / management ----
 const soft_ = {
-  versioning: tab === 'properties' ? await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: bucket }))) : undefined,
+  versioning: tab === 'properties' || tab === 'management' ? await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: bucket }))) : undefined,
   tags: tab === 'properties' ? await soft(() => s3.send(new GetBucketTaggingCommand({ Bucket: bucket }))) : undefined,
   encryption: tab === 'properties' ? await soft(() => s3.send(new GetBucketEncryptionCommand({ Bucket: bucket }))) : undefined,
   policy: tab === 'permissions' ? await soft(() => s3.send(new GetBucketPolicyCommand({ Bucket: bucket }))) : undefined,
@@ -211,6 +261,9 @@ const ntForm = post.intent === 'ntAdd' ? post.values : {};
 const website = soft_.website?.value as any;
 const replication = (soft_.replication?.value as any)?.ReplicationConfiguration;
 const logging = (soft_.logging?.value as any)?.LoggingEnabled;
+const repRules: any[] = replication?.Rules ?? [];
+const repForm: Record<string, string> = post.intent === 'repSave' ? post.values : editRep ? replicationToForm(repRules.find((r) => r.ID === editRep)) : {};
+const logForm: Record<string, string> = post.intent === 'logSave' ? post.values : { targetBucket: logging?.TargetBucket ?? '', targetPrefix: logging?.TargetPrefix ?? '' };
 const prefixParts = prefix.split('/').filter(Boolean);
 ---
 <Console title={bucket} crumbs={crumbs} error={post.error}>
@@ -450,12 +503,58 @@ const prefixParts = prefix.split('/').filter(Boolean);
         </section>
 
         <section class="border-t border-line pt-5">
-          <h3 class="card-title mb-2">Replication and server access logging</h3>
-          <div class="grid gap-3 md:grid-cols-2">
-            <div><p class="mb-1 text-[13px] text-muted">Replication rules</p>{replication ? <JsonView value={replication} maxHeight="200px" /> : <p class="text-muted">{soft_.replication?.error ?? 'No replication configured.'}</p>}</div>
-            <div><p class="mb-1 text-[13px] text-muted">Server access logging</p>{logging ? <JsonView value={logging} maxHeight="200px" /> : <p class="text-muted">{soft_.logging?.error ?? 'Disabled.'}</p>}</div>
-          </div>
-          <p class="mt-2 text-[13px] text-muted">Replication and logging are shown read-only. Manage them with the AWS CLI, Terraform or CloudFormation.</p>
+          <h3 class="card-title mb-1">Replication rules ({repRules.length})</h3>
+          <p class="card-desc mb-3">Copy new objects to another bucket. Both the source and the destination bucket need versioning enabled.</p>
+          {versioningStatus !== 'Enabled' && <Flash type="warning" text="Versioning is not enabled on this bucket" detail="Replication requires versioning. Enable it on the Properties tab before adding rules." dismissible={false} class="mb-3" />}
+          {soft_.replication?.error && <Flash type="warning" text="Couldn't read replication configuration" detail={soft_.replication.error} dismissible={false} class="mb-3" />}
+          {repRules.length === 0 ? <p class="text-muted">No replication rules configured.</p> : (
+            <div class="tbl-wrap"><table class="tbl" data-replication>
+              <thead><tr><th scope="col">Rule</th><th scope="col">Status</th><th scope="col">Priority</th><th scope="col">Prefix</th><th scope="col">Destination</th><th scope="col">Storage class</th><th scope="col"></th></tr></thead>
+              <tbody>
+                {repRules.map((r) => { const s = replicationSummary(r); return (
+                  <tr data-rep-rule={r.ID}>
+                    <td><a href={here({ tab: 'management', repEdit: r.ID }) + '#rep-form'}>{r.ID}</a></td>
+                    <td set:html={r.Status === 'Enabled' ? badge('Enabled', 'green') : badge('Disabled', 'grey')} />
+                    <td>{r.Priority ?? '-'}</td><td>{s.prefix || '(all objects)'}</td><td class="font-mono text-[13px]">{s.dest}</td><td>{s.storage}</td>
+                    <td class="nowrap">
+                      <form method="post" class="flex gap-2">
+                        <input type="hidden" name="ruleId" value={r.ID} />
+                        <button class="btn btn-normal btn-sm" name="intent" value="repToggle">{r.Status === 'Enabled' ? 'Disable' : 'Enable'}</button>
+                        <button class="btn btn-danger btn-sm" name="intent" value="repDelete" data-confirm="This replication rule will be deleted." data-confirm-title="Delete replication rule?" data-confirm-name={r.ID} data-confirm-list="false" data-confirm-ok="Delete rule">Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                ); })}
+              </tbody>
+            </table></div>
+          )}
+          <form method="post" id="rep-form" class="mt-4 space-y-3 rounded border border-line p-4">
+            <input type="hidden" name="intent" value="repSave" />
+            <h4 class="font-semibold">{editRep ? `Edit replication rule "${editRep}"` : 'Add replication rule'}</h4>
+            <div class="grid gap-3 md:grid-cols-3">
+              <FormField label="Rule name" for="rep-id"><input id="rep-id" name="ruleId" class="input" required value={repForm.ruleId ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Status" for="rep-status"><select id="rep-status" name="status" class="select"><option value="Enabled" selected={repForm.status !== 'Disabled'}>Enabled</option><option value="Disabled" selected={repForm.status === 'Disabled'}>Disabled</option></select></FormField>
+              <FormField label="Priority" for="rep-prio"><input id="rep-prio" name="priority" type="number" min="0" class="input" value={repForm.priority ?? '1'} /></FormField>
+              <FormField label="Prefix filter" for="rep-prefix" optional hint="Leave blank to replicate every object."><input id="rep-prefix" name="prefix" class="input" value={repForm.prefix ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Destination bucket" for="rep-dest" hint="Bucket name or ARN."><input id="rep-dest" name="dest" class="input" required value={repForm.dest ?? ''} autocomplete="off" placeholder="arn:aws:s3:::my-replica-bucket" /></FormField>
+              <FormField label="Destination storage class" for="rep-class"><select id="rep-class" name="storageClass" class="select">{REPLICATION_CLASSES.map((c) => <option value={c} selected={(repForm.storageClass ?? '') === c}>{c || 'Same as source'}</option>)}</select></FormField>
+              <FormField label="IAM role ARN" for="rep-role" optional hint="Defaults to the existing role or a placeholder."><input id="rep-role" name="role" class="input" value={repForm.role ?? ''} autocomplete="off" /></FormField>
+            </div>
+            <button class="btn btn-primary" type="submit">{editRep ? 'Save rule' : 'Add rule'}</button>
+            {editRep && <a class="btn btn-normal" href={here({ tab: 'management' })}>Cancel</a>}
+          </form>
+        </section>
+
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Server access logging</h3>
+          {logging ? <p class="card-desc mb-3" data-logging-state>Enabled: logs are delivered to <code>s3://{logging.TargetBucket}/{logging.TargetPrefix ?? ''}</code>.</p> : <p class="card-desc mb-3" data-logging-state>Disabled.</p>}
+          {soft_.logging?.error && <Flash type="warning" text="Couldn't read logging configuration" detail={soft_.logging.error} dismissible={false} class="mb-3" />}
+          <form method="post" class="flex flex-wrap items-end gap-2">
+            <div><label class="field-label" for="log-target">Target bucket</label><input id="log-target" name="targetBucket" class="input" required value={logForm.targetBucket ?? ''} autocomplete="off" /></div>
+            <div><label class="field-label" for="log-prefix">Target prefix <span class="opt"> - optional</span></label><input id="log-prefix" name="targetPrefix" class="input" value={logForm.targetPrefix ?? ''} autocomplete="off" /></div>
+            <button class="btn btn-normal" name="intent" value="logSave">{logging ? 'Save' : 'Enable logging'}</button>
+            {logging && <button class="btn btn-danger" name="intent" value="logDisable" formnovalidate data-confirm="Server access logs will no longer be delivered." data-confirm-title="Disable server access logging?" data-confirm-name="Server access logging" data-confirm-list="false">Disable</button>}
+          </form>
         </section>
       </div>
     )}

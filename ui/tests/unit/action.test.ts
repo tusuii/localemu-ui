@@ -76,6 +76,11 @@ describe('handlePost', () => {
     expect(r.response).toEqual({ redirectedTo: '/sqs?q=1', status: 303 });
     expect(JSON.parse(a.jar.get('lemu_flash')!)).toMatchObject({ type: 'success', text: 'Created.' });
   });
+  it('uses a warning flash for a partial failure result', async () => {
+    const a = mkAstro('POST', fd({ intent: 'ok' }));
+    await run(a, { ok: async () => ({ message: 'Deleted 1 of 2 (1 failed: x)', type: 'warning' }) } as never);
+    expect(JSON.parse(a.jar.get('lemu_flash')!)).toMatchObject({ type: 'warning', text: 'Deleted 1 of 2 (1 failed: x)' });
+  });
   it('refuses an open redirect target from a handler', async () => {
     const r = await run(mkAstro('POST', fd({ intent: 'ok' })), { ok: async () => ({ message: 'x', redirect: '//evil.test' }) } as never);
     expect(r.response).toEqual({ redirectedTo: '/sqs?q=1', status: 303 });

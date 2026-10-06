@@ -70,13 +70,75 @@ const cf = await t.flash();
 t.ok(cf.includes('App client web-client created') && /Client ID: \w+/.test(cf), 'client created: ' + cf);
 const row = p.locator('tr[data-row]:has-text("web-client")');
 t.ok((await row.count()) === 1 && (await row.innerText()).includes('Show secret'), 'client listed with secret');
-await t.confirmAction('web-client', 'Delete');
+// edit the app client
+await p.click('tr[data-row]:has-text("web-client") a');
+await p.waitForSelector('[data-client-edit]');
+await p.fill('#ecname', 'web-client-2');
+await p.uncheck('[data-client-edit] input[name=flows][value=ALLOW_USER_SRP_AUTH]');
+await p.check('[data-client-edit] input[name=flows][value=ALLOW_ADMIN_USER_PASSWORD_AUTH]');
+await p.fill('#ec-access', '30');
+await p.fill('#eccb', 'https://example.com/callback\nhttps://example.com/cb2');
+await p.fill('#eclo', 'https://example.com/logout');
+await p.check('[data-client-edit] input[name=oauthFlows][value=code]');
+await p.check('[data-client-edit] input[name=scopes][value=openid]');
+await p.check('[data-client-edit] input[name=scopes][value=email]');
+await t.submit('[data-client-edit] button[type=submit]');
+const uf = await t.flash();
+if (/does not support/i.test(uf + await text())) {
+  t.ok(true, 'client editing reported as unsupported with a clear message');
+} else {
+  t.ok(uf.includes('App client web-client-2 updated'), 'client updated: ' + uf);
+  const crow = p.locator('tr[data-row]:has-text("web-client-2")');
+  t.ok((await crow.count()) === 1 && (await crow.innerText()).includes('ADMIN_USER_PASSWORD_AUTH') && !(await crow.innerText()).includes('USER_SRP_AUTH'), 'edited flows shown');
+  await p.click('tr[data-row]:has-text("web-client-2") a');
+  await p.waitForSelector('[data-client-edit]');
+  t.ok((await p.inputValue('#eccb')).includes('https://example.com/cb2') && (await p.inputValue('#eclo')) === 'https://example.com/logout', 'callback and logout URLs persisted');
+  t.ok((await p.inputValue('#ec-access')) === '30' && await p.locator('[data-client-edit] input[value=code]').isChecked() && await p.locator('[data-client-edit] input[name=scopes][value=openid]').isChecked(), 'token validity, OAuth flow and scopes persisted');
+  await p.fill('#eccb', ''); 
+  await t.submit('[data-client-edit] button[type=submit]');
+  t.ok((await text()).includes('OAuth flows need at least one callback URL'), 'oauth without callback URL rejected');
+}
+await t.go(`${new URL(poolUrl).pathname}?tab=clients`);
+await t.confirmAction(/does not support/i.test(uf) ? 'web-client' : 'web-client-2', 'Delete');
 t.ok((await t.flash()).includes('Deleted 1 app client'), 'client deleted');
 
 // ---- properties + delete user + pool
 await t.go(`${new URL(poolUrl).pathname}?tab=properties`);
 const pt = await text();
 t.ok(pt.includes(poolId) && pt.includes('Minimum length 10') && pt.includes('special characters'), 'properties show password policy');
+
+// password policy editor
+await p.fill('#pp-min', '12'); await p.uncheck('[data-policy-form] input[name=numbers]'); await p.check('[data-policy-form] input[name=upper]');
+await t.submit('[data-policy-form] button[type=submit]');
+const pf = await t.flash();
+if (/does not support/i.test(pf + await text())) t.ok(true, 'password policy editing reported as unsupported');
+else {
+  t.ok(pf.includes('Password policy updated'), 'policy updated: ' + pf);
+  t.ok((await p.inputValue('#pp-min')) === '12' && !(await p.locator('[data-policy-form] input[name=numbers]').isChecked()) && (await p.locator('[data-policy-form] input[name=symbols]').isChecked()), 'policy persisted (symbols kept from creation)');
+}
+// custom attribute
+await p.fill('#at-name', 'tier'); await p.selectOption('#at-type', 'String'); await p.fill('#at-min', '1'); await p.fill('#at-max', '20');
+await t.submit('[data-attr-form] button[type=submit]');
+const af = await t.flash();
+if (/does not support/i.test(af + await text())) t.ok(true, 'custom attributes reported as unsupported');
+else {
+  t.ok(af.includes('custom:tier added'), 'custom attribute added: ' + af);
+  t.ok((await text()).includes('custom:tier'), 'custom attribute listed in schema');
+}
+await p.fill('#at-name', '1bad'); await t.submit('[data-attr-form] button[type=submit]');
+t.ok((await text()).includes('Attribute name must start with a letter'), 'invalid attribute name rejected');
+// MFA
+await p.selectOption('#mfa-mode', 'OPTIONAL'); await p.uncheck('[data-mfa-form] input[name=totp]');
+await t.submit('[data-mfa-form] button[type=submit]');
+t.ok((await text()).includes('Enable authenticator apps'), 'MFA without a second factor rejected');
+await p.selectOption('#mfa-mode', 'OPTIONAL'); await p.check('[data-mfa-form] input[name=totp]');
+await t.submit('[data-mfa-form] button[type=submit]');
+const mf = await t.flash();
+if (/does not support/i.test(mf + await text())) t.ok(true, 'MFA configuration reported as unsupported');
+else {
+  t.ok(mf.includes('set to OPTIONAL'), 'MFA set: ' + mf);
+  t.ok((await p.inputValue('#mfa-mode')) === 'OPTIONAL' && await p.locator('[data-mfa-form] input[name=totp]').isChecked(), 'MFA persisted');
+}
 await t.go(`${new URL(poolUrl).pathname}?tab=users`);
 await t.confirmAction(user, 'Delete');
 t.ok((await t.flash()).includes('Deleted 1 user'), 'user deleted');
