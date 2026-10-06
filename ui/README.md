@@ -147,14 +147,54 @@ tests/e2e/                     Playwright flows that drive the real UI against a
 * Some detail is read-only here (S3 lifecycle and notifications, route tables, Lambda triggers);
   use the CLI, Terraform or CloudFormation for those.
 
+## Prebuilt image
+
+Tagged releases publish a multi-arch (amd64/arm64) image to GitHub Container Registry:
+
+```bash
+docker run --rm -p 127.0.0.1:4321:4321 \
+  -e LOCALEMU_ENDPOINT=http://host.docker.internal:4566 \
+  ghcr.io/tusuii/localemu-console:latest
+```
+
+In the root `docker-compose.yml`, uncomment the `image:` line of the `console` service to use it
+instead of building `ui/` locally.
+
 ## Development
 
 ```bash
-npm run dev          # dev server with hot reload
-npm run check        # type-check .astro and .ts files
-npm run build        # production build into dist/ (self-contained, no node_modules needed)
-npm run test:e2e     # browser tests, see below
+npm run dev            # dev server with hot reload
+npm run check          # type-check .astro and .ts files
+npm run build          # production build into dist/ (self-contained, no node_modules needed)
+npm test               # unit tests (Vitest); also: npm run test:unit, npm run test:coverage
+npm run test:e2e       # browser flows against a real LocalEmu, see below
+npm run test:visual    # screenshot comparison, see below
 ```
+
+### Unit tests
+
+`tests/unit` covers the pure helpers in `src/lib` (formatting, HTML escaping and JSON highlighting,
+service catalog, paging tokens, form helpers and open-redirect protection, request context parsing,
+S3/SQS/DynamoDB/EC2/IAM/Lambda helpers). Vitest handles the `?raw` icon imports natively, so nothing
+is mocked except a tiny cookie jar. They need no server: `npm run test:coverage` prints coverage.
+
+### Visual regression tests
+
+`tests/visual/run.mjs` screenshots a fixed set of pages (home, services menu, S3, DynamoDB, SQS, IAM,
+EC2, settings; light, dark and a mobile viewport) and compares them with the PNGs committed in
+`tests/visual/baseline/` using pixelmatch. It needs a running console and LocalEmu, seeds its own
+resources under account `111111111111`, normalises timestamps, ids and IPs, and hides the activity feed
+and uptime so runs are repeatable.
+
+```bash
+CHROMIUM_PATH=/path/to/chrome npm run test:visual          # compare; diffs go to tests/visual/diff/
+npm run test:visual -- s3                                  # only shots whose name contains "s3"
+npm run test:visual -- --update                            # regenerate baselines
+```
+
+**When you change the UI on purpose, regenerate the baselines** (`npm run test:visual -- --update`)
+and commit the new PNGs. Baselines are rendered with the Chromium build in CI/Playwright; fonts differ
+slightly between platforms, so tune `THRESHOLD` / `MAX_DIFF_PIXELS` if you compare on another OS.
 
 ### End-to-end tests
 

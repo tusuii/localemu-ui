@@ -1,0 +1,86 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateLoadBalancerCommand, CreateListenerCommand, DescribeTargetGroupsCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import { DescribeSubnetsCommand, DescribeSecurityGroupsCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { nameOf } from '../../lib/ec2';
+
+const ctx = getCtx(Astro.cookies);
+const elb = aws.elbv2(ctx);
+const ec2 = aws.ec2(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Load balancer name');
+    if (!/^[A-Za-z0-9-]{1,32}$/.test(name)) throw new UserError('Names are up to 32 characters: letters, numbers and hyphens.');
+    const type = str(f, 'type') === 'network' ? 'network' : 'application';
+    const subnets = strs(f, 'subnets');
+    if (subnets.length < 1) throw new UserError('Select at least one subnet.');
+    const sgs = type === 'application' ? strs(f, 'sgs') : [];
+    const r = await elb.send(new CreateLoadBalancerCommand({
+      Name: name, Type: type, Scheme: str(f, 'scheme') === 'internal' ? 'internal' : 'internet-facing', Subnets: subnets, SecurityGroups: sgs.length ? sgs : undefined,
+    }));
+    const lb = r.LoadBalancers![0];
+    const tg = str(f, 'tg');
+    let extra = '';
+    if (tg) {
+      const protocol = str(f, 'protocol') || (type === 'network' ? 'TCP' : 'HTTP');
+      await elb.send(new CreateListenerCommand({ LoadBalancerArn: lb.LoadBalancerArn, Protocol: protocol as never, Port: intOf(f, 'port', 'Listener port') ?? 80, DefaultActions: [{ Type: 'forward', TargetGroupArn: tg }] }));
+      extra = ' with a listener';
+    }
+    return { message: `Load balancer ${name} created successfully${extra}.`, redirect: `/elbv2/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+
+const net = await load(async () => ({
+  subnets: (await ec2.send(new DescribeSubnetsCommand({}))).Subnets ?? [],
+  sgs: (await ec2.send(new DescribeSecurityGroupsCommand({}))).SecurityGroups ?? [],
+}));
+const tgs = await load(async () => (await elb.send(new DescribeTargetGroupsCommand({}))).TargetGroups ?? []);
+const v = post.values;
+const type = v.type === 'network' ? 'network' : 'application';
+---
+<Console title="Create load balancer" crumbs={[{ label: 'Load balancers', href: '/elbv2' }, { label: 'Create load balancer' }]} error={post.error ?? net.error}>
+  <PageHeader title="Create load balancer" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Basic configuration">
+      <div class="mb-4 space-y-2">
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="application" checked={type === 'application'} /><span><strong>Application Load Balancer</strong><br /><span class="text-muted">Layer 7 routing of HTTP and HTTPS traffic.</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="network" checked={type === 'network'} /><span><strong>Network Load Balancer</strong><br /><span class="text-muted">Layer 4 routing of TCP, UDP and TLS traffic.</span></span></label>
+      </div>
+      <FormField label="Load balancer name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="32" value={v.name ?? ''} /></FormField>
+      <FormField label="Scheme" for="scheme"><select id="scheme" name="scheme" class="select"><option value="internet-facing" selected={v.scheme !== 'internal'}>Internet-facing</option><option value="internal" selected={v.scheme === 'internal'}>Internal</option></select></FormField>
+    </Card>
+    <Card title="Network mapping" description="Select at least one subnet.">
+      <div class="space-y-1.5">
+        {(net.data?.subnets ?? []).map((s) => (
+          <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="subnets" value={s.SubnetId} /> <code class="text-[13px]">{s.SubnetId}</code> <span class="text-muted">{nameOf(s.Tags) || s.CidrBlock} - {s.AvailabilityZone} - {s.VpcId}</span></label>
+        ))}
+        {!(net.data?.subnets ?? []).length && <p class="text-muted">No subnets found. Create a VPC and subnets in EC2 first.</p>}
+      </div>
+    </Card>
+    <Card title="Security groups" description="Application Load Balancers only. Leave empty for the VPC default.">
+      <div data-show-when="type:application" class="space-y-1.5">
+        {(net.data?.sgs ?? []).map((g) => (
+          <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="sgs" value={g.GroupId} /> <code class="text-[13px]">{g.GroupId}</code> <span class="text-muted">{g.GroupName} - {g.VpcId}</span></label>
+        ))}
+      </div>
+    </Card>
+    <Card title="Listener" description="Optionally create a listener that forwards to an existing target group.">
+      <div class="grid gap-4 sm:grid-cols-3">
+        <FormField label="Protocol" for="protocol"><select id="protocol" name="protocol" class="select"><option>HTTP</option><option>HTTPS</option><option>TCP</option><option>UDP</option><option>TLS</option></select></FormField>
+        <FormField label="Port" for="port"><input id="port" name="port" type="number" min="1" max="65535" class="input" value={v.port ?? '80'} /></FormField>
+        <FormField label="Forward to" for="tg" optional><select id="tg" name="tg" class="select"><option value="">No listener</option>{(tgs.data ?? []).map((t) => <option value={t.TargetGroupArn}>{t.TargetGroupName}</option>)}</select></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/elbv2">Cancel</a><button class="btn btn-primary" type="submit">Create load balancer</button></div>
+  </form>
+</Console>

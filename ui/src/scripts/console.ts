@@ -15,14 +15,22 @@ const store = {
 
 /* ------------------------------------------------------------------ menus */
 
+const menuToggles = (menu: Element) => $$(`[aria-controls="${menu.id}"]`);
+function setExpanded(menu: HTMLElement, open: boolean) { menuToggles(menu).forEach((t) => t.setAttribute('aria-expanded', String(open))); }
+
 function closeMenus(except?: Element | null) {
-  $$('.menu[data-open="true"]').forEach((m) => { if (m !== except) m.dataset.open = 'false'; });
+  $$('.menu[data-open="true"]').forEach((m) => { if (m !== except) { m.dataset.open = 'false'; setExpanded(m, false); } });
 }
+
+const menuItems = (menu: HTMLElement) => $$<HTMLElement>('a[href],button:not(:disabled),input:not([type=hidden])', menu).filter((el) => !el.closest('[hidden]') && el.getAttribute('aria-disabled') !== 'true' && el.offsetParent !== null);
 
 function openMenu(menu: HTMLElement) {
   closeMenus(menu);
   menu.dataset.open = 'true';
+  setExpanded(menu, true);
+  if (menu.getAttribute('role') === 'menu') $$<HTMLElement>('a[href],button', menu).forEach((el) => { if (!el.getAttribute('role') && el.matches('.menu-item')) el.setAttribute('role', el.getAttribute('role') ?? 'menuitem'); });
   if (menu.id === 'menu-services') $<HTMLInputElement>('[data-services-filter]', menu)?.focus();
+  else menuItems(menu)[0]?.focus();
   if (menu.id === 'menu-account') loadAccounts();
 }
 
@@ -33,18 +41,33 @@ document.addEventListener('click', (e) => {
     const menu = document.getElementById(toggle.dataset.menuToggle!);
     if (menu) {
       e.preventDefault();
-      menu.dataset.open === 'true' ? (menu.dataset.open = 'false') : openMenu(menu);
+      menu.dataset.open === 'true' ? (menu.dataset.open = 'false', setExpanded(menu, false)) : openMenu(menu);
     }
     return;
   }
   if (!t.closest('.menu') && !t.closest('[data-global-search]')) closeMenus();
 });
 
+const isTyping = () => /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement?.tagName ?? '')) || !!(document.activeElement as HTMLElement | null)?.isContentEditable;
+
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeMenus();
-  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement?.tagName ?? '')) || (document.activeElement as HTMLElement | null)?.isContentEditable;
+  if (e.key === 'Escape') {
+    const open = $<HTMLElement>('.menu[data-open="true"]:not([data-search-results])');
+    const returnTo = open ? menuToggles(open)[0] : null;
+    const inMenu = open && open.contains(document.activeElement);
+    closeMenus();
+    if (inMenu && returnTo) returnTo.focus();
+  }
+  // Arrow-key navigation inside open menus.
+  const menu = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.menu[data-open="true"]:not([data-search-results])');
+  if (menu && (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') && !(document.activeElement as HTMLElement).matches('textarea')) {
+    const items = menuItems(menu);
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : e.key === 'ArrowDown' ? Math.min(i + 1, items.length - 1) : Math.max(i - 1, 0);
+    if (items.length && !((document.activeElement as HTMLElement).matches('input') && (e.key === 'Home' || e.key === 'End'))) { e.preventDefault(); items[next]?.focus(); }
+  }
   if (e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); $<HTMLInputElement>('[data-global-search]')?.focus(); }
-  else if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey) {
+  else if (e.key === '/' && !isTyping() && !e.metaKey && !e.ctrlKey) {
     const f = $<HTMLInputElement>('[data-table-filter]');
     if (f) { e.preventDefault(); f.focus(); }
   }
@@ -65,37 +88,80 @@ $<HTMLInputElement>('[data-services-filter]')?.addEventListener('input', (e) => 
 const search = $<HTMLInputElement>('[data-global-search]');
 const results = $('[data-search-results]');
 if (search && results) {
+  let seq = 0;
+  let timer: number | undefined;
+  const esc = (v: string) => v.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+  const openResults = (open: boolean) => { results.dataset.open = String(open); search.setAttribute('aria-expanded', String(open)); };
+  const heading = (t: string) => `<div class="search-group" role="presentation">${esc(t)}</div>`;
+  const row = (href: string, inner: string) => `<a class="menu-item" role="option" href="${esc(href)}">${inner}</a>`;
+  type Res = { groups: Array<{ id: string; label: string; total: number; hits: Array<{ name: string; sub?: string; href: string }> }>; errors: Array<{ label: string; message: string }>; slow: string[]; count: number };
+
+  const serviceHits = (terms: string[]) => $$('#menu-services [data-svc-item]').filter((li) => terms.every((t) => (li.dataset.kw ?? '').includes(t))).slice(0, 6);
+  const svcHtml = (hits: HTMLElement[]) => hits.map((li) => {
+    const a = li.querySelector('a')!;
+    return row(a.getAttribute('href')!, a.querySelector('.svc-tile')!.outerHTML + `<span class="min-w-0"><span class="font-bold">${esc(a.textContent!.trim())}</span><span class="block truncate text-[12px] text-muted">${esc(a.title)}</span></span>`);
+  }).join('');
+  const resHtml = (r: Res, q: string) => {
+    let h = '';
+    for (const g of r.groups) {
+      h += heading(`${g.label} (${g.total})`);
+      for (const x of g.hits.slice(0, 4)) h += row(x.href, `<span class="min-w-0"><span class="block truncate font-bold">${esc(x.name)}</span>${x.sub ? `<span class="block truncate text-[12px] text-muted">${esc(x.sub)}</span>` : ''}</span>`);
+    }
+    if (r.slow.length) h += `<div class="px-4 py-1 text-[12px] text-muted">Still loading: ${esc(r.slow.slice(0, 4).join(', '))}${r.slow.length > 4 ? '…' : ''}</div>`;
+    if (r.errors.length) h += `<div class="px-4 py-1 text-[12px] text-muted">${r.errors.length} service${r.errors.length > 1 ? 's' : ''} could not be searched.</div>`;
+    h += row(`/search?q=${encodeURIComponent(q)}`, `<span class="font-bold text-link">See all results for “${esc(q)}”</span>`);
+    return h;
+  };
+
   const render = () => {
-    const terms = search.value.toLowerCase().split(/\s+/).filter(Boolean);
-    results.innerHTML = '';
-    if (!terms.length) { results.dataset.open = 'false'; return; }
-    const hits = $$('#menu-services [data-svc-item]').filter((li) => terms.every((t) => (li.dataset.kw ?? '').includes(t))).slice(0, 12);
-    if (!hits.length) {
-      results.innerHTML = '<div class="px-4 py-3 text-muted">No services match.</div>';
+    const q = search.value.trim();
+    const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+    clearTimeout(timer);
+    if (!terms.length) { results.innerHTML = ''; openResults(false); return; }
+    const svcs = serviceHits(terms);
+    const base = svcs.length ? heading('Services') + svcHtml(svcs) : '';
+    if (q.length < 2) {
+      results.innerHTML = base || '<div class="px-4 py-3 text-muted">No services match.</div>';
+      openResults(true); return;
     }
-    for (const li of hits) {
-      const a = li.querySelector('a')!;
-      const item = document.createElement('a');
-      item.href = a.getAttribute('href')!;
-      item.className = 'menu-item';
-      item.innerHTML = a.querySelector('.svc-tile')!.outerHTML + `<span class="min-w-0"><span class="font-bold">${a.textContent!.trim()}</span><span class="block truncate text-[12px] text-muted">${a.title}</span></span>`;
-      results.appendChild(item);
-    }
-    results.dataset.open = 'true';
+    results.innerHTML = base + '<div class="px-4 py-2 text-[12px] text-muted" data-search-loading>Searching resources…</div>';
+    openResults(true);
+    const mine = ++seq;
+    timer = window.setTimeout(async () => {
+      try {
+        const r = (await (await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=4`, { cache: 'no-store' })).json()) as Res;
+        if (mine !== seq) return;
+        results.innerHTML = base + resHtml(r, q);
+        if (!svcs.length && !r.groups.length) results.insertAdjacentHTML('afterbegin', '<div class="px-4 py-2 text-muted">No services or resources match.</div>');
+        const lr = $('[data-live-region]'); if (lr) lr.textContent = r.count ? `${r.count} matching resources` : 'No matching resources';
+      } catch {
+        if (mine === seq) results.innerHTML = base + '<div class="px-4 py-2 text-[12px] text-muted">Resource search is unavailable.</div>' + row(`/search?q=${encodeURIComponent(q)}`, 'See all results');
+      }
+    }, 220);
   };
   search.addEventListener('input', render);
-  search.addEventListener('focus', render);
+  search.addEventListener('focus', () => { if (search.value.trim()) render(); });
   search.addEventListener('keydown', (e) => {
     const items = $$<HTMLAnchorElement>('a.menu-item', results);
-    if (e.key === 'Enter') { e.preventDefault(); items[0]?.click(); }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const q = search.value.trim();
+      if (!q) return;
+      const svc = serviceHits(q.toLowerCase().split(/\s+/));
+      const name = svc[0]?.querySelector('a')?.textContent?.trim().toLowerCase() ?? '';
+      location.href = svc.length && (q.length < 2 || name.startsWith(q.toLowerCase())) ? svc[0].querySelector('a')!.getAttribute('href')! : `/search?q=${encodeURIComponent(q)}`;
+    }
     if (e.key === 'ArrowDown') { e.preventDefault(); items[0]?.focus(); }
+    if (e.key === 'Escape') { openResults(false); }
   });
   results.addEventListener('keydown', (e) => {
     const items = $$<HTMLAnchorElement>('a.menu-item', results);
     const i = items.indexOf(document.activeElement as HTMLAnchorElement);
     if (e.key === 'ArrowDown') { e.preventDefault(); items[Math.min(i + 1, items.length - 1)]?.focus(); }
     if (e.key === 'ArrowUp') { e.preventDefault(); i <= 0 ? search.focus() : items[i - 1]?.focus(); }
+    if (e.key === 'Escape') { openResults(false); search.focus(); }
   });
+  document.addEventListener('click', (e) => { if (!(e.target as Element).closest('[data-global-search],[data-search-results]')) openResults(false); });
 }
 
 /* ------------------------------------------------------- misc controls */

@@ -4,3 +4,5 @@ dist
 .env
 *.log
 README.md
+coverage
+tests

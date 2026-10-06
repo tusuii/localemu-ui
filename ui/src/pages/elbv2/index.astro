@@ -1,0 +1,59 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeLoadBalancersCommand, DeleteLoadBalancerCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, plural, capitalize } from '../../lib/format';
+import { badge, stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const elb = aws.elbv2(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one load balancer.');
+    for (const arn of ids) await elb.send(new DeleteLoadBalancerCommand({ LoadBalancerArn: arn }));
+    return `Deleted ${plural(ids.length, 'load balancer')}.`;
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const out: any[] = []; let marker: string | undefined;
+  do { const r = await elb.send(new DescribeLoadBalancersCommand({ Marker: marker })); out.push(...(r.LoadBalancers ?? [])); marker = r.NextMarker; } while (marker);
+  return out.map((l) => ({
+    id: l.LoadBalancerArn, name: l.LoadBalancerName, dns: l.DNSName, state: l.State?.Code, type: l.Type, scheme: l.Scheme, vpc: l.VpcId,
+    azs: (l.AvailabilityZones ?? []).map((z: any) => z.ZoneName).join(', '), created: l.CreatedTime,
+  }));
+});
+const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
+---
+<Console title="Load balancers" crumbs={[{ label: 'Load balancers' }]} error={post.error}>
+  <PageHeader title="Load balancers" description="Elastic Load Balancing distributes incoming traffic across multiple targets." />
+  <DataTable
+    title="Load balancers" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Filter load balancers" emptyTitle="No load balancers" emptyText="You don't have any load balancers in this region."
+    columns={[
+      { key: 'name', label: 'Name', href: (r) => `/elbv2/${encodeURIComponent(r.name)}` },
+      { key: 'dns', label: 'DNS name', mono: true },
+      { key: 'state', label: 'State', render: (r) => stateStatus(r.state) },
+      { key: 'type', label: 'Type', render: (r) => badge(capitalize(r.type ?? ''), r.type === 'network' ? 'blue' : 'soft') },
+      { key: 'scheme', label: 'Scheme' },
+      { key: 'vpc', label: 'VPC ID', mono: true },
+      { key: 'azs', label: 'Availability Zones' },
+      { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+    ]}
+  >
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected load balancers and their listeners will be permanently deleted." data-confirm-title="Delete load balancers?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/elbv2/create"><Icon name="plus" size={16} /> Create load balancer</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/elbv2/create">Create load balancer</a>
+  </DataTable>
+</Console>

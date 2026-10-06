@@ -9,9 +9,9 @@ const href = (id: string) => {
   return u.pathname + u.search;
 };
 ---
-<nav class="tabs" role="tablist">
+<nav class="tabs" aria-label="Sections">
   {tabs.map((t) => (
-    <a class="tab" href={href(t.id)} role="tab" aria-current={t.id === active ? 'page' : undefined}>
+    <a class="tab" href={href(t.id)} aria-current={t.id === active ? 'page' : undefined}>
       {t.label}{t.count !== undefined && <span class="font-normal text-faint ml-1">({t.count})</span>}
     </a>
   ))}

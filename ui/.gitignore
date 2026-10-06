@@ -3,3 +3,5 @@ dist/
 .astro/
 .env
 *.log
+coverage/
+tests/visual/diff/

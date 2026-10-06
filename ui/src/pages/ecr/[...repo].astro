@@ -1,0 +1,150 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import Details from '../../components/Details.astro';
+import DataTable from '../../components/DataTable.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import {
+  DescribeRepositoriesCommand, DescribeImagesCommand, BatchDeleteImageCommand, GetRepositoryPolicyCommand, SetRepositoryPolicyCommand,
+  DeleteRepositoryPolicyCommand, GetLifecyclePolicyCommand, PutLifecyclePolicyCommand, DeleteLifecyclePolicyCommand, DeleteRepositoryCommand,
+  PutImageTagMutabilityCommand, PutImageScanningConfigurationCommand,
+} from '@aws-sdk/client-ecr';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, jsonOf, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load, soft } from '../../lib/errors';
+import { bytes, dateTime, pretty } from '../../lib/format';
+import { badge, copyable, mono } from '../../lib/html';
+import { LIFECYCLE_TEMPLATE, POLICY_TEMPLATE, pushCommands } from '../../lib/ecr';
+
+const name = Astro.params.repo!;
+const ctx = getCtx(Astro.cookies);
+const ecr = aws.ecr(ctx);
+const tabId = Astro.url.searchParams.get('tab') ?? '';
+const tab = ['images', 'permissions', 'lifecycle', 'details'].includes(tabId) ? tabId : 'images';
+const to = (t: string) => `${Astro.url.pathname}?tab=${t}`;
+
+const repoRes = await load(async () => (await ecr.send(new DescribeRepositoriesCommand({ repositoryNames: [name] }))).repositories?.[0]);
+if (repoRes.error && /RepositoryNotFound|does not exist/i.test(repoRes.error)) return new Response(`Repository "${name}" does not exist`, { status: 404 });
+const repo = repoRes.data;
+
+const post = await handlePost(Astro, {
+  deleteImages: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'image' }, async (d) => {
+    const r = await ecr.send(new BatchDeleteImageCommand({ repositoryName: name, imageIds: [{ imageDigest: d }] }));
+    if (r.failures?.length) throw new Error(r.failures[0].failureReason ?? 'delete failed');
+  }),
+  setPolicy: async (f) => {
+    jsonOf(f, 'policy', 'Repository policy');
+    await ecr.send(new SetRepositoryPolicyCommand({ repositoryName: name, policyText: str(f, 'policy'), force: true }));
+    return { message: 'Repository policy saved.', redirect: to('permissions') };
+  },
+  deletePolicy: async () => { await ecr.send(new DeleteRepositoryPolicyCommand({ repositoryName: name })); return { message: 'Repository policy deleted.', redirect: to('permissions') }; },
+  setLifecycle: async (f) => {
+    jsonOf(f, 'lifecycle', 'Lifecycle policy');
+    await ecr.send(new PutLifecyclePolicyCommand({ repositoryName: name, lifecyclePolicyText: str(f, 'lifecycle') }));
+    return { message: 'Lifecycle policy saved.', redirect: to('lifecycle') };
+  },
+  deleteLifecycle: async () => { await ecr.send(new DeleteLifecyclePolicyCommand({ repositoryName: name })); return { message: 'Lifecycle policy deleted.', redirect: to('lifecycle') }; },
+  settings: async (f) => {
+    await ecr.send(new PutImageTagMutabilityCommand({ repositoryName: name, imageTagMutability: str(f, 'mutability') === 'IMMUTABLE' ? 'IMMUTABLE' : 'MUTABLE' }));
+    await ecr.send(new PutImageScanningConfigurationCommand({ repositoryName: name, imageScanningConfiguration: { scanOnPush: str(f, 'scan') === '1' } }));
+    return { message: 'Repository settings updated.', redirect: to('details') };
+  },
+  deleteRepo: async () => { await ecr.send(new DeleteRepositoryCommand({ repositoryName: name, force: true })); return { message: `Deleted repository "${name}".`, redirect: '/ecr' }; },
+});
+if (post.response) return post.response;
+
+const images = tab === 'images' ? await load(async () => {
+  const out = [];
+  let token: string | undefined;
+  do {
+    const r = await ecr.send(new DescribeImagesCommand({ repositoryName: name, nextToken: token, maxResults: 100 }));
+    out.push(...(r.imageDetails ?? []));
+    token = r.nextToken;
+  } while (token && out.length < 1000);
+  return out.map((i) => ({ id: i.imageDigest!, tags: i.imageTags ?? [], size: i.imageSizeInBytes, pushed: i.imagePushedAt, type: i.artifactMediaType ?? i.imageManifestMediaType ?? '' }))
+    .sort((a, b) => (b.pushed?.getTime() ?? 0) - (a.pushed?.getTime() ?? 0));
+}) : null;
+const policy = tab === 'permissions' ? await soft(async () => (await ecr.send(new GetRepositoryPolicyCommand({ repositoryName: name }))).policyText) : null;
+const lifecycle = tab === 'lifecycle' ? await soft(async () => (await ecr.send(new GetLifecyclePolicyCommand({ repositoryName: name }))).lifecyclePolicyText) : null;
+const tabs = [{ id: 'images', label: 'Images' }, { id: 'permissions', label: 'Permissions' }, { id: 'lifecycle', label: 'Lifecycle policy' }, { id: 'details', label: 'Details and push commands' }];
+const v = post.values;
+---
+<Console title={name} crumbs={[{ label: 'Repositories', href: '/ecr' }, { label: name }]} error={post.error ?? repoRes.error}>
+  <PageHeader title={name} badge={repo?.imageTagMutability === 'IMMUTABLE' ? 'Immutable' : undefined}>
+    <form method="post"><button class="btn btn-danger" name="intent" value="deleteRepo" data-confirm="The repository and all of its images will be permanently deleted." data-confirm-title="Delete repository?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete repository">Delete</button></form>
+  </PageHeader>
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'images' && (
+      <div class="p-5">
+        <DataTable title="Images" bare select="multi" idKey="id" nameKey="id" id="images" rows={images?.data ?? []} error={images?.error} pageSize={20} filter="Search images"
+          emptyTitle="No images" emptyText="Push an image with the commands on the Details tab."
+          columns={[
+            { key: 'tags', label: 'Image tags', render: (r) => (r.tags.length ? r.tags.map((t: string) => badge(t, 'blue').v).join(' ') : badge('untagged')), sort: (r) => r.tags.join(',') },
+            { key: 'pushed', label: 'Pushed at', nowrap: true, render: (r) => dateTime(r.pushed), sort: (r) => r.pushed?.getTime() ?? 0 },
+            { key: 'size', label: 'Size', render: (r) => bytes(r.size) },
+            { key: 'id', label: 'Digest', render: (r) => copyable(r.id, r.id.slice(0, 19) + '...') },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteImages" data-min="1" data-confirm="The selected images will be permanently deleted." data-confirm-title="Delete images?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+      </div>
+    )}
+
+    {tab === 'permissions' && (
+      <div class="space-y-4 p-5">
+        <p class="text-muted">A repository policy controls who can pull from and push to this repository.</p>
+        {policy?.error && <Flash type="error" text="Couldn't load the repository policy" detail={policy.error} dismissible={false} />}
+        {policy?.missing && <p class="text-muted">No repository policy is set.</p>}
+        <form method="post" class="space-y-3">
+          <textarea id="policy" name="policy" class="textarea code-area" rows="14" data-json data-code>{v.policy ?? (policy?.value ? pretty(policy.value) : POLICY_TEMPLATE)}</textarea>
+          <div class="flex gap-2">
+            <button class="btn btn-primary" name="intent" value="setPolicy">Save policy</button>
+            {policy?.value && <button class="btn btn-normal" name="intent" value="deletePolicy" formnovalidate data-confirm="The repository policy will be removed." data-confirm-title="Delete policy?" data-confirm-ok="Delete">Delete policy</button>}
+          </div>
+        </form>
+      </div>
+    )}
+
+    {tab === 'lifecycle' && (
+      <div class="space-y-4 p-5">
+        <p class="text-muted">Lifecycle rules automatically expire images, for example untagged ones beyond a count.</p>
+        {lifecycle?.error && <Flash type="error" text="Couldn't load the lifecycle policy" detail={lifecycle.error} dismissible={false} />}
+        {lifecycle?.missing && <p class="text-muted">No lifecycle policy is set.</p>}
+        <form method="post" class="space-y-3">
+          <textarea id="lifecycle" name="lifecycle" class="textarea code-area" rows="14" data-json data-code>{v.lifecycle ?? (lifecycle?.value ? pretty(lifecycle.value) : LIFECYCLE_TEMPLATE)}</textarea>
+          <div class="flex gap-2">
+            <button class="btn btn-primary" name="intent" value="setLifecycle">Save policy</button>
+            {lifecycle?.value && <button class="btn btn-normal" name="intent" value="deleteLifecycle" formnovalidate data-confirm="The lifecycle policy will be removed." data-confirm-title="Delete lifecycle policy?" data-confirm-ok="Delete">Delete policy</button>}
+          </div>
+        </form>
+      </div>
+    )}
+
+    {tab === 'details' && repo && (
+      <div class="space-y-6 p-5">
+        <Details items={[
+          { label: 'Repository name', value: name }, { label: 'URI', value: copyable(repo.repositoryUri ?? ''), wide: true },
+          { label: 'ARN', value: copyable(repo.repositoryArn ?? ''), wide: true }, { label: 'Registry ID', value: mono(repo.registryId ?? '') },
+          { label: 'Created', value: dateTime(repo.createdAt) }, { label: 'Encryption', value: repo.encryptionConfiguration?.encryptionType },
+          { label: 'Tag immutability', value: repo.imageTagMutability }, { label: 'Scan on push', value: repo.imageScanningConfiguration?.scanOnPush ? 'Enabled' : 'Disabled' },
+        ]} />
+        <form method="post" class="flex max-w-xl flex-wrap items-end gap-4 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="settings" />
+          <FormField label="Tag immutability" for="mutability" class="!mb-0"><select id="mutability" name="mutability" class="select !w-48"><option value="MUTABLE">Mutable</option><option value="IMMUTABLE" selected={repo.imageTagMutability === 'IMMUTABLE'}>Immutable</option></select></FormField>
+          <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="scan" value="1" checked={!!repo.imageScanningConfiguration?.scanOnPush} /> Scan on push</label>
+          <button class="btn btn-normal" type="submit">Save settings</button>
+        </form>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-2">Push commands</h3>
+          <p class="mb-2 text-muted">Authenticate Docker against LocalEmu, then tag and push an image:</p>
+          <pre id="push-commands" class="code-block">{pushCommands(repo.repositoryUri ?? '', ctx.region)}</pre>
+        </div>
+      </div>
+    )}
+  </div>
+</Console>

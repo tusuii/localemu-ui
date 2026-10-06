@@ -26,6 +26,8 @@ services:
   console:
     container_name: "${LOCALEMU_CONSOLE_DOCKER_NAME:-localemu-console}"
     build: ./ui
+    # Or skip the local build and pull the prebuilt multi-arch image:
+    # image: ghcr.io/tusuii/localemu-console:latest
     restart: unless-stopped
     depends_on:
       - localemu

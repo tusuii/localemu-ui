@@ -10,7 +10,7 @@ import { getSnapshot } from '../lib/catalog';
 import { getCtx } from '../lib/context';
 import { takeFlash } from '../lib/flash';
 import { serviceForPath, CATEGORIES } from '../lib/services';
-import { ENDPOINT } from '../lib/config';
+import { ENDPOINT, PUBLIC_ENDPOINT } from '../lib/config';
 
 interface Props {
   title: string;
@@ -39,6 +39,9 @@ const color = service ? CATEGORIES[service.category].color : '';
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="lemu-endpoint" content={PUBLIC_ENDPOINT} />
+    <meta name="lemu-region" content={ctx.region} />
+    <meta name="lemu-account" content={ctx.account} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>{title} | {service ? `${service.name} | ` : ''}LocalEmu Console</title>
     <script is:inline>
@@ -59,16 +62,17 @@ const color = service ? CATEGORIES[service.category].color : '';
     data-service-icon={service?.icon}
     data-service-color={color}
   >
-    <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:bg-surface focus:p-2">Skip to content</a>
+    <a href="#main" class="skip-link">Skip to content</a>
+    <div class="sr-live" role="status" aria-live="polite" data-live-region></div>
     <TopNav catalog={snap.catalog} region={ctx.region} account={ctx.account} online={snap.online} version={snap.health?.version} />
 
     <div class="flex min-h-0 flex-1">
       {showNav && service && (
-        <aside class="sidenav-wrap hidden w-[272px] shrink-0 border-r border-line bg-surface lg:block data-[open=true]:fixed data-[open=true]:bottom-0 data-[open=true]:left-0 data-[open=true]:top-[52px] data-[open=true]:z-30 data-[open=true]:block data-[open=true]:overflow-y-auto data-[open=true]:shadow-xl lg:sticky lg:top-[52px] lg:h-[calc(100vh-52px)] lg:overflow-y-auto" data-sidenav>
+        <aside class="sidenav-wrap hidden w-[272px] shrink-0 border-r border-line bg-surface lg:block data-[open=true]:fixed data-[open=true]:bottom-0 data-[open=true]:left-0 data-[open=true]:top-[52px] data-[open=true]:z-30 data-[open=true]:block data-[open=true]:overflow-y-auto data-[open=true]:shadow-xl lg:sticky lg:top-[52px] lg:h-[calc(100vh-52px)] lg:overflow-y-auto" data-sidenav aria-label={`${service.name} sidebar`}>
           <SideNav service={service} path={Astro.url.pathname} />
         </aside>
       )}
-      <main id="main" class="min-w-0 flex-1 px-4 pb-12 md:px-6">
+      <main id="main" tabindex="-1" class="min-w-0 flex-1 px-4 pb-12 outline-none md:px-6">
         <div class:list={[wide ? '' : 'mx-auto max-w-[1680px]']}>
           {trail.length > 0 && <Breadcrumbs items={[{ label: 'Console Home', href: '/' }, ...trail]} />}
           <div class="space-y-3 pb-3" data-flashbar>
@@ -82,7 +86,7 @@ const color = service ? CATEGORIES[service.category].color : '';
       </main>
     </div>
 
-    <footer class="border-t border-line bg-surface px-6 py-3 text-[12px] text-muted">
+    <footer aria-label="Site footer" class="border-t border-line bg-surface px-6 py-3 text-[12px] text-muted">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <span>LocalEmu Console · talking to <code>{ENDPOINT}</code></span>
         <span class="flex items-center gap-3">
@@ -93,10 +97,10 @@ const color = service ? CATEGORIES[service.category].color : '';
       </div>
     </footer>
 
-    <dialog id="confirm-dialog" class="m-auto w-[min(520px,92vw)] rounded-lg border border-line bg-surface p-0 text-fg shadow-[var(--shadow-menu)]">
+    <dialog id="confirm-dialog" aria-modal="true" aria-labelledby="cd-title" class="m-auto w-[min(520px,92vw)] rounded-lg border border-line bg-surface p-0 text-fg shadow-[var(--shadow-menu)]">
       <form method="dialog">
         <div class="flex items-start justify-between gap-4 px-5 pb-2 pt-4">
-          <h2 class="card-title" data-cd-title>Confirm</h2>
+          <h2 class="card-title" id="cd-title" data-cd-title>Confirm</h2>
           <button value="cancel" class="btn btn-ghost btn-icon" aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
         <div class="px-5 pb-4">
@@ -112,6 +116,43 @@ const color = service ? CATEGORIES[service.category].color : '';
           <button value="ok" class="btn btn-danger-solid" data-cd-ok>Delete</button>
         </div>
       </form>
+    </dialog>
+
+    <section id="shell-panel" class="shell-panel" aria-label="CloudShell" data-shell hidden>
+      <div class="shell-resize" data-shell-resize role="separator" aria-orientation="horizontal" aria-label="Resize shell panel" tabindex="0"></div>
+      <div class="shell-head">
+        <h2 class="flex items-center gap-2 text-[14px]"><Icon name="terminal" size={16} /> CloudShell <span class="font-normal text-muted" data-shell-ctx>{ctx.account} · {ctx.region}</span></h2>
+        <div class="flex items-center gap-1">
+          <button type="button" class="btn btn-ghost btn-icon" data-shell-clear title="Clear (clear)" aria-label="Clear output"><Icon name="eraser" size={16} /></button>
+          <button type="button" class="btn btn-ghost btn-icon" data-shell-collapse title="Collapse" aria-label="Collapse panel" aria-expanded="true"><Icon name="minus" size={16} /></button>
+          <button type="button" class="btn btn-ghost btn-icon" data-shell-close title="Close (Alt+C)" aria-label="Close CloudShell"><Icon name="x" size={16} /></button>
+        </div>
+      </div>
+      <div class="shell-body" data-shell-body>
+        <div class="shell-out" role="log" aria-live="polite" aria-label="Shell output" tabindex="0" data-shell-out></div>
+        <form class="shell-in" data-shell-form autocomplete="off">
+          <label for="shell-input" class="shell-prompt">$</label>
+          <input id="shell-input" class="shell-input" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="aws s3 ls   (Tab completes, Up/Down history, 'aws help')" data-shell-input />
+        </form>
+      </div>
+    </section>
+
+    <dialog id="shortcuts-dialog" aria-modal="true" aria-labelledby="sc-title" class="m-auto w-[min(560px,92vw)] rounded-lg border border-line bg-surface p-0 text-fg shadow-[var(--shadow-menu)]">
+      <div class="flex items-start justify-between gap-4 px-5 pb-2 pt-4">
+        <h2 class="card-title" id="sc-title">Keyboard shortcuts</h2>
+        <form method="dialog"><button class="btn btn-ghost btn-icon" aria-label="Close"><Icon name="x" size={16} /></button></form>
+      </div>
+      <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 px-5 pb-5">
+        <dt><span class="kbd">?</span></dt><dd>Show this help</dd>
+        <dt><span class="kbd">Alt</span>+<span class="kbd">S</span></dt><dd>Search services and resources</dd>
+        <dt><span class="kbd">/</span></dt><dd>Focus the table filter</dd>
+        <dt><span class="kbd">Alt</span>+<span class="kbd">C</span></dt><dd>Toggle CloudShell</dd>
+        <dt><span class="kbd">g</span> then <span class="kbd">h</span></dt><dd>Go to Console Home</dd>
+        <dt><span class="kbd">g</span> then <span class="kbd">s</span></dt><dd>Go to All services</dd>
+        <dt><span class="kbd">g</span> then <span class="kbd">a</span></dt><dd>Go to Event history</dd>
+        <dt><span class="kbd">g</span> then <span class="kbd">3</span> / <span class="kbd">q</span> / <span class="kbd">d</span> / <span class="kbd">l</span> / <span class="kbd">e</span> / <span class="kbd">i</span></dt><dd>S3 / SQS / DynamoDB / Lambda / EC2 / IAM</dd>
+        <dt><span class="kbd">Esc</span></dt><dd>Close menus and dialogs</dd>
+      </dl>
     </dialog>
 
     <script>

@@ -165,6 +165,8 @@ theme.
 
 ```bash
 docker compose up --build        # LocalEmu on :4566 + the console on http://localhost:4321
+# (or use the prebuilt image: uncomment `image: ghcr.io/tusuii/localemu-console:latest` for `console`
+#  in docker-compose.yml and run `docker compose pull && docker compose up`)
 
 # or, against a LocalEmu you already run:
 cd ui && npm ci && npm run dev

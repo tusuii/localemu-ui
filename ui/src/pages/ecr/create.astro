@@ -1,0 +1,42 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateRepositoryCommand } from '@aws-sdk/client-ecr';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Repository name');
+    if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(name)) throw new UserError('Repository names are lowercase letters, numbers, - _ . and / separators.');
+    await aws.ecr(ctx).send(new CreateRepositoryCommand({
+      repositoryName: name,
+      imageTagMutability: str(f, 'mutability') === 'IMMUTABLE' ? 'IMMUTABLE' : 'MUTABLE',
+      imageScanningConfiguration: { scanOnPush: str(f, 'scan') === '1' },
+    }));
+    return { message: `Repository ${name} created successfully.`, redirect: `/ecr/${name.split('/').map(encodeURIComponent).join('/')}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create repository" crumbs={[{ label: 'Repositories', href: '/ecr' }, { label: 'Create repository' }]} error={post.error}>
+  <PageHeader title="Create private repository" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="General settings">
+      <FormField label="Repository name" for="name" hint="Lowercase. Use a slash for namespaces, e.g. team/app."><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Tag immutability" for="mutability" description="Immutable tags cannot be overwritten by later pushes.">
+        <select id="mutability" name="mutability" class="select !w-60"><option value="MUTABLE">Mutable</option><option value="IMMUTABLE" selected={v.mutability === 'IMMUTABLE'}>Immutable</option></select>
+      </FormField>
+      <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="scan" value="1" checked={v.scan === '1'} /> Scan on push</label>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/ecr">Cancel</a><button class="btn btn-primary" type="submit">Create repository</button></div>
+  </form>
+</Console>

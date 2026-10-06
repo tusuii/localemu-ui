@@ -1,0 +1,145 @@
+name: UI CI
+
+on:
+  push:
+    branches: [main]
+    paths: ['ui/**', '.github/workflows/ui-ci.yml']
+  pull_request:
+    paths: ['ui/**', '.github/workflows/ui-ci.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: ui-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: ui
+
+jobs:
+  verify:
+    name: Check, unit tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:unit
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-dist
+          path: ui/dist
+          retention-days: 3
+
+  e2e:
+    name: End-to-end (LocalEmu + Chromium)
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DASHBOARD_API_OPEN: '1'
+      E2E_LAMBDA: '0'
+      LOCALEMU_ENDPOINT: http://localhost:4566
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install and start LocalEmu
+        working-directory: .
+        run: |
+          pip install -e .
+          nohup localemu start > localemu.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -fsS http://localhost:4566/_localemu/health >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          echo "LocalEmu did not become healthy"; cat localemu.log; exit 1
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: console-dist
+          path: ui/dist
+      - name: Start the built console
+        run: |
+          nohup npm start > console.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:4321/api/health >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          cat console.log; exit 1
+      - run: npx playwright-core install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Server logs
+        if: failure()
+        working-directory: .
+        run: |
+          tail -n 200 localemu.log || true
+          tail -n 100 ui/console.log || true
+
+  visual:
+    name: Visual regression (non-blocking)
+    needs: verify
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    env:
+      DASHBOARD_API_OPEN: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install and start LocalEmu
+        working-directory: .
+        run: |
+          pip install -e .
+          nohup localemu start > localemu.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -fsS http://localhost:4566/_localemu/health >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          cat localemu.log; exit 1
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: console-dist
+          path: ui/dist
+      - name: Start the built console
+        run: |
+          nohup npm start > console.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:4321/api/health >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          cat console.log; exit 1
+      - run: npx playwright-core install --with-deps chromium
+      - run: npm run test:visual
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: visual-diffs
+          path: ui/tests/visual/diff
+          retention-days: 7

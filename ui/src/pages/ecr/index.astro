@@ -1,0 +1,58 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeRepositoriesCommand, DeleteRepositoryCommand } from '@aws-sdk/client-ecr';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge, copyable } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ecr = aws.ecr(ctx);
+
+const post = await handlePost(Astro, {
+  delete: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'repository', nouns: 'repositories' }, (id) => ecr.send(new DeleteRepositoryCommand({ repositoryName: id, force: true }))),
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const out = [];
+  let token: string | undefined;
+  do {
+    const r = await ecr.send(new DescribeRepositoriesCommand({ nextToken: token, maxResults: 100 }));
+    out.push(...(r.repositories ?? []));
+    token = r.nextToken;
+  } while (token && out.length < 500);
+  return out.map((r) => ({
+    id: r.repositoryName!, uri: r.repositoryUri ?? '', mutability: r.imageTagMutability ?? 'MUTABLE', scan: !!r.imageScanningConfiguration?.scanOnPush,
+    encryption: r.encryptionConfiguration?.encryptionType ?? 'AES256', created: r.createdAt,
+  })).sort((a, b) => a.id.localeCompare(b.id));
+});
+---
+<Console title="Repositories" crumbs={[{ label: 'Repositories' }]} error={post.error}>
+  <PageHeader title="Private repositories" description="Amazon ECR stores, manages and deploys container images." />
+  <DataTable
+    title="Repositories" rows={res.data ?? []} error={res.error} select="multi" nameKey="id" pageSize={25}
+    filter="Search repositories" emptyTitle="No repositories" emptyText="You don't have any ECR repositories in this region."
+    columns={[
+      { key: 'id', label: 'Repository name', href: (r) => `/ecr/${r.id.split('/').map(encodeURIComponent).join('/')}` },
+      { key: 'uri', label: 'URI', render: (r) => copyable(r.uri) },
+      { key: 'mutability', label: 'Tag immutability', render: (r) => badge(r.mutability === 'IMMUTABLE' ? 'Immutable' : 'Mutable', r.mutability === 'IMMUTABLE' ? 'blue' : 'soft') },
+      { key: 'scan', label: 'Scan on push', render: (r) => (r.scan ? 'Enabled' : 'Disabled') },
+      { key: 'encryption', label: 'Encryption' },
+      { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/ecr/{name}" data-min="1" data-max="1">View images</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected repositories and all of their images will be permanently deleted." data-confirm-title="Delete repositories?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/ecr/create"><Icon name="plus" size={16} /> Create repository</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/ecr/create">Create repository</a>
+  </DataTable>
+</Console>

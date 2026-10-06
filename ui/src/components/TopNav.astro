@@ -10,7 +10,7 @@ const groups = groupByCategory(catalog);
 const redirect = Astro.url.pathname + Astro.url.search;
 const keywords = (e: CatalogEntry) => [e.name, e.id, e.description, ...(e.keywords ?? [])].join(' ').toLowerCase();
 ---
-<header class="sticky top-0 z-40 bg-nav text-nav-fg">
+<header aria-label="Console header" class="sticky top-0 z-40 bg-nav text-nav-fg">
   <div class="flex h-[52px] items-center gap-1.5 px-3">
     <button type="button" class="btn btn-ghost btn-icon !text-white lg:!hidden" data-toggle-sidenav aria-label="Toggle navigation"><Icon name="menu" size={20} /></button>
 
@@ -20,7 +20,7 @@ const keywords = (e: CatalogEntry) => [e.name, e.id, e.description, ...(e.keywor
     </a>
 
     <div class="relative">
-      <button type="button" class="flex h-9 items-center gap-1 rounded px-3 font-bold hover:bg-white/10" data-menu-toggle="menu-services" aria-haspopup="true">
+      <button type="button" class="flex h-9 items-center gap-1 rounded px-3 font-bold hover:bg-white/10" data-menu-toggle="menu-services" aria-haspopup="true" aria-expanded="false" aria-controls="menu-services">
         <Icon name="layout-grid" size={16} /> <span class="hidden sm:inline">Services</span> <Icon name="chevron-down" size={14} />
       </button>
       <div id="menu-services" class="menu !fixed left-2 right-2 top-[56px] !max-h-[calc(100vh-80px)] overflow-y-auto sm:!absolute sm:left-0 sm:right-auto sm:top-full sm:mt-1 sm:!w-[min(980px,94vw)]" data-services-menu>
@@ -50,10 +50,10 @@ const keywords = (e: CatalogEntry) => [e.name, e.id, e.description, ...(e.keywor
     </div>
 
     <div class="relative mx-1 hidden max-w-xl flex-1 md:block">
-      <input type="search" id="global-search" class="peer h-9 w-full rounded-lg border border-white/25 bg-white/10 pl-9 pr-16 text-white placeholder:text-white/60 focus:bg-white focus:text-black focus:placeholder:text-black/50" placeholder="Search services" autocomplete="off" aria-label="Search services" data-global-search />
+      <input type="search" id="global-search" class="peer h-9 w-full rounded-lg border border-white/25 bg-white/10 pl-9 pr-16 text-white placeholder:text-white/60 focus:bg-white focus:text-black focus:placeholder:text-black/50" placeholder="Search services and resources" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" aria-label="Search services and resources" data-global-search />
       <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-white/60 peer-focus:text-black/50"><Icon name="search" size={16} /></span>
       <span class="kbd pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 !border-white/30 !text-white/70 peer-focus:hidden">Alt+S</span>
-      <div id="search-results" class="menu left-0 right-0 top-full mt-1 max-h-[60vh] overflow-y-auto" data-search-results></div>
+      <div id="search-results" role="listbox" aria-label="Search results" class="menu left-0 right-0 top-full mt-1 max-h-[60vh] overflow-y-auto" data-search-results></div>
     </div>
 
     <div class="ml-auto flex items-center gap-0.5">
@@ -62,17 +62,20 @@ const keywords = (e: CatalogEntry) => [e.name, e.id, e.description, ...(e.keywor
         <span data-conn-text>{online ? `v${version ?? ''}` : 'offline'}</span>
       </span>
 
+      <button type="button" class="btn btn-ghost btn-icon !text-white" data-shell-toggle title="CloudShell (Alt+C)" aria-label="Toggle CloudShell" aria-controls="shell-panel" aria-expanded="false"><Icon name="terminal" size={18} /></button>
+      <button type="button" class="btn btn-ghost btn-icon !text-white" data-shortcuts-open title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts"><Icon name="keyboard" size={18} /></button>
+
       <button type="button" class="btn btn-ghost btn-icon !text-white" data-theme-toggle title="Toggle dark mode" aria-label="Toggle dark mode"><Icon name="moon" size={18} /></button>
 
       <div class="relative">
-        <button type="button" class="flex h-9 items-center gap-1 rounded px-2.5 hover:bg-white/10" data-menu-toggle="menu-region" aria-haspopup="true">
+        <button type="button" class="flex h-9 items-center gap-1 rounded px-2.5 hover:bg-white/10" data-menu-toggle="menu-region" aria-haspopup="true" aria-expanded="false" aria-controls="menu-region" aria-label={`Region: ${regionName(region)}`}>
           <Icon name="globe" size={16} /> <span class="hidden max-w-[22ch] truncate font-bold sm:inline">{regionName(region)}</span><span class="font-bold sm:hidden">{region}</span> <Icon name="chevron-down" size={14} />
         </button>
-        <form id="menu-region" method="post" action="/api/context" class="menu right-0 top-full mt-1 max-h-[70vh] overflow-y-auto">
+        <form id="menu-region" role="menu" aria-label="Region" method="post" action="/api/context" class="menu right-0 top-full mt-1 max-h-[70vh] overflow-y-auto">
           <input type="hidden" name="redirect" value={redirect} />
           <div class="px-4 pb-1 pt-2 text-[12px] font-bold uppercase tracking-wide text-muted">Region</div>
           {REGIONS.map((r) => (
-            <button type="submit" name="region" value={r.id} class="menu-item" aria-current={r.id === region ? 'true' : undefined}>
+            <button type="submit" name="region" value={r.id} class="menu-item" role="menuitemradio" aria-checked={r.id === region ? "true" : "false"} aria-current={r.id === region ? 'true' : undefined}>
               <span class="w-4">{r.id === region && <Icon name="circle-check" size={14} class="text-link" />}</span>
               <span class:list={[r.id === region && 'font-bold']}>{r.name}</span><span class="ml-auto pl-4 text-[12px] text-muted">{r.id}</span>
             </button>
@@ -81,7 +84,7 @@ const keywords = (e: CatalogEntry) => [e.name, e.id, e.description, ...(e.keywor
       </div>
 
       <div class="relative">
-        <button type="button" class="flex h-9 items-center gap-1 rounded px-2.5 hover:bg-white/10" data-menu-toggle="menu-account" aria-haspopup="true">
+        <button type="button" class="flex h-9 items-center gap-1 rounded px-2.5 hover:bg-white/10" data-menu-toggle="menu-account" aria-haspopup="true" aria-expanded="false" aria-controls="menu-account" aria-label={`Account: ${account}`}>
           <Icon name="user" size={16} /> <span class="hidden font-mono text-[13px] sm:inline" data-account-label>{account}</span> <Icon name="chevron-down" size={14} />
         </button>
         <form id="menu-account" method="post" action="/api/context" class="menu right-0 top-full mt-1 w-[300px] p-0">

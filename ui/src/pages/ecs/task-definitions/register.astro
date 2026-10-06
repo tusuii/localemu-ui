@@ -1,0 +1,93 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { RegisterTaskDefinitionCommand, type RegisterTaskDefinitionCommandInput } from '@aws-sdk/client-ecs';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, jsonOf, required, str } from '../../../lib/action';
+import { UserError } from '../../../lib/errors';
+import { FARGATE_SIZES } from '../../../lib/ecs';
+
+const ctx = getCtx(Astro.cookies);
+const ecs = aws.ecs(ctx);
+
+const SAMPLE = JSON.stringify({
+  family: 'web', networkMode: 'bridge', requiresCompatibilities: ['EC2'],
+  containerDefinitions: [{ name: 'web', image: 'nginx:latest', memory: 256, essential: true, portMappings: [{ containerPort: 80, hostPort: 8080, protocol: 'tcp' }], environment: [{ name: 'ENV', value: 'dev' }] }],
+}, null, 2);
+
+const post = await handlePost(Astro, {
+  register: async (f) => {
+    let input: RegisterTaskDefinitionCommandInput;
+    if (str(f, 'mode') === 'json') {
+      input = jsonOf<RegisterTaskDefinitionCommandInput>(f, 'json', 'Task definition JSON');
+      if (!input.family || !input.containerDefinitions?.length) throw new UserError('The JSON needs a "family" and at least one container definition.');
+    } else {
+      const family = required(f, 'family', 'Family');
+      if (!/^[A-Za-z0-9_-]{1,255}$/.test(family)) throw new UserError('Family names use letters, numbers, hyphens and underscores.');
+      const fargate = str(f, 'compat') === 'FARGATE';
+      const port = intOf(f, 'port', 'Container port');
+      const memory = intOf(f, 'cmemory', 'Container memory');
+      const envKey = str(f, 'envKey');
+      input = {
+        family, requiresCompatibilities: [fargate ? 'FARGATE' : 'EC2'], networkMode: fargate ? 'awsvpc' : ((str(f, 'network') || 'bridge') as 'bridge'),
+        cpu: fargate ? str(f, 'cpu') || '256' : undefined, memory: fargate ? str(f, 'memory') || '512' : undefined,
+        containerDefinitions: [{
+          name: str(f, 'cname') || family, image: required(f, 'image', 'Image'), essential: true,
+          memory: fargate ? undefined : (memory ?? 256),
+          portMappings: port ? [{ containerPort: port, protocol: 'tcp' }] : undefined,
+          environment: envKey ? [{ name: envKey, value: str(f, 'envValue') }] : undefined,
+        }],
+      };
+    }
+    const r = await ecs.send(new RegisterTaskDefinitionCommand(input));
+    const td = `${r.taskDefinition?.family}:${r.taskDefinition?.revision}`;
+    return { message: `Task definition ${td} registered.`, redirect: `/ecs/task-definitions/${encodeURIComponent(td)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+const mode = v.mode === 'json' ? 'json' : 'form';
+---
+<Console title="Register task definition" crumbs={[{ label: 'Task definitions', href: '/ecs/task-definitions' }, { label: 'Register' }]} error={post.error}>
+  <PageHeader title="Register task definition" />
+  <form method="post" class="max-w-3xl space-y-4" autocomplete="off">
+    <input type="hidden" name="intent" value="register" />
+    <Card title="Configuration method">
+      <div class="flex gap-6">
+        <label class="flex items-center gap-2"><input type="radio" class="radio" name="mode" value="form" checked={mode === 'form'} /> Simple form</label>
+        <label class="flex items-center gap-2"><input type="radio" class="radio" name="mode" value="json" checked={mode === 'json'} /> JSON</label>
+      </div>
+    </Card>
+    <div data-show-when="mode:form" class="space-y-4">
+      <Card title="Task definition">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <FormField label="Family" for="family"><input id="family" name="family" class="input" required value={v.family ?? ''} /></FormField>
+          <FormField label="Launch type compatibility" for="compat"><select id="compat" name="compat" class="select"><option value="EC2">EC2</option><option value="FARGATE" selected={v.compat === 'FARGATE'}>Fargate</option></select></FormField>
+        </div>
+        <div data-show-when="compat:FARGATE" hidden class="grid gap-4 sm:grid-cols-2">
+          <FormField label="CPU (units)" for="cpu"><select id="cpu" name="cpu" class="select">{FARGATE_SIZES.map((s) => <option value={s.cpu}>{s.cpu}</option>)}</select></FormField>
+          <FormField label="Memory (MiB)" for="memory"><select id="memory" name="memory" class="select">{[...new Set(FARGATE_SIZES.flatMap((s) => s.memory))].map((m) => <option value={m}>{m}</option>)}</select></FormField>
+        </div>
+      </Card>
+      <Card title="Container">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <FormField label="Container name" for="cname" optional hint="Defaults to the family."><input id="cname" name="cname" class="input" value={v.cname ?? ''} /></FormField>
+          <FormField label="Image URI" for="image"><input id="image" name="image" class="input" placeholder="nginx:latest" value={v.image ?? ''} /></FormField>
+          <FormField label="Container port" for="port" optional><input id="port" name="port" type="number" min="1" max="65535" class="input" value={v.port ?? ''} /></FormField>
+          <FormField label="Memory limit (MiB)" for="cmemory" optional hint="EC2 launch type only."><input id="cmemory" name="cmemory" type="number" min="4" class="input" placeholder="256" value={v.cmemory ?? ''} /></FormField>
+          <FormField label="Environment variable" for="envKey" optional><input id="envKey" name="envKey" class="input" placeholder="KEY" value={v.envKey ?? ''} /></FormField>
+          <FormField label="Value" for="envValue" optional><input id="envValue" name="envValue" class="input" value={v.envValue ?? ''} /></FormField>
+        </div>
+      </Card>
+    </div>
+    <div data-show-when="mode:json" hidden>
+      <Card title="Task definition JSON" description="The body of a RegisterTaskDefinition request.">
+        <textarea id="json" name="json" class="textarea code-area" rows="18" data-json data-code>{v.json ?? SAMPLE}</textarea>
+      </Card>
+    </div>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/ecs/task-definitions">Cancel</a><button class="btn btn-primary" type="submit">Register</button></div>
+  </form>
+</Console>
