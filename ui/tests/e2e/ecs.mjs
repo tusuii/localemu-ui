@@ -47,6 +47,7 @@ await p.fill('#tags-key', 'svc-tag'); await p.fill('#tags-value', 'v1'); await t
 t.ok((await t.flash()).includes('Tag added') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("svc-tag")').count()) === 1, 'add tag svc-tag: ' + await t.flash());
 await t.confirmAction('svc-tag', 'Remove', null);
 t.ok((await t.flash()).includes('Removed 1 tag') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("svc-tag")').count()) === 0, 'remove tag svc-tag: ' + await t.flash());
+await t.go(`/ecs/${cl}`);
 await t.confirmAction(svc, 'Delete', 'delete');
 t.ok((await p.locator(`form[data-table=services] tr[data-row]:has-text("${svc}")`).count()) === 0, 'service deleted');
 

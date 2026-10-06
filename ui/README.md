@@ -64,7 +64,7 @@ If LocalEmu is not on `http://localhost:4566`, set `LOCALEMU_ENDPOINT` (see belo
 | **CloudFormation** | Create / update / delete stacks (template from file, URL or paste, with validation), change sets, outputs, resources, events, template |
 | **Kinesis · Route 53** | Streams with put/read records · hosted zones and record sets |
 | **CloudTrail** | Event history of every API call LocalEmu served, with request details |
-| **API Gateway** | REST, HTTP and WebSocket APIs: resources, methods and integrations, routes, deployments and stages |
+| **API Gateway** | REST, HTTP and WebSocket APIs: resources, methods and integrations, routes, deployments and stages, API keys and usage plans |
 | **RDS** | DB instances and clusters (create, start/stop/reboot, modify, delete), snapshots with restore, subnet groups, parameter groups |
 | **ECS · ECR** | Clusters, services, tasks and task definitions · repositories, images, repository and lifecycle policies |
 | **Cognito · ACM** | User pools with users, groups and app clients · request / import / inspect certificates |
@@ -189,7 +189,8 @@ tests/e2e/                     Playwright flows that drive the real UI against a
 * EC2 instances are API metadata unless LocalEmu has Docker (then each is a real container).
 * S3, DynamoDB, Lambda, SQS and SNS lists page on the server; other lists show the first page (up to a few hundred items) with client-side filtering and paging.
 * Athena queries need LocalEmu's SQL engine to be able to fetch its extensions; offline they end in `Failed` and the console shows the reason.
-* Some detail is still read-only or missing: S3 replication and access logging, Cognito app-client editing, ELB listener editing, API Gateway API keys, RDS parameter editing.
+* Glue crawler and job edit forms need `UpdateCrawler` / `UpdateJob`, which LocalEmu doesn't implement yet; the console says so instead of failing.
+* Not covered: Cognito SMS MFA, ELB rule condition types beyond path and host, weighted multi-target-group forwarding, replication filters beyond a prefix.
 
 ## Prebuilt image
 

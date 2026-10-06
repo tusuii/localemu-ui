@@ -28,6 +28,7 @@ await t.submit('button:has-text("Create table")');
 t.ok((await p.innerText('body')).includes('is not "name type"'), 'invalid column syntax rejected');
 
 // edit table
+await t.go(`/glue/tables/${db}/${tbl}`);
 await p.fill('#e-description', 'edited by e2e'); await p.fill('#e-location', `s3://e2e-${sfx}/orders2/`);
 await p.fill('#e-columns', 'id int\ncustomer string\namount double\nnote string');
 await t.submit('button:has-text("Save changes")');
