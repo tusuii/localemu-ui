@@ -76,3 +76,9 @@ describe('jmespath functions', () => {
     expect(() => q('sort_by(Buckets, &Tags)', data)).toThrow(/invalid-type/);
   });
 });
+
+describe('jmespath truncated input', () => {
+  it('reports unsupported syntax instead of crashing', () => {
+    for (const e of ['nope(', 'a.', 'a[?', '[?a ==', 'a ||']) expect(() => compileQuery(e)).toThrow(/Unsupported --query/);
+  });
+});

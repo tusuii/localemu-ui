@@ -10,7 +10,8 @@ await p.fill('#name', 'orders'); await p.fill('#visibility', '45');
 txt = await p.locator('[data-cli-text]').first().innerText();
 t.ok(txt.includes('--queue-name orders') && txt.includes('--attributes VisibilityTimeout=45') && !txt.includes('DelaySeconds'), 'live fill, optional flags: ' + txt);
 await p.click('[data-cli-copy]');
-t.ok((await p.locator('[data-cli-copy]').innerText()) === 'Copied', 'copy feedback');
+await p.waitForFunction(() => document.querySelector('[data-cli-copy]').textContent === 'Copied');
+t.ok(true, 'copy feedback');
 const clip = await p.evaluate(() => navigator.clipboard.readText().catch(() => null));
 if (clip !== null) t.ok(clip.includes('--queue-name orders'), 'clipboard has the command');
 
@@ -24,6 +25,7 @@ txt = await p.locator('[data-cli-text]').first().innerText();
 t.ok(txt.includes('new CreateQueueCommand(') && txt.includes('QueueName: "orders.fifo"') && txt.includes('@aws-sdk/client-sqs') && txt.includes('FifoQueue: "true"'), 'sdk tab: ' + txt);
 t.ok((await p.locator('[data-cli-copy]').innerText()) === 'Copy SDK code', 'copy button names the format');
 await p.click('[data-cli-copy]');
+await p.waitForFunction(() => document.querySelector('[data-cli-copy]').textContent === 'Copied');
 const clip2 = await p.evaluate(() => navigator.clipboard.readText().catch(() => null));
 if (clip2 !== null) t.ok(clip2.includes('CreateQueueCommand') && !clip2.includes('aws sqs'), 'clipboard has the SDK code');
 await p.click('[data-cli-tab=cli]');

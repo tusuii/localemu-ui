@@ -34,6 +34,43 @@ await t.go('/apigateway');
 const row = await p.locator(`tr[data-row]:has-text("${rest}")`).innerText();
 t.ok(row.includes('REST') && row.includes(restId), 'list shows REST type');
 
+// method: require an API key
+await t.go(`/apigateway/${restId}`);
+await p.locator('form[data-table=methods] tr[data-row]:has-text("GET") [data-row-select]').check();
+await t.submit('form[data-table=methods] button:has-text("Require API key")');
+t.ok((await t.flash()).includes('Updated 1 method') && (await p.locator('form[data-table=methods] tr[data-row]:has-text("GET")').innerText()).includes('Required'), 'method now requires an API key: ' + await t.flash());
+
+// ---- API keys and usage plans
+const key = `e2e-key-${suffix}`, plan = `e2e-plan-${suffix}`;
+await t.go('/apigateway/keys');
+await p.fill('#k-name', key); await t.submit('button:has-text("Create API key")');
+t.ok((await t.flash()).includes(`API key ${key} created`) && (await p.locator(`form[data-table=keys] tr[data-row]:has-text("${key}")`).count()) === 1, 'api key created: ' + await t.flash());
+t.ok(!(await p.innerText('main')).match(/[A-Za-z0-9]{30,}/), 'key value hidden by default');
+await p.locator(`form[data-table=keys] tr[data-row]:has-text("${key}") [data-row-select]`).check();
+await t.submit('form[data-table=keys] button:has-text("Show value")');
+t.ok(((await p.locator('#key-value').innerText().catch(() => '')).length) >= 20, 'key value shown on demand');
+await p.locator(`form[data-table=keys] tr[data-row]:has-text("${key}") [data-row-select]`).check();
+await t.submit('form[data-table=keys] button:has-text("Disable")');
+t.ok((await p.locator(`form[data-table=keys] tr[data-row]:has-text("${key}")`).innerText()).includes('Disabled'), 'key disabled: ' + await t.flash());
+await t.go('/apigateway/keys?tab=plans');
+await p.fill('#p-name', plan); await p.fill('#p-rate', '10'); await p.fill('#p-burst', '20'); await p.fill('#p-quota', '1000');
+await t.submit('button:has-text("Create usage plan")');
+t.ok((await p.locator(`form[data-table=plans] tr[data-row]:has-text("${plan}")`).innerText()).includes('1000 / day'), 'usage plan created: ' + await t.flash());
+await p.selectOption('#a-plan', { label: plan }); await p.selectOption('#a-stage', { index: 0 });
+await t.submit('button:has-text("Attach stage")');
+t.ok((await p.locator(`form[data-table=plan-stages] tr[data-row]:has-text("${plan}")`).count()) === 1, 'stage attached: ' + await t.flash());
+await p.selectOption('#k-plan', { label: plan }); await p.selectOption('#k-key', { label: key });
+await t.submit('button:has-text("Associate key")');
+t.ok((await p.locator(`form[data-table=plan-keys] tr[data-row]:has-text("${key}")`).count()) === 1, 'key associated: ' + await t.flash());
+await t.confirmAction(key, 'Remove', null);
+t.ok((await p.locator(`form[data-table=plan-keys] tr[data-row]`).count()) === 0, 'association removed');
+await t.confirmAction(plan, 'Delete', 'delete');
+t.ok((await p.locator(`form[data-table=plans] tr[data-row]:has-text("${plan}")`).count()) === 0, 'usage plan deleted');
+await t.go('/apigateway/keys');
+await t.confirmAction(key, 'Delete', 'delete');
+t.ok((await p.locator(`form[data-table=keys] tr[data-row]:has-text("${key}")`).count()) === 0, 'api key deleted');
+await t.go('/apigateway');
+
 // ---- HTTP API
 await t.go('/apigateway/create');
 await p.check('input[value=http]'); await p.fill('#name', http);

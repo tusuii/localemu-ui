@@ -27,6 +27,15 @@ await p.fill('#name', 'bad_tbl'); await p.fill('#location', 's3://x/y/'); await 
 await t.submit('button:has-text("Create table")');
 t.ok((await p.innerText('body')).includes('is not "name type"'), 'invalid column syntax rejected');
 
+// edit table
+await p.fill('#e-description', 'edited by e2e'); await p.fill('#e-location', `s3://e2e-${sfx}/orders2/`);
+await p.fill('#e-columns', 'id int\ncustomer string\namount double\nnote string');
+await t.submit('button:has-text("Save changes")');
+const ed = await text();
+t.ok((await t.flash()).includes(`Table ${tbl} updated`) && ed.includes('edited by e2e') && ed.includes('orders2') && ed.includes('note') && ed.includes('dt'), 'table edited, partition keys kept: ' + await t.flash());
+await p.fill('#e-columns', 'bad!!'); await t.submit('button:has-text("Save changes")');
+t.ok((await p.innerText('body')).includes('is not "name type"'), 'table edit rejects bad columns');
+
 // ---- crawlers
 await t.go('/glue/crawlers/create');
 await p.fill('#name', crawler); await p.fill('#path', `s3://e2e-${sfx}/orders/`); await p.selectOption('#db', db);
@@ -36,6 +45,15 @@ await p.locator(`tr[data-row]:has-text("${crawler}") [data-row-select]`).check()
 await t.submit('form[data-table] button:has-text("Run")');
 t.ok((await t.flash()).includes('Started 1 crawler'), 'crawler started: ' + await t.flash());
 t.ok(/running|ready|stopping/i.test(await p.locator(`tr[data-row]:has-text("${crawler}")`).innerText()), 'crawler state visible');
+// crawler detail + edit (UpdateCrawler may be unsupported by the emulator)
+await p.click(`tr[data-row]:has-text("${crawler}") a:has-text("${crawler}")`); await p.waitForLoadState('load');
+t.ok(p.url().endsWith(`/glue/crawlers/${crawler}`) && (await text()).includes(`s3://e2e-${sfx}/orders/`), 'crawler detail shows targets');
+await p.fill('#e-paths', `s3://e2e-${sfx}/orders/\ns3://e2e-${sfx}/more/`); await p.fill('#e-schedule', 'cron(0 12 * * ? *)');
+await t.submit('button:has-text("Save changes")');
+{ const b = (await p.innerText('body')).replace(/\s+/g, ' ');
+  t.ok(b.includes(`Crawler ${crawler} updated`) || b.includes('LocalEmu does not support UpdateCrawler'), 'crawler edit succeeds or reports unsupported clearly'); }
+await p.fill('#e-paths', 'http://nope'); await t.submit('button:has-text("Save changes")');
+t.ok((await p.innerText('body')).includes('is not an S3 path'), 'crawler edit validates paths');
 await t.go('/glue/crawlers');
 await t.confirmAction(crawler, 'Delete', 'delete');
 t.ok((await t.flash()).includes('Deleted 1 crawler') && (await p.locator(`tr[data-row]:has-text("${crawler}")`).count()) === 0, 'crawler deleted');
@@ -49,6 +67,12 @@ t.ok((await text()).includes(`s3://e2e-${sfx}/scripts/etl.py`), 'job detail show
 await t.submit('button:has-text("Run job")');
 t.ok((await t.flash()).includes('Job run started'), 'run started: ' + await t.flash());
 t.ok((await p.locator('form[data-table=runs] tr[data-row]').count()) >= 1, 'run listed in runs table');
+await p.fill('#e-script', `s3://e2e-${sfx}/scripts/etl2.py`); await p.fill('#e-args', '--job-language=python\n--env=e2e');
+await t.submit('button:has-text("Save changes")');
+{ const b = (await p.innerText('body')).replace(/\s+/g, ' ');
+  t.ok(b.includes(`Job ${job} updated`) ? b.includes('etl2.py') : b.includes('LocalEmu does not support UpdateJob'), 'job edit succeeds or reports unsupported clearly'); }
+await p.fill('#e-script', 'not-s3'); await t.submit('button:has-text("Save changes")');
+t.ok((await p.innerText('body')).includes('must start with s3://'), 'job edit validates script');
 await t.go('/glue/jobs');
 t.ok((await p.locator(`tr[data-row]:has-text("${job}")`).count()) === 1, 'job listed');
 await t.confirmAction(job, 'Delete', 'delete');

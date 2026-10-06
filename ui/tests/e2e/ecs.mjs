@@ -33,6 +33,20 @@ await p.selectOption('#service', svc); await p.fill('#u-desired', '3');
 await t.submit('button:has-text("Update service")');
 t.ok((await t.flash()).includes('updated'), 'update service: ' + await t.flash());
 t.ok((await p.locator(`form[data-table=services] tr[data-row]:has-text("${svc}")`).innerText()).includes('3'), 'desired count updated');
+// service detail: deployments, events, tags
+await t.go(`/ecs/${cl}`);
+await p.click(`form[data-table=services] tr[data-row]:has-text("${svc}") a:has-text("${svc}")`);
+await p.waitForLoadState('load');
+t.ok(p.url().endsWith(`/ecs/${cl}/services/${svc}`), 'service name links to detail');
+let sm = await p.innerText('main');
+t.ok(sm.includes(svc) && sm.includes('Deployments') && sm.includes('PRIMARY'), 'service detail lists the primary deployment');
+await t.go(`/ecs/${cl}/services/${svc}?tab=events`);
+t.ok((await p.locator('form[data-table=events]').count()) === 1, 'service events tab renders');
+await t.go(`/ecs/${cl}/services/${svc}?tab=tags`);
+await p.fill('#tags-key', 'svc-tag'); await p.fill('#tags-value', 'v1'); await t.submit('button:has-text("Add tag")');
+t.ok((await t.flash()).includes('Tag added') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("svc-tag")').count()) === 1, 'add tag svc-tag: ' + await t.flash());
+await t.confirmAction('svc-tag', 'Remove', null);
+t.ok((await t.flash()).includes('Removed 1 tag') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("svc-tag")').count()) === 0, 'remove tag svc-tag: ' + await t.flash());
 await t.confirmAction(svc, 'Delete', 'delete');
 t.ok((await p.locator(`form[data-table=services] tr[data-row]:has-text("${svc}")`).count()) === 0, 'service deleted');
 
@@ -54,6 +68,17 @@ await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd
 t.ok((await t.flash()).includes('Stopped 1'), 'stop task: ' + await t.flash());
 await t.go(`/ecs/${cl}?tab=infrastructure`);
 t.ok((await p.innerText('main')).includes('No container instances'), 'infrastructure tab empty state');
+
+await t.go(`/ecs/${cl}?tab=tags`);
+await p.fill('#tags-key', 'cl-tag'); await p.fill('#tags-value', 'v1'); await t.submit('button:has-text("Add tag")');
+t.ok((await t.flash()).includes('Tag added') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("cl-tag")').count()) === 1, 'add tag cl-tag: ' + await t.flash());
+await t.confirmAction('cl-tag', 'Remove', null);
+t.ok((await t.flash()).includes('Removed 1 tag') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("cl-tag")').count()) === 0, 'remove tag cl-tag: ' + await t.flash());
+await t.go(`/ecs/task-definitions/${fam}:1`);
+await p.fill('#tags-key', 'td-tag'); await p.fill('#tags-value', 'v1'); await t.submit('button:has-text("Add tag")');
+t.ok((await t.flash()).includes('Tag added') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("td-tag")').count()) === 1, 'add tag td-tag: ' + await t.flash());
+await t.confirmAction('td-tag', 'Remove', null);
+t.ok((await t.flash()).includes('Removed 1 tag') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("td-tag")').count()) === 0, 'remove tag td-tag: ' + await t.flash());
 
 // ---- cleanup
 for (const f of [fam, fam2, far]) {

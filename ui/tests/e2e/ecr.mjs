@@ -33,6 +33,11 @@ t.ok((await t.flash()).includes('policy deleted'), 'delete lifecycle policy: ' +
 await t.go(`/ecr/${repo}?tab=details`);
 const push = await p.locator('#push-commands').innerText();
 t.ok(push.includes('docker push') && push.includes(`.dkr.ecr.us-east-1.amazonaws.com/${repo}:latest`), 'push commands use repositoryUri');
+await t.go(`/ecr/${repo}?tab=tags`);
+await p.fill('#tags-key', 'repo-tag'); await p.fill('#tags-value', 'v1'); await t.submit('button:has-text("Add tag")');
+t.ok((await t.flash()).includes('Tag added') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("repo-tag")').count()) === 1, 'add tag repo-tag: ' + await t.flash());
+await t.confirmAction('repo-tag', 'Remove', null);
+t.ok((await t.flash()).includes('Removed 1 tag') && (await p.locator('form[data-table=tags] tr[data-row]:has-text("repo-tag")').count()) === 0, 'remove tag repo-tag: ' + await t.flash());
 // delete image
 await t.go(`/ecr/${repo}`);
 await t.confirmAction('v1', 'Delete', 'delete');
