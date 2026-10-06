@@ -1,0 +1,10 @@
+---
+import Icon from './Icon.astro';
+import { CATEGORIES, type CategoryId } from '../lib/services';
+interface Props { icon: string; category: CategoryId; size?: number }
+const { icon, category, size = 32 } = Astro.props;
+const color = CATEGORIES[category]?.color ?? '#5f6b7a';
+---
+<span class="svc-tile" style={`background:${color};width:${size}px;height:${size}px`}>
+  <Icon name={icon} size={Math.round(size * 0.62)} />
+</span>

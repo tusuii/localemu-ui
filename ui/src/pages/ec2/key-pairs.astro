@@ -1,0 +1,61 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeKeyPairsCommand, CreateKeyPairCommand, DeleteKeyPairCommand, ImportKeyPairCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, plural } from '../../lib/format';
+import { mono } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Key pair name');
+    const r = await ec2.send(new CreateKeyPairCommand({ KeyName: name, KeyType: (str(f, 'type') || 'rsa') as never }));
+    return { stay: true, message: `Key pair "${name}" created.`, data: { name, material: r.KeyMaterial, fingerprint: r.KeyFingerprint } };
+  },
+  import: async (f) => { await ec2.send(new ImportKeyPairCommand({ KeyName: required(f, 'name', 'Key pair name'), PublicKeyMaterial: Buffer.from(required(f, 'pub', 'Public key')) })); return `Imported key pair "${str(f, 'name')}".`; },
+  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one key pair.'); for (const k of ids) await ec2.send(new DeleteKeyPairCommand({ KeyName: k })); return `Deleted ${plural(ids.length, 'key pair')}.`; },
+});
+if (post.response) return post.response;
+const made = post.result?.data as { name: string; material?: string; fingerprint?: string } | undefined;
+const res = await load(async () => ((await ec2.send(new DescribeKeyPairsCommand({}))).KeyPairs ?? []).map((k) => ({ id: k.KeyName, name: k.KeyName, type: k.KeyType, fp: k.KeyFingerprint, created: k.CreateTime, kid: k.KeyPairId })));
+---
+<Console title="Key pairs" crumbs={[{ label: 'Key pairs' }]} error={post.error}>
+  <PageHeader title="Key pairs" />
+  {made?.material && (
+    <Flash type="warning" class="mb-4" dismissible={false} text={`Save the private key for "${made.name}" now`} detail="This is the only time it is available.">
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <a class="btn btn-normal btn-sm" download={`${made.name}.pem`} href={`data:application/x-pem-file;base64,${Buffer.from(made.material).toString('base64')}`}><Icon name="download" size={14} /> Download {made.name}.pem</a>
+        <button type="button" class="btn btn-normal btn-sm" data-copy={made.material}><Icon name="copy" size={14} /> Copy</button>
+      </div>
+      <pre class="code-block mt-3 max-h-40">{made.material}</pre>
+    </Flash>
+  )}
+  <DataTable title="Key pairs" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="name" pageSize={25} emptyTitle="No key pairs" emptyText="Create one below to SSH into your instances."
+    columns={[{ key: 'name', label: 'Name' }, { key: 'type', label: 'Type' }, { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created) }, { key: 'fp', label: 'Fingerprint', render: (r) => mono(r.fp ?? '-') }, { key: 'kid', label: 'ID', mono: true }]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected key pairs will be deleted. Running instances keep working." data-confirm-title="Delete key pairs?" data-confirm-ok="Delete">Delete</button>
+  </DataTable>
+  <div class="mt-4 grid gap-4 lg:grid-cols-2">
+    <Card title="Create key pair">
+      <form method="post" class="space-y-1"><input type="hidden" name="intent" value="create" />
+        <FormField label="Name" for="kname"><input id="kname" name="name" class="input" required autocomplete="off" /></FormField>
+        <FormField label="Type" for="ktype"><select id="ktype" name="type" class="select !w-48"><option value="rsa">RSA</option><option value="ed25519">ED25519</option></select></FormField>
+        <button class="btn btn-primary" type="submit">Create key pair</button></form>
+    </Card>
+    <Card title="Import key pair">
+      <form method="post" class="space-y-1"><input type="hidden" name="intent" value="import" />
+        <FormField label="Name" for="iname"><input id="iname" name="name" class="input" required autocomplete="off" /></FormField>
+        <FormField label="Public key" for="pub"><textarea id="pub" name="pub" class="textarea code-area" rows="3" required placeholder="ssh-rsa AAAA…"></textarea></FormField>
+        <button class="btn btn-normal" type="submit">Import key pair</button></form>
+    </Card>
+  </div>
+</Console>

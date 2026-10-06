@@ -1,0 +1,69 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import Details from '../../components/Details.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { GetParameterCommand, PutParameterCommand, DeleteParameterCommand, GetParameterHistoryCommand } from '@aws-sdk/client-ssm';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, str } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge, copyable } from '../../lib/html';
+
+const name = Astro.url.searchParams.get('name');
+if (!name) return Astro.redirect('/ssm');
+const ctx = getCtx(Astro.cookies);
+const ssm = aws.ssm(ctx);
+const here = `${Astro.url.pathname}?name=${encodeURIComponent(name)}`;
+
+const post = await handlePost(Astro, {
+  save: async (f) => {
+    const value = String(f.get('value') ?? '');
+    if (value === '') throw new UserError('Enter a value.');
+    await ssm.send(new PutParameterCommand({ Name: name, Value: value, Type: str(f, 'type') as never, Description: str(f, 'description') || undefined, Overwrite: true }));
+    return { message: 'Parameter updated.', redirect: here };
+  },
+  delete: async () => { await ssm.send(new DeleteParameterCommand({ Name: name })); return { message: `Deleted parameter ${name}.`, redirect: '/ssm' }; },
+});
+if (post.response) return post.response;
+
+const p = await load(async () => (await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }))).Parameter!);
+if (p.error && /ParameterNotFound/i.test(p.error)) return new Response(`Parameter "${name}" does not exist`, { status: 404 });
+const hist = await load(async () => ((await ssm.send(new GetParameterHistoryCommand({ Name: name, WithDecryption: true }))).Parameters ?? []).reverse());
+const x = p.data;
+const secure = x?.Type === 'SecureString';
+const v = post.values;
+---
+<Console title={name} crumbs={[{ label: 'Parameter Store', href: '/ssm' }, { label: name }]} error={post.error}>
+  <PageHeader title={name} badge={x?.Type}>
+    <form method="post"><input type="hidden" name="intent" value="delete" />
+      <button class="btn btn-danger" data-confirm="This parameter will be permanently deleted." data-confirm-title="Delete parameter?" data-confirm-name={name} data-confirm-ok="Delete parameter"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {p.error ? <Flash type="error" text="Couldn't load the parameter" detail={p.error} dismissible={false} /> : x && (
+    <div class="space-y-4">
+      <Card title="Details">
+        <Details items={[
+          { label: 'Name', value: x.Name }, { label: 'Type', value: badge(x.Type, secure ? 'orange' : 'soft') }, { label: 'Version', value: String(x.Version) },
+          { label: 'Last modified', value: dateTime(x.LastModifiedDate) }, { label: 'Data type', value: x.DataType }, { label: 'ARN', value: copyable(x.ARN ?? ''), wide: true },
+        ]} />
+      </Card>
+      <Card title="Value" description={secure ? 'SecureString values are decrypted for display.' : undefined}>
+        <form method="post" class="space-y-1">
+          <input type="hidden" name="intent" value="save" /><input type="hidden" name="type" value={x.Type} />
+          <FormField label="Value" for="value"><textarea id="value" name="value" class="textarea code-area" rows="6" data-code autocomplete="off" spellcheck="false" required>{v.value ?? x.Value}</textarea></FormField>
+          <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? (hist.data?.[0]?.Description ?? '')} /></FormField>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </form>
+      </Card>
+      <Card title="History" count={hist.data?.length ?? 0} flush>
+        <div class="tbl-wrap border-t border-line"><table class="tbl"><thead><tr><th>Version</th><th>Value</th><th>Modified</th><th>Modified by</th></tr></thead><tbody>
+          {(hist.data ?? []).map((h: any) => <tr><td>{h.Version}</td><td class="max-w-[420px] truncate font-mono text-[13px]" title={h.Value}>{h.Value}</td><td class="nowrap">{dateTime(h.LastModifiedDate)}</td><td class="text-[13px]">{h.LastModifiedUser ?? '-'}</td></tr>)}
+        </tbody></table></div>
+      </Card>
+    </div>
+  )}
+</Console>

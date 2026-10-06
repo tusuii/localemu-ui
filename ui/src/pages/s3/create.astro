@@ -1,0 +1,44 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateBucketCommand, PutBucketVersioningCommand } from '@aws-sdk/client-s3';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+import { validBucketName } from '../../lib/s3';
+import { regionName } from '../../lib/config';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Bucket name');
+    if (!validBucketName(name)) throw new UserError('Bucket names must be 3-63 characters of lowercase letters, numbers, dots and hyphens, starting and ending with a letter or number.');
+    const s3 = aws.s3(ctx);
+    await s3.send(new CreateBucketCommand({ Bucket: name, ...(ctx.region !== 'us-east-1' ? { CreateBucketConfiguration: { LocationConstraint: ctx.region as never } } : {}) }));
+    if (str(f, 'versioning') === 'on') await s3.send(new PutBucketVersioningCommand({ Bucket: name, VersioningConfiguration: { Status: 'Enabled' } }));
+    return { message: `Successfully created bucket "${name}".`, redirect: `/s3/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create bucket" crumbs={[{ label: 'Buckets', href: '/s3' }, { label: 'Create bucket' }]} error={post.error}>
+  <PageHeader title="Create bucket" description="Buckets are containers for data stored in S3." />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="General configuration">
+      <FormField label="AWS Region" for="region"><input id="region" class="input" disabled value={`${regionName(ctx.region)} ${ctx.region}`} /></FormField>
+      <FormField label="Bucket name" for="name" description="Bucket names must be unique within the account and region." hint="3-63 characters: lowercase letters, numbers, dots (.) and hyphens (-).">
+        <input id="name" name="name" class="input" required minlength="3" maxlength="63" pattern="[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]" autocomplete="off" autofocus value={v.name ?? ''} />
+      </FormField>
+    </Card>
+    <Card title="Bucket Versioning" description="Keep multiple versions of an object in the same bucket.">
+      <label class="mr-6 inline-flex items-center gap-2"><input type="radio" class="radio" name="versioning" value="off" checked={v.versioning !== 'on'} /> Disable</label>
+      <label class="inline-flex items-center gap-2"><input type="radio" class="radio" name="versioning" value="on" checked={v.versioning === 'on'} /> Enable</label>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/s3">Cancel</a><button class="btn btn-primary" type="submit">Create bucket</button></div>
+  </form>
+</Console>

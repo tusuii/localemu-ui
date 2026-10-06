@@ -1,0 +1,16 @@
+---
+import { text } from '../lib/html';
+export interface KV { label: string; value?: unknown; wide?: boolean }
+interface Props { items: KV[]; columns?: 2 | 3 | 4 }
+const { items, columns = 3 } = Astro.props;
+const cols = { 2: 'sm:grid-cols-2', 3: 'sm:grid-cols-2 lg:grid-cols-3', 4: 'sm:grid-cols-2 lg:grid-cols-4' }[columns];
+const show = (v: unknown) => (v === undefined || v === null || v === '' ? '-' : text(v));
+---
+<dl class:list={['grid grid-cols-1 gap-x-8 gap-y-4', cols]}>
+  {items.map((it) => (
+    <div class:list={['min-w-0', it.wide && 'sm:col-span-full']}>
+      <dt class="kv-label">{it.label}</dt>
+      <dd class="kv-value" set:html={show(it.value)} />
+    </div>
+  ))}
+</dl>

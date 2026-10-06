@@ -1,0 +1,37 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { CreatePolicyCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, jsonOf, required, str } from '../../../lib/action';
+import { UserError } from '../../../lib/errors';
+import { ALLOW_ALL_POLICY } from '../../../lib/iam';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Policy name');
+    if (!/^[\w+=,.@-]{1,128}$/.test(name)) throw new UserError('Policy names may contain letters, numbers and + = , . @ _ -');
+    jsonOf(f, 'document', 'Policy document');
+    const r = await aws.iam(ctx).send(new CreatePolicyCommand({ PolicyName: name, PolicyDocument: str(f, 'document'), Description: str(f, 'description') || undefined }));
+    return { message: `Policy ${name} created.`, redirect: `/iam/policies/detail?arn=${encodeURIComponent(r.Policy!.Arn!)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create policy" crumbs={[{ label: 'Policies', href: '/iam/policies' }, { label: 'Create policy' }]} error={post.error}>
+  <PageHeader title="Create policy" />
+  <form method="post" class="max-w-4xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Policy details">
+      <FormField label="Policy name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+      <FormField label="Policy document (JSON)" for="document"><textarea id="document" name="document" class="textarea code-area" rows="16" data-code data-json spellcheck="false" required>{v.document ?? ALLOW_ALL_POLICY}</textarea></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/iam/policies">Cancel</a><button class="btn btn-primary" type="submit">Create policy</button></div>
+  </form>
+</Console>

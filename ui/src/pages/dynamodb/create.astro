@@ -1,0 +1,64 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateTableCommand, type KeySchemaElement, type AttributeDefinition } from '@aws-sdk/client-dynamodb';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Table name');
+    if (!/^[A-Za-z0-9_.-]{3,255}$/.test(name)) throw new UserError('Table names are 3-255 characters: letters, numbers, underscore, hyphen and dot.');
+    const pk = required(f, 'pk', 'Partition key');
+    const sk = str(f, 'sk');
+    const defs: AttributeDefinition[] = [{ AttributeName: pk, AttributeType: str(f, 'pkType') as never }];
+    const schema: KeySchemaElement[] = [{ AttributeName: pk, KeyType: 'HASH' }];
+    if (sk) {
+      if (sk === pk) throw new UserError('The sort key must differ from the partition key.');
+      defs.push({ AttributeName: sk, AttributeType: str(f, 'skType') as never });
+      schema.push({ AttributeName: sk, KeyType: 'RANGE' });
+    }
+    const onDemand = str(f, 'billing') !== 'PROVISIONED';
+    await aws.dynamodb(ctx).send(new CreateTableCommand({
+      TableName: name, AttributeDefinitions: defs, KeySchema: schema,
+      BillingMode: onDemand ? 'PAY_PER_REQUEST' : 'PROVISIONED',
+      ...(onDemand ? {} : { ProvisionedThroughput: { ReadCapacityUnits: intOf(f, 'rcu', 'Read capacity') ?? 5, WriteCapacityUnits: intOf(f, 'wcu', 'Write capacity') ?? 5 } }),
+    }));
+    return { message: `The ${name} table was created successfully.`, redirect: `/dynamodb/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+const types = [['S', 'String'], ['N', 'Number'], ['B', 'Binary']];
+---
+<Console title="Create table" crumbs={[{ label: 'Tables', href: '/dynamodb' }, { label: 'Create table' }]} error={post.error}>
+  <PageHeader title="Create table" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Table details" description="DynamoDB is schemaless: only the primary key is defined up front.">
+      <FormField label="Table name" for="name" hint="3-255 characters. Letters, numbers, underscores, hyphens and dots."><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <div class="grid gap-4 sm:grid-cols-[1fr_180px]">
+        <FormField label="Partition key" for="pk"><input id="pk" name="pk" class="input" required autocomplete="off" placeholder="e.g. id" value={v.pk ?? ''} /></FormField>
+        <FormField label="Type" for="pkType"><select id="pkType" name="pkType" class="select">{types.map(([t, l]) => <option value={t} selected={(v.pkType ?? 'S') === t}>{l}</option>)}</select></FormField>
+        <FormField label="Sort key" for="sk" optional><input id="sk" name="sk" class="input" autocomplete="off" placeholder="e.g. createdAt" value={v.sk ?? ''} /></FormField>
+        <FormField label="Type" for="skType"><select id="skType" name="skType" class="select">{types.map(([t, l]) => <option value={t} selected={(v.skType ?? 'S') === t}>{l}</option>)}</select></FormField>
+      </div>
+    </Card>
+    <Card title="Table settings">
+      <div class="space-y-2">
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="billing" value="PAY_PER_REQUEST" checked={(v.billing ?? 'PAY_PER_REQUEST') === 'PAY_PER_REQUEST'} /><span><strong>On-demand</strong><br /><span class="text-muted">Pay per request; no capacity planning.</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="billing" value="PROVISIONED" checked={v.billing === 'PROVISIONED'} /><span><strong>Provisioned</strong><br /><span class="text-muted">Set read and write capacity units.</span></span></label>
+      </div>
+      <div class="mt-4 grid max-w-md grid-cols-2 gap-4" data-show-when="billing:PROVISIONED" hidden>
+        <FormField label="Read capacity units" for="rcu"><input id="rcu" name="rcu" type="number" min="1" class="input" value={v.rcu ?? '5'} /></FormField>
+        <FormField label="Write capacity units" for="wcu"><input id="wcu" name="wcu" type="number" min="1" class="input" value={v.wcu ?? '5'} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/dynamodb">Cancel</a><button class="btn btn-primary" type="submit">Create table</button></div>
+  </form>
+</Console>

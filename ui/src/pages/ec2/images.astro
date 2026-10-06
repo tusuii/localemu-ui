@@ -1,0 +1,27 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import { DescribeImagesCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const pub = Astro.url.searchParams.get('owner') === 'amazon';
+const res = await load(async () => ((await aws.ec2(ctx).send(new DescribeImagesCommand({ Owners: [pub ? 'amazon' : 'self'] }))).Images ?? []).map((i) => ({ id: i.ImageId, name: i.Name, state: i.State, arch: i.Architecture, platform: i.PlatformDetails, created: i.CreationDate, owner: i.OwnerId })));
+---
+<Console title="AMIs" crumbs={[{ label: 'Images (AMIs)' }]}>
+  <PageHeader title="Amazon Machine Images (AMIs)" />
+  <div class="mb-3 flex gap-2">
+    <a href="?" class:list={['btn btn-sm', !pub ? 'btn-primary' : 'btn-normal']}>Owned by me</a>
+    <a href="?owner=amazon" class:list={['btn btn-sm', pub ? 'btn-primary' : 'btn-normal']}>Public images</a>
+  </div>
+  <DataTable title="Images" rows={res.data ?? []} error={res.error} idKey="id" pageSize={25} filter="Filter images" emptyTitle="No images" emptyText="You don't own any AMIs. Switch to public images to browse the ones LocalEmu ships."
+    columns={[
+      { key: 'id', label: 'AMI ID', mono: true }, { key: 'name', label: 'AMI name' }, { key: 'state', label: 'State', render: (r) => stateStatus(r.state) },
+      { key: 'arch', label: 'Architecture' }, { key: 'platform', label: 'Platform' }, { key: 'created', label: 'Creation date', nowrap: true, render: (r) => (r.created ? dateTime(r.created) : '-'), sort: (r) => r.created ?? '' },
+    ]} />
+</Console>

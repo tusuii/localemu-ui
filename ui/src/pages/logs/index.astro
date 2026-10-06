@@ -1,0 +1,41 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import { DescribeLogGroupsCommand, CreateLogGroupCommand, DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { bytes, dateTime, plural } from '../../lib/format';
+
+const ctx = getCtx(Astro.cookies);
+const logs = aws.logs(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => { const n = required(f, 'name', 'Log group name'); await logs.send(new CreateLogGroupCommand({ logGroupName: n })); return { message: `Log group ${n} created.`, redirect: `/logs/group?group=${encodeURIComponent(n)}` }; },
+  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one log group.'); for (const g of ids) await logs.send(new DeleteLogGroupCommand({ logGroupName: g })); return `Deleted ${plural(ids.length, 'log group')}.`; },
+});
+if (post.response) return post.response;
+const res = await load(async () => {
+  const out: any[] = []; let token: string | undefined;
+  do { const r = await logs.send(new DescribeLogGroupsCommand({ nextToken: token })); out.push(...(r.logGroups ?? [])); token = r.nextToken; } while (token && out.length < 1000);
+  return out.map((g) => ({ id: g.logGroupName, name: g.logGroupName, retention: g.retentionInDays, stored: g.storedBytes, created: g.creationTime }));
+});
+const rows = (res.data ?? []).sort((a: any, b: any) => a.name.localeCompare(b.name));
+---
+<Console title="Log groups" crumbs={[{ label: 'Log groups' }]} error={post.error}>
+  <PageHeader title="Log groups" description="Monitor and troubleshoot with logs from your applications and AWS services." />
+  <DataTable title="Log groups" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25} filter="Filter log groups" emptyTitle="No log groups" emptyText="Create one below, or run a Lambda function to get /aws/lambda/<name> automatically."
+    columns={[
+      { key: 'name', label: 'Log group', href: (r) => `/logs/group?group=${encodeURIComponent(r.name)}` },
+      { key: 'retention', label: 'Retention', render: (r) => (r.retention ? `${r.retention} days` : 'Never expire'), sort: (r) => r.retention ?? 1e9 },
+      { key: 'stored', label: 'Stored bytes', render: (r) => bytes(r.stored ?? 0), sort: (r) => r.stored ?? 0 },
+      { key: 'created', label: 'Creation time', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created ?? 0 },
+    ]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected log groups and all of their log data will be permanently deleted." data-confirm-title="Delete log groups?" data-confirm-ok="Delete">Delete</button>
+  </DataTable>
+  <Card class="mt-4" title="Create log group">
+    <form method="post" class="flex max-w-xl items-end gap-2"><input type="hidden" name="intent" value="create" /><div class="flex-1"><label class="field-label" for="gname">Log group name</label><input id="gname" name="name" class="input font-mono" required placeholder="/my/app" autocomplete="off" /></div><button class="btn btn-primary" type="submit">Create</button></form>
+  </Card>
+</Console>

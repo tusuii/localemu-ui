@@ -1,0 +1,63 @@
+---
+import Icon from './Icon.astro';
+import { policyName } from '../lib/iam';
+
+export interface Perms { attached: { PolicyName?: string; PolicyArn?: string }[]; inline: string[] }
+interface Props {
+  perms: Perms;
+  /** Customer + AWS managed policy names for the attach box. */
+  suggestions?: { name: string; arn: string }[];
+  inlineDocs?: Record<string, unknown>;
+}
+const { perms, suggestions = [], inlineDocs = {} } = Astro.props;
+---
+<div class="space-y-8">
+  <section>
+    <h3 class="card-title mb-3">Managed policies <span class="font-normal text-muted">({perms.attached.length})</span></h3>
+    {perms.attached.length === 0 ? <p class="text-muted">No managed policies are attached.</p> : (
+      <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Policy name</th><th>ARN</th><th class="w-24"></th></tr></thead><tbody>
+        {perms.attached.map((p) => (
+          <tr><td><a href={`/iam/policies/detail?arn=${encodeURIComponent(p.PolicyArn ?? '')}`}>{p.PolicyName ?? policyName(p.PolicyArn ?? '')}</a></td><td class="font-mono text-[13px]">{p.PolicyArn}</td>
+            <td><form method="post"><input type="hidden" name="intent" value="detach" /><input type="hidden" name="arn" value={p.PolicyArn} /><button class="btn btn-danger btn-sm" data-confirm={`Detach ${p.PolicyName} from this identity?`} data-confirm-title="Detach policy?" data-confirm-list="false" data-confirm-ok="Detach">Detach</button></form></td></tr>
+        ))}
+      </tbody></table></div>
+    )}
+    <form method="post" class="mt-3 flex max-w-2xl gap-2">
+      <input type="hidden" name="intent" value="attach" />
+      <input name="arn" class="input" list="policy-suggestions" placeholder="Policy name or ARN, e.g. AmazonS3ReadOnlyAccess" required autocomplete="off" />
+      <datalist id="policy-suggestions">{suggestions.map((s) => <option value={s.arn}>{s.name}</option>)}</datalist>
+      <button class="btn btn-normal" type="submit"><Icon name="plus" size={14} /> Attach</button>
+    </form>
+  </section>
+
+  <section class="border-t border-line pt-6">
+    <h3 class="card-title mb-3">Inline policies <span class="font-normal text-muted">({perms.inline.length})</span></h3>
+    {perms.inline.length === 0 && <p class="text-muted">No inline policies.</p>}
+    <div class="space-y-3">
+      {perms.inline.map((n) => (
+        <details class="rounded-lg border border-line">
+          <summary class="flex cursor-pointer items-center justify-between gap-3 px-4 py-2 font-bold">{n}</summary>
+          <div class="space-y-3 border-t border-line p-4">
+            <form method="post" class="space-y-2">
+              <input type="hidden" name="intent" value="putInline" /><input type="hidden" name="policyName" value={n} />
+              <textarea name="document" class="textarea code-area" rows="10" data-code data-json spellcheck="false">{JSON.stringify(inlineDocs[n] ?? {}, null, 2)}</textarea>
+              <div class="flex gap-2"><button class="btn btn-primary btn-sm" type="submit">Save</button></div>
+            </form>
+            <form method="post"><input type="hidden" name="intent" value="deleteInline" /><input type="hidden" name="policyName" value={n} />
+              <button class="btn btn-danger btn-sm" data-confirm="This inline policy will be deleted." data-confirm-title="Delete inline policy?" data-confirm-name={n} data-confirm-ok="Delete"><Icon name="trash-2" size={14} /> Delete policy</button></form>
+          </div>
+        </details>
+      ))}
+    </div>
+    <details class="mt-4 rounded-lg border border-line">
+      <summary class="cursor-pointer px-4 py-2 font-bold text-link">Add inline policy</summary>
+      <form method="post" class="space-y-3 border-t border-line p-4">
+        <input type="hidden" name="intent" value="putInline" />
+        <div><label class="field-label" for="ip-name">Policy name</label><input id="ip-name" name="policyName" class="input max-w-md" required /></div>
+        <div><label class="field-label" for="ip-doc">Policy document (JSON)</label>
+          <textarea id="ip-doc" name="document" class="textarea code-area" rows="10" data-code data-json spellcheck="false" required>{'{\n  "Version": "2012-10-17",\n  "Statement": [\n    {\n      "Effect": "Allow",\n      "Action": ["s3:GetObject"],\n      "Resource": "*"\n    }\n  ]\n}'}</textarea></div>
+        <button class="btn btn-primary" type="submit">Create policy</button>
+      </form>
+    </details>
+  </section>
+</div>

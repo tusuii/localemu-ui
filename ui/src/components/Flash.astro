@@ -1,0 +1,15 @@
+---
+import Icon from './Icon.astro';
+interface Props { type?: 'success' | 'error' | 'warning' | 'info'; text: string; detail?: string; dismissible?: boolean; class?: string }
+const { type = 'info', text, detail, dismissible = true, class: cls = '' } = Astro.props;
+const icons = { success: 'circle-check', error: 'circle-x', warning: 'triangle-alert', info: 'info' } as const;
+---
+<div class:list={['flash', `flash-${type}`, cls]} role={type === 'error' ? 'alert' : 'status'} data-flash>
+  <Icon name={icons[type]} size={20} />
+  <div class="min-w-0 flex-1">
+    <div class="font-bold break-words">{text}</div>
+    {detail && <div class="text-muted mt-0.5 break-words whitespace-pre-wrap">{detail}</div>}
+    <slot />
+  </div>
+  {dismissible && <button type="button" class="text-muted hover:text-fg" data-dismiss aria-label="Dismiss"><Icon name="x" size={16} /></button>}
+</div>

@@ -1,0 +1,227 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import FormField from '../../../components/FormField.astro';
+import JsonView from '../../../components/JsonView.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  GetFunctionCommand, InvokeCommand, DeleteFunctionCommand, UpdateFunctionCodeCommand,
+  UpdateFunctionConfigurationCommand, ListEventSourceMappingsCommand, GetFunctionUrlConfigCommand, ListVersionsByFunctionCommand,
+} from '@aws-sdk/client-lambda';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str } from '../../../lib/action';
+import { UserError, load, soft } from '../../../lib/errors';
+import { bytes, dateTime } from '../../../lib/format';
+import { badge, copyable, mono, stateStatus } from '../../../lib/html';
+import { envText, parseEnv, patchZip, readZip } from '../../../lib/lambda';
+
+const name = Astro.params.fn!;
+const ctx = getCtx(Astro.cookies);
+const lambda = aws.lambda(ctx);
+const sp = Astro.url.searchParams;
+const tab = ['code', 'test', 'configuration', 'triggers', 'versions'].includes(sp.get('tab') ?? '') ? sp.get('tab')! : 'code';
+
+async function fetchZip(): Promise<Uint8Array> {
+  const g = await lambda.send(new GetFunctionCommand({ FunctionName: name }));
+  const loc = g.Code?.Location;
+  if (!loc) throw new UserError('LocalEmu did not return a download location for this function\'s code.');
+  const res = await fetch(loc, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new UserError(`Downloading the deployment package failed (${res.status}).`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+const post = await handlePost(Astro, {
+  invoke: async (f) => {
+    const payloadText = String(f.get('payload') ?? '').trim() || '{}';
+    try { JSON.parse(payloadText); } catch (e) { throw new UserError(`The test event is not valid JSON: ${(e as Error).message}`); }
+    const started = Date.now();
+    const r = await lambda.send(new InvokeCommand({
+      FunctionName: name, Payload: Buffer.from(payloadText), InvocationType: (str(f, 'type') || 'RequestResponse') as never,
+      LogType: str(f, 'type') === 'RequestResponse' || !str(f, 'type') ? 'Tail' : undefined, Qualifier: str(f, 'qualifier') || undefined,
+    }));
+    const body = r.Payload ? Buffer.from(r.Payload).toString('utf8') : '';
+    return {
+      stay: true, message: r.FunctionError ? `The function returned an error (${r.FunctionError}).` : 'Execution completed.',
+      data: { status: r.StatusCode, error: r.FunctionError, version: r.ExecutedVersion, body, log: r.LogResult ? Buffer.from(r.LogResult, 'base64').toString('utf8') : '', ms: Date.now() - started },
+    };
+  },
+  saveCode: async (f) => {
+    const path = required(f, 'path', 'File');
+    const zip = patchZip(await fetchZip(), path, String(f.get('text') ?? ''));
+    await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: name, ZipFile: zip }));
+    return { message: `Deployed ${path}.`, redirect: `${Astro.url.pathname}?tab=code&file=${encodeURIComponent(path)}` };
+  },
+  uploadCode: async (f) => {
+    const file = f.get('zip');
+    if (!(file instanceof File) || file.size === 0) throw new UserError('Choose a .zip file.');
+    await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: name, ZipFile: new Uint8Array(await file.arrayBuffer()) }));
+    return { message: 'Deployment package updated.', redirect: `${Astro.url.pathname}?tab=code` };
+  },
+  config: async (f) => {
+    let env: Record<string, string>;
+    try { env = parseEnv(String(f.get('env') ?? '')); } catch (e) { throw new UserError((e as Error).message); }
+    await lambda.send(new UpdateFunctionConfigurationCommand({
+      FunctionName: name, Handler: str(f, 'handler') || undefined, Description: str(f, 'description'),
+      MemorySize: intOf(f, 'memory', 'Memory'), Timeout: intOf(f, 'timeout', 'Timeout'), Role: str(f, 'role') || undefined,
+      Environment: { Variables: env },
+    }));
+    return { message: 'Configuration updated.', redirect: `${Astro.url.pathname}?tab=configuration` };
+  },
+  delete: async () => { await lambda.send(new DeleteFunctionCommand({ FunctionName: name })); return { message: `Deleted function "${name}".`, redirect: '/lambda' }; },
+});
+if (post.response) return post.response;
+
+const fn = await load(() => lambda.send(new GetFunctionCommand({ FunctionName: name })));
+if (fn.error && /ResourceNotFound|Function not found/i.test(fn.error)) return new Response(`Function "${name}" does not exist`, { status: 404 });
+const c = fn.data?.Configuration;
+const invoked = post.result?.data as { status: number; error?: string; version?: string; body: string; log: string; ms: number } | undefined;
+
+// ---- code tab ----
+let files: ReturnType<typeof readZip> = [];
+let codeError: string | undefined;
+let selected: (typeof files)[number] | undefined;
+if (tab === 'code' && c?.PackageType !== 'Image') {
+  const z = await load(async () => readZip(await fetchZip()));
+  if (z.error) codeError = z.error; else {
+    files = z.data!;
+    const want = sp.get('file');
+    selected = files.find((x) => x.path === want) ?? files.find((x) => !x.binary);
+  }
+}
+const triggers = tab === 'triggers' ? await load(async () => (await lambda.send(new ListEventSourceMappingsCommand({ FunctionName: name }))).EventSourceMappings ?? []) : undefined;
+const urlCfg = tab === 'triggers' ? await soft(() => lambda.send(new GetFunctionUrlConfigCommand({ FunctionName: name }))) : undefined;
+const versions = tab === 'versions' ? await load(async () => (await lambda.send(new ListVersionsByFunctionCommand({ FunctionName: name }))).Versions ?? []) : undefined;
+const tabs = [{ id: 'code', label: 'Code' }, { id: 'test', label: 'Test' }, { id: 'configuration', label: 'Configuration' }, { id: 'triggers', label: 'Triggers' }, { id: 'versions', label: 'Versions' }];
+const v = post.values;
+const logGroup = c?.LoggingConfig?.LogGroup ?? `/aws/lambda/${name}`;
+---
+<Console title={name} crumbs={[{ label: 'Functions', href: '/lambda' }, { label: name }]} error={post.error} notice={post.result?.message && !invoked?.error ? { text: post.result.message } : null}>
+  <PageHeader title={name}>
+    <a class="btn btn-normal" href={`/logs/group?group=${encodeURIComponent(logGroup)}`}><Icon name="scroll-text" size={16} /> View logs</a>
+    <form method="post"><input type="hidden" name="intent" value="delete" />
+      <button class="btn btn-danger" data-confirm="The function will be permanently deleted." data-confirm-title="Delete function?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete function"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+
+  {c && c.State === 'Failed' && <Flash type="error" class="mb-3" dismissible={false} text={`Function state: Failed${c.StateReasonCode ? ` (${c.StateReasonCode})` : ''}`} detail={`${c.StateReason ?? ''}${c.StateReason ? ' ' : ''}Lambda runs functions in Docker containers; make sure LocalEmu can reach the Docker daemon (mount /var/run/docker.sock).`} />}
+  {c && c.State === 'Pending' && <Flash type="info" class="mb-3" dismissible={false} text="The function is still being created." detail="Refresh in a few seconds." />}
+  {fn.error && <Flash type="error" text="Couldn't load the function" detail={fn.error} dismissible={false} />}
+
+  {c && (
+    <Card class="mb-4" title="Function overview">
+      <Details columns={4} items={[
+        { label: 'State', value: stateStatus(c.State ?? 'Active') }, { label: 'Runtime', value: c.Runtime ?? c.PackageType },
+        { label: 'Handler', value: c.Handler ? mono(c.Handler) : undefined }, { label: 'Last modified', value: dateTime(c.LastModified) },
+        { label: 'Memory', value: `${c.MemorySize} MB` }, { label: 'Timeout', value: `${c.Timeout} s` },
+        { label: 'Code size', value: bytes(c.CodeSize) }, { label: 'Architecture', value: c.Architectures?.join(', ') },
+        { label: 'Function ARN', value: copyable(c.FunctionArn ?? ''), wide: true },
+      ]} />
+    </Card>
+  )}
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'code' && (
+      <div class="p-5">
+        {c?.PackageType === 'Image' ? <p class="text-muted">This function is packaged as a container image ({fn.data?.Code?.ImageUri}).</p>
+        : codeError ? <Flash type="warning" text="Couldn't read the deployment package" detail={codeError} dismissible={false} /> : (
+          <div class="grid gap-4 lg:grid-cols-[260px_1fr]">
+            <nav aria-label="Files" class="rounded-lg border border-line">
+              <div class="border-b border-line px-3 py-2 text-[12px] font-bold uppercase tracking-wide text-muted">{name}</div>
+              <ul class="max-h-[480px] overflow-auto py-1">
+                {files.map((x) => (
+                  <li><a href={`?tab=code&file=${encodeURIComponent(x.path)}`} class:list={['block truncate px-3 py-1 font-mono text-[13px] text-fg hover:bg-hover hover:no-underline', selected?.path === x.path && '!bg-selected font-bold']} title={`${x.size} bytes`}>{x.path}</a></li>
+                ))}
+              </ul>
+            </nav>
+            <div class="min-w-0">
+              {selected?.text !== undefined ? (
+                <form method="post" class="space-y-3">
+                  <input type="hidden" name="intent" value="saveCode" /><input type="hidden" name="path" value={selected.path} />
+                  <div class="flex items-center justify-between"><strong class="font-mono text-[13px]">{selected.path}</strong><button class="btn btn-primary btn-sm" type="submit"><Icon name="zap" size={14} /> Deploy</button></div>
+                  <textarea name="text" class="textarea code-area" rows="22" data-code spellcheck="false">{post.values.text ?? selected.text}</textarea>
+                </form>
+              ) : <p class="text-muted">{selected ? 'This file is binary or too large to edit in the browser.' : 'No editable files in the package.'}</p>}
+            </div>
+          </div>
+        )}
+        <form method="post" enctype="multipart/form-data" class="mt-6 flex flex-wrap items-end gap-3 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="uploadCode" />
+          <div class="min-w-[260px] flex-1"><label class="field-label" for="zip">Upload a new deployment package (.zip)</label><input id="zip" type="file" name="zip" accept=".zip" class="input !py-1.5" required /></div>
+          <button class="btn btn-normal" type="submit"><Icon name="upload" size={16} /> Upload</button>
+        </form>
+      </div>
+    )}
+
+    {tab === 'test' && (
+      <div class="grid gap-6 p-5 xl:grid-cols-2">
+        <form method="post" class="space-y-1">
+          <input type="hidden" name="intent" value="invoke" />
+          <FormField label="Test event" for="payload" description="JSON passed to the handler as the event."><textarea id="payload" name="payload" class="textarea code-area" rows="14" data-json data-code spellcheck="false">{v.payload ?? '{\n  "key1": "value1",\n  "key2": "value2"\n}'}</textarea></FormField>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <FormField label="Invocation type" for="type"><select id="type" name="type" class="select"><option value="RequestResponse" selected={v.type !== 'Event' && v.type !== 'DryRun'}>Synchronous (RequestResponse)</option><option value="Event" selected={v.type === 'Event'}>Asynchronous (Event)</option><option value="DryRun" selected={v.type === 'DryRun'}>Validate only (DryRun)</option></select></FormField>
+            <FormField label="Qualifier" for="qualifier" optional><input id="qualifier" name="qualifier" class="input" placeholder="$LATEST" value={v.qualifier ?? ''} /></FormField>
+          </div>
+          <button class="btn btn-primary" type="submit"><Icon name="play" size={16} /> Invoke</button>
+        </form>
+        <div>
+          <h3 class="card-title mb-3">Execution result</h3>
+          {!invoked ? <p class="text-muted">Invoke the function to see its response and logs here.</p> : (
+            <div class="space-y-3">
+              <Flash type={invoked.error ? 'error' : 'success'} dismissible={false} text={invoked.error ? `Execution failed (${invoked.error})` : 'Execution succeeded'} detail={`HTTP ${invoked.status} · ${invoked.ms} ms${invoked.version ? ` · version ${invoked.version}` : ''}`} />
+              <div><div class="kv-label mb-1">Response</div><JsonView value={invoked.body || '(empty)'} maxHeight="240px" /></div>
+              {invoked.log && <div><div class="kv-label mb-1">Log output</div><pre class="code-block max-h-72">{invoked.log}</pre></div>}
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+
+    {tab === 'configuration' && c && (
+      <form method="post" class="max-w-3xl space-y-1 p-5">
+        <input type="hidden" name="intent" value="config" />
+        <div class="grid gap-4 sm:grid-cols-2">
+          <FormField label="Handler" for="handler"><input id="handler" name="handler" class="input font-mono" value={c.Handler ?? ''} /></FormField>
+          <FormField label="Execution role (ARN)" for="role"><input id="role" name="role" class="input font-mono" value={c.Role ?? ''} /></FormField>
+          <FormField label="Memory (MB)" for="memory"><input id="memory" name="memory" type="number" min="128" max="10240" class="input" value={c.MemorySize} /></FormField>
+          <FormField label="Timeout (seconds)" for="timeout"><input id="timeout" name="timeout" type="number" min="1" max="900" class="input" value={c.Timeout} /></FormField>
+        </div>
+        <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={c.Description ?? ''} /></FormField>
+        <FormField label="Environment variables" for="env" optional hint="One KEY=value per line."><textarea id="env" name="env" class="textarea code-area" rows="7" data-code>{v.env ?? envText(c.Environment?.Variables)}</textarea></FormField>
+        <button class="btn btn-primary" type="submit">Save</button>
+      </form>
+    )}
+
+    {tab === 'triggers' && (
+      <div class="space-y-5 p-5">
+        <section>
+          <h3 class="card-title mb-2">Function URL</h3>
+          {urlCfg?.value ? <Details columns={2} items={[{ label: 'URL', value: copyable((urlCfg.value as any).FunctionUrl) }, { label: 'Auth type', value: (urlCfg.value as any).AuthType }]} /> : <p class="text-muted">No function URL is configured.</p>}
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-2">Event source mappings</h3>
+          {triggers?.error ? <Flash type="error" text="Couldn't list triggers" detail={triggers.error} dismissible={false} /> : (triggers?.data ?? []).length === 0 ? <p class="text-muted">No event sources are mapped to this function.</p> : (
+            <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Source</th><th>State</th><th>Batch size</th><th>UUID</th></tr></thead><tbody>
+              {(triggers!.data as any[]).map((m) => <tr><td class="font-mono text-[13px]">{m.EventSourceArn}</td><td set:html={stateStatus(m.State).v} /><td>{m.BatchSize}</td><td class="font-mono text-[13px]">{m.UUID}</td></tr>)}
+            </tbody></table></div>
+          )}
+        </section>
+      </div>
+    )}
+
+    {tab === 'versions' && (
+      <div class="p-5">
+        {versions?.error ? <Flash type="error" text="Couldn't list versions" detail={versions.error} dismissible={false} /> : (
+          <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Version</th><th>Runtime</th><th>Last modified</th><th>Code size</th><th>Description</th></tr></thead><tbody>
+            {(versions?.data ?? []).map((x: any) => <tr><td>{badge(x.Version)}</td><td>{x.Runtime}</td><td class="nowrap">{dateTime(x.LastModified)}</td><td>{bytes(x.CodeSize)}</td><td>{x.Description || '-'}</td></tr>)}
+          </tbody></table></div>
+        )}
+      </div>
+    )}
+  </div>
+</Console>

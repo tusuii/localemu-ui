@@ -1,0 +1,43 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import JsonView from '../../components/JsonView.astro';
+import Icon from '../../components/Icon.astro';
+import { PutEventsCommand, ListEventBusesCommand } from '@aws-sdk/client-eventbridge';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const eb = aws.events(ctx);
+const post = await handlePost(Astro, {
+  put: async (f) => {
+    const detail = String(f.get('detail') ?? '{}').trim() || '{}';
+    try { JSON.parse(detail); } catch (e) { throw new UserError(`Event detail is not valid JSON: ${(e as Error).message}`); }
+    const r = await eb.send(new PutEventsCommand({ Entries: [{ EventBusName: str(f, 'bus') || 'default', Source: required(f, 'source', 'Source'), DetailType: required(f, 'type', 'Detail type'), Detail: detail, Resources: str(f, 'resources') ? str(f, 'resources').split(/[\s,]+/) : undefined }] }));
+    const failed = r.FailedEntryCount ?? 0;
+    return { stay: true, message: failed ? 'The event was rejected.' : 'Event sent.', data: r };
+  },
+});
+if (post.response) return post.response;
+const buses = await load(async () => ((await eb.send(new ListEventBusesCommand({}))).EventBuses ?? []).map((b) => b.Name!));
+const v = post.values;
+---
+<Console title="Send events" crumbs={[{ label: 'Send events' }]} error={post.error} notice={post.result?.message ? { text: post.result.message } : null}>
+  <PageHeader title="Send events" description="Publish a custom event and watch which rules and targets it triggers." />
+  <div class="grid gap-4 xl:grid-cols-2">
+    <Card title="Event">
+      <form method="post" class="space-y-1"><input type="hidden" name="intent" value="put" />
+        <FormField label="Event bus" for="bus"><select id="bus" name="bus" class="select">{(buses.data ?? ['default']).map((b) => <option value={b} selected={v.bus === b}>{b}</option>)}</select></FormField>
+        <div class="grid gap-4 sm:grid-cols-2"><FormField label="Source" for="source"><input id="source" name="source" class="input" required value={v.source ?? 'my.app'} /></FormField><FormField label="Detail type" for="type"><input id="type" name="type" class="input" required value={v.type ?? 'order.created'} /></FormField></div>
+        <FormField label="Detail (JSON)" for="detail"><textarea id="detail" name="detail" class="textarea code-area" rows="9" data-code data-json spellcheck="false">{v.detail ?? '{\n  "orderId": "1234",\n  "total": 42.5\n}'}</textarea></FormField>
+        <FormField label="Resources" for="resources" optional hint="ARNs, comma or space separated."><input id="resources" name="resources" class="input font-mono" value={v.resources ?? ''} /></FormField>
+        <button class="btn btn-primary" type="submit"><Icon name="send" size={16} /> Send event</button>
+      </form>
+    </Card>
+    <Card title="Result">{post.result?.data ? <JsonView value={{ FailedEntryCount: (post.result.data as any).FailedEntryCount, Entries: (post.result.data as any).Entries }} maxHeight="320px" /> : <p class="text-muted">Send an event to see the response here.</p>}</Card>
+  </div>
+</Console>

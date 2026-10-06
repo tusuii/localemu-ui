@@ -1,0 +1,50 @@
+---
+import Console from '../layouts/Console.astro';
+import PageHeader from '../components/PageHeader.astro';
+import ServiceTile from '../components/ServiceTile.astro';
+import { getSnapshot } from '../lib/catalog';
+import { groupByCategory } from '../lib/services';
+
+const snap = await getSnapshot();
+const groups = groupByCategory(snap.catalog);
+const tierLabel = { live: 'Live', metadata: 'Metadata', not_emulated: 'Stub' } as const;
+const tierClass = { live: 'badge-green', metadata: 'badge-blue', not_emulated: 'badge-grey' } as const;
+---
+<Console title="All services" sidebar={false} crumbs={[{ label: 'All services' }]}>
+  <PageHeader title="All services" description="Every AWS service LocalEmu serves. Services with a full console are marked; the rest get a generic resource browser.">
+    <input type="search" class="input !w-72" placeholder="Filter services" aria-label="Filter services" data-page-filter />
+  </PageHeader>
+
+  <div class="space-y-6" id="all-services">
+    {groups.map((g) => (
+      <section data-svc-group>
+        <h2 class="mb-2 flex items-center gap-2 text-[18px]"><span class="h-3 w-3 rounded-sm" style={`background:${g.color}`}></span>{g.name} <span class="font-normal text-muted">({g.items.length})</span></h2>
+        <ul class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          {g.items.map((s) => (
+            <li data-svc-item data-kw={[s.name, s.id, s.description, ...(s.keywords ?? [])].join(' ').toLowerCase()}>
+              <a href={s.link} class="card flex h-full items-start gap-3 !rounded-lg p-3 text-fg hover:bg-hover hover:no-underline">
+                <ServiceTile icon={s.icon} category={s.category} />
+                <span class="min-w-0 flex-1">
+                  <span class="flex items-center gap-2"><span class="truncate font-bold text-link">{s.name}</span>
+                    {s.hasConsole && <span class="badge badge-orange">Console</span>}
+                    {s.tier && !s.hasConsole && <span class:list={['badge', tierClass[s.tier]]}>{tierLabel[s.tier]}</span>}</span>
+                  <span class="mt-0.5 line-clamp-2 block text-[13px] text-muted">{s.description}</span>
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+  </div>
+
+  <script>
+    // Reuse the same filter behaviour as the Services menu, scoped to this page.
+    const input = document.querySelector<HTMLInputElement>('main [data-page-filter]');
+    input?.addEventListener('input', () => {
+      const terms = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+      document.querySelectorAll<HTMLElement>('#all-services [data-svc-item]').forEach((li) => { li.hidden = !terms.every((t) => (li.dataset.kw ?? '').includes(t)); });
+      document.querySelectorAll<HTMLElement>('#all-services [data-svc-group]').forEach((g) => { g.hidden = ![...g.querySelectorAll<HTMLElement>('[data-svc-item]')].some((li) => !li.hidden); });
+    });
+  </script>
+</Console>

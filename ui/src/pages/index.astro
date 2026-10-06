@@ -1,0 +1,128 @@
+---
+import Console from '../layouts/Console.astro';
+import Card from '../components/Card.astro';
+import PageHeader from '../components/PageHeader.astro';
+import ServiceTile from '../components/ServiceTile.astro';
+import Icon from '../components/Icon.astro';
+import { getSnapshot } from '../lib/catalog';
+import { getCtx } from '../lib/context';
+import { resourceCounts } from '../lib/counts';
+import { getActivity, getOverview, isConsoleNoise } from '../lib/localemu';
+import { load } from '../lib/errors';
+import { ENDPOINT, regionName } from '../lib/config';
+import { duration, ago, num } from '../lib/format';
+import { CONSOLES } from '../lib/services';
+
+const ctx = getCtx(Astro.cookies);
+const snap = await getSnapshot();
+const [counts, overview, activity] = await Promise.all([
+  snap.online ? resourceCounts(ctx) : Promise.resolve([]),
+  snap.online ? load(() => getOverview()) : Promise.resolve({ data: undefined, error: 'offline' as string }),
+  snap.online ? load(async () => { const a = await getActivity(80); return { ...a, events: a.events.filter((e) => !isConsoleNoise(e)).slice(0, 8) }; }) : Promise.resolve({ data: undefined, error: 'offline' as string }),
+]);
+
+const services = Object.entries(snap.health?.services ?? {});
+const available = services.filter(([, s]) => s === 'available' || s === 'running').length;
+const tiers = { live: 0, metadata: 0, not_emulated: 0 };
+for (const r of snap.registry ?? []) if (r.tier in tiers) tiers[r.tier]++;
+const totalResources = counts.reduce((a, c) => a + (c.count ?? 0), 0);
+---
+<Console title="Console Home" sidebar={false}>
+  <PageHeader title="Console Home" description={`Everything LocalEmu is running for account ${ctx.account} in ${regionName(ctx.region)}.`}>
+    <label class="flex items-center gap-2 text-muted" data-autorefresh data-interval="10000"><input type="checkbox" class="checkbox" /> Auto refresh</label>
+    <a class="btn btn-normal" href="/services"><Icon name="layout-grid" /> All services</a>
+  </PageHeader>
+
+  <div class="grid gap-4 xl:grid-cols-3">
+    <div class="space-y-4 xl:col-span-2">
+      <Card title="Recently visited" description="Services you opened lately (stored in this browser).">
+        <div data-recent-list class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {CONSOLES.map((s) => (
+            <a href={s.href} hidden data-recent-item data-id={s.id} class="flex items-center gap-3 rounded-lg border border-line p-2.5 text-fg hover:bg-hover hover:no-underline">
+              <ServiceTile icon={s.icon} category={s.category} />
+              <span class="min-w-0"><span class="block truncate font-bold text-link">{s.name}</span><span class="block truncate text-[12px] text-muted">{s.description}</span></span>
+            </a>
+          ))}
+        </div>
+        <p class="text-muted hidden" data-recent-empty>Nothing yet — pick a service from the <strong>Services</strong> menu or the list below.</p>
+      </Card>
+
+      <Card title="Resources" count={counts.length ? `${num(totalResources)} in ${ctx.region}` : undefined} description="Resources LocalEmu holds for the selected account and region (first page of each service).">
+        {counts.length === 0 ? (
+          <p class="text-muted">Connect to LocalEmu to see resource counts.</p>
+        ) : (
+          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {counts.map((c) => (
+              <a href={c.href} class="group rounded-lg border border-line p-3 text-fg hover:bg-hover hover:no-underline">
+                <div class="text-[28px] font-bold leading-8 group-hover:text-link">{c.count === null ? <span class="text-faint" title="Could not query this service">—</span> : <>{num(c.count)}{c.more ? '+' : ''}</>}</div>
+                <div class="text-muted">{c.label}</div>
+              </a>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card title="Recent API activity" description="The latest calls served by the gateway." flush>
+        <a slot="actions" href="/activity" class="btn btn-normal btn-sm">View all</a>
+        {activity.error || !activity.data ? (
+          <p class="px-5 pb-5 text-muted">Activity feed unavailable{activity.error && activity.error !== 'offline' ? ` (${activity.error})` : ''}. The dashboard API is limited to loopback callers unless <code>DASHBOARD_API_OPEN=1</code> is set on LocalEmu.</p>
+        ) : activity.data.events.length === 0 ? (
+          <p class="px-5 pb-5 text-muted">No API calls recorded yet.</p>
+        ) : (
+          <div class="tbl-wrap border-t border-line">
+            <table class="tbl">
+              <thead><tr><th>Time</th><th>Service</th><th>Operation</th><th>Status</th></tr></thead>
+              <tbody>
+                {activity.data.events.map((e: any) => (
+                  <tr>
+                    <td class="nowrap text-muted" title={e.timestamp}>{ago(e.timestamp)}</td>
+                    <td><span class="badge badge-soft">{e.service}</span></td>
+                    <td><a href={`/activity/${e.request_id}`}>{e.operation}</a></td>
+                    <td class:list={[e.status >= 400 ? 'text-danger' : 'text-success', 'font-bold']}>{e.status}{e.error_code ? ` · ${e.error_code}` : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+
+    <div class="space-y-4">
+      <Card title="LocalEmu health">
+        <dl class="space-y-3">
+          <div class="flex items-center justify-between gap-3"><dt class="text-muted">Status</dt>
+            <dd class:list={['status', snap.online ? 'status-success' : 'status-error']}><Icon name={snap.online ? 'circle-check' : 'circle-x'} size={16} />{snap.online ? 'Connected' : 'Unreachable'}</dd></div>
+          <div class="flex items-center justify-between gap-3"><dt class="text-muted">Endpoint</dt><dd class="font-mono text-[13px] break-all text-right">{ENDPOINT}</dd></div>
+          {snap.health && <div class="flex items-center justify-between gap-3"><dt class="text-muted">Version</dt><dd>{snap.health.edition ?? 'localemu'} {snap.health.version}</dd></div>}
+          {snap.health?.uptime !== undefined && <div class="flex items-center justify-between gap-3"><dt class="text-muted">Uptime</dt><dd>{duration(snap.health.uptime)}</dd></div>}
+          <div class="flex items-center justify-between gap-3"><dt class="text-muted">Services available</dt><dd>{available} / {services.length}</dd></div>
+          {snap.registry && (
+            <div class="flex items-center justify-between gap-3"><dt class="text-muted">Emulation depth</dt>
+              <dd class="flex gap-1"><span class="badge badge-green" title="Real engines">{tiers.live} live</span><span class="badge badge-blue" title="State stored, no behaviour">{tiers.metadata} metadata</span><span class="badge badge-grey" title="Stubs">{tiers.not_emulated} stub</span></dd></div>
+          )}
+          {overview.data?.features && (
+            <div class="flex items-center justify-between gap-3"><dt class="text-muted">Persistence</dt><dd>{overview.data.features.persistence ? 'On' : 'Off'}</dd></div>
+          )}
+        </dl>
+      </Card>
+
+      <Card title="Account & region">
+        <dl class="space-y-3">
+          <div><dt class="kv-label">Account ID</dt><dd class="kv-value font-mono">{ctx.account}</dd></div>
+          <div><dt class="kv-label">Region</dt><dd class="kv-value">{regionName(ctx.region)} <span class="text-muted">({ctx.region})</span></dd></div>
+        </dl>
+        <p class="mt-3 text-[13px] text-muted">LocalEmu keeps state per account and region. Use the menus in the top bar to switch; any 12-digit account ID works.</p>
+      </Card>
+
+      <Card title="Use LocalEmu from your tools">
+        <p class="text-muted">Point any AWS SDK, CLI or IaC tool at the gateway:</p>
+        <pre class="code-block mt-2">export AWS_ENDPOINT_URL={ENDPOINT}
+export AWS_ACCESS_KEY_ID={ctx.account}
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_DEFAULT_REGION={ctx.region}</pre>
+        <button type="button" class="btn btn-normal btn-sm mt-3" data-copy={`export AWS_ENDPOINT_URL=${ENDPOINT}\nexport AWS_ACCESS_KEY_ID=${ctx.account}\nexport AWS_SECRET_ACCESS_KEY=test\nexport AWS_DEFAULT_REGION=${ctx.region}`}><Icon name="copy" size={14} /> Copy</button>
+      </Card>
+    </div>
+  </div>
+</Console>

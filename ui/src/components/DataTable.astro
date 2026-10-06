@@ -1,0 +1,125 @@
+---
+import Icon from './Icon.astro';
+import Flash from './Flash.astro';
+import { text } from '../lib/html';
+
+export interface Column<T = any> {
+  key: string;
+  label: string;
+  /** Custom cell content (string is escaped, Safe passes through). */
+  render?: (row: T) => unknown;
+  href?: (row: T) => string | undefined;
+  /** Value used when sorting this column. */
+  sort?: (row: T) => string | number | undefined;
+  nowrap?: boolean;
+  mono?: boolean;
+  class?: string;
+}
+
+interface Props {
+  title: string;
+  columns: Column[];
+  rows: any[];
+  count?: number | string;
+  description?: string;
+  idKey?: string;
+  nameKey?: string;
+  select?: 'single' | 'multi' | false;
+  pageSize?: number;
+  filter?: string | false;
+  emptyTitle?: string;
+  emptyText?: string;
+  error?: string | null;
+  action?: string;
+  refresh?: boolean;
+  id?: string;
+  /** Render without the card chrome (for use inside another card). */
+  bare?: boolean;
+}
+
+const {
+  title, columns, rows, count, description, idKey = 'id', nameKey, select = false, pageSize = 20,
+  filter = 'Find', emptyTitle = 'No resources', emptyText = 'There is nothing to display.', error = null,
+  action = '', refresh = true, id = 'table', bare = false,
+} = Astro.props;
+
+const cell = (v: unknown) => (v === undefined || v === null || v === '' ? '-' : text(v));
+const hasEmptySlot = Astro.slots.has('empty');
+---
+<form method="post" action={action || undefined} data-table={id} data-page-size={pageSize} class:list={[!bare && 'card']} autocomplete="off">
+  <header class="card-header">
+    <div class="min-w-0">
+      <h2 class="card-title">{title} <span class="count">({count ?? rows.length})</span></h2>
+      {description && <p class="card-desc">{description}</p>}
+    </div>
+    <div class="flex flex-wrap items-center justify-end gap-2">
+      {refresh && (
+        <a href={Astro.url.pathname + Astro.url.search} class="btn btn-normal btn-icon" title="Refresh" aria-label="Refresh" data-refresh><Icon name="refresh-cw" size={16} /></a>
+      )}
+      <slot name="actions" />
+    </div>
+  </header>
+
+  {error && <div class="px-5 pb-3"><Flash type="error" text={`Failed to load ${title.toLowerCase()}`} detail={error} dismissible={false} /></div>}
+
+  {!error && rows.length > 0 && (
+    <>
+      <div class="flex flex-wrap items-center justify-between gap-3 px-5 pb-3">
+        {filter !== false ? (
+          <div class="relative w-full max-w-sm">
+            <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint"><Icon name="search" size={16} /></span>
+            <input type="search" class="input !pl-9" placeholder={filter} aria-label={`Filter ${title}`} data-table-filter />
+          </div>
+        ) : <span />}
+        <div class="flex items-center gap-3 text-muted" data-pager-wrap>
+          <span data-pager-info class="text-[13px]"></span>
+          <div class="flex items-center gap-1" data-pager></div>
+        </div>
+      </div>
+      <div class="tbl-wrap border-t border-line">
+        <table class="tbl">
+          <thead>
+            <tr>
+              {select && <th class="sel" scope="col"><span class="sr-only">Select</span>{select === 'multi' && <input type="checkbox" class="checkbox" data-select-all aria-label="Select all" />}</th>}
+              {columns.map((c) => <th scope="col" class="sortable" data-col={c.key}>{c.label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr data-row data-id={String(row[idKey] ?? '')} data-name={String(row[nameKey ?? idKey] ?? '')}>
+                {select && (
+                  <td class="sel">
+                    <input type={select === 'single' ? 'radio' : 'checkbox'} class={select === 'single' ? 'radio' : 'checkbox'} name="id" value={String(row[idKey] ?? '')} aria-label={`Select ${row[nameKey ?? idKey] ?? 'row'}`} data-row-select />
+                  </td>
+                )}
+                {columns.map((c) => {
+                  const v = c.render ? c.render(row) : row[c.key];
+                  const href = c.href?.(row);
+                  const sv = c.sort ? c.sort(row) : typeof row[c.key] === 'number' ? row[c.key] : undefined;
+                  const inner = cell(v);
+                  return (
+                    <td class:list={[c.nowrap && 'nowrap', c.mono && 'font-mono text-[13px]', c.class]} data-v={sv}>
+                      {href && inner !== '-' ? <a href={href} set:html={inner} /> : <Fragment set:html={inner} />}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div class="empty hidden" data-no-match>
+        <h3>No matches</h3>
+        <p>No {title.toLowerCase()} match the filter.</p>
+      </div>
+    </>
+  )}
+
+  {!error && rows.length === 0 && (
+    <div class="empty border-t border-line">
+      <h3>{emptyTitle}</h3>
+      <p>{emptyText}</p>
+      {hasEmptySlot && <div class="mt-4"><slot name="empty" /></div>}
+    </div>
+  )}
+</form>

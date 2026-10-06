@@ -1,0 +1,62 @@
+---
+import Console from '../layouts/Console.astro';
+import PageHeader from '../components/PageHeader.astro';
+import Card from '../components/Card.astro';
+import Details from '../components/Details.astro';
+import { getSnapshot } from '../lib/catalog';
+import { getCtx } from '../lib/context';
+import { ENDPOINT, PUBLIC_ENDPOINT, REGIONS } from '../lib/config';
+import { duration } from '../lib/format';
+import { copyable } from '../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const snap = await getSnapshot();
+const redirect = '/settings';
+---
+<Console title="Settings" sidebar={false} crumbs={[{ label: 'Settings' }]}>
+  <PageHeader title="Settings" description="How this console connects to LocalEmu." />
+  <div class="grid gap-4 lg:grid-cols-2">
+    <Card title="Connection">
+      <Details columns={2} items={[
+        { label: 'Gateway endpoint', value: copyable(ENDPOINT) },
+        { label: 'Browser-facing endpoint', value: copyable(PUBLIC_ENDPOINT) },
+        { label: 'Reachable', value: snap.online ? 'Yes' : `No - ${snap.error ?? ''}` },
+        { label: 'LocalEmu version', value: snap.health?.version },
+        { label: 'Uptime', value: snap.health?.uptime !== undefined ? duration(snap.health.uptime) : undefined },
+        { label: 'Services', value: snap.health ? String(Object.keys(snap.health.services).length) : undefined },
+      ]} />
+      <p class="mt-4 text-[13px] text-muted">The endpoint is set by the <code>LOCALEMU_ENDPOINT</code> environment variable of the console server. Use <code>LOCALEMU_PUBLIC_ENDPOINT</code> when the browser reaches LocalEmu at a different address than the console server does (for example inside Docker).</p>
+    </Card>
+
+    <Card title="Account & region">
+      <form method="post" action="/api/context" class="space-y-4">
+        <input type="hidden" name="redirect" value={redirect} />
+        <div>
+          <label class="field-label" for="region">Region</label>
+          <select id="region" name="region" class="select">
+            {REGIONS.map((r) => <option value={r.id} selected={r.id === ctx.region}>{r.name} - {r.id}</option>)}
+          </select>
+        </div>
+        <div>
+          <label class="field-label" for="account">Account ID</label>
+          <input id="account" name="account" class="input font-mono" pattern="\d{12}" maxlength="12" value={ctx.account} />
+          <p class="field-hint">LocalEmu uses the access key id as the account, so any 12-digit number is an isolated account. The console signs requests with this id and the secret <code>test</code>.</p>
+        </div>
+        <button class="btn btn-primary" type="submit">Save</button>
+      </form>
+    </Card>
+
+    <Card title="Appearance">
+      <p class="text-muted">The console follows your system theme by default. Toggle it any time with the moon icon in the top bar.</p>
+      <button type="button" class="btn btn-normal mt-3" data-theme-toggle>Toggle dark mode</button>
+    </Card>
+
+    <Card title="Keyboard shortcuts">
+      <ul class="space-y-2">
+        <li class="flex justify-between"><span>Search services</span><span class="kbd">Alt + S</span></li>
+        <li class="flex justify-between"><span>Filter the current table</span><span class="kbd">/</span></li>
+        <li class="flex justify-between"><span>Close menus and dialogs</span><span class="kbd">Esc</span></li>
+      </ul>
+    </Card>
+  </div>
+</Console>

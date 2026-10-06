@@ -1,0 +1,121 @@
+---
+import '../styles/global.css';
+import TopNav from '../components/TopNav.astro';
+import SideNav from '../components/SideNav.astro';
+import Breadcrumbs from '../components/Breadcrumbs.astro';
+import type { Crumb } from '../components/Breadcrumbs.astro';
+import Flash from '../components/Flash.astro';
+import Icon from '../components/Icon.astro';
+import { getSnapshot } from '../lib/catalog';
+import { getCtx } from '../lib/context';
+import { takeFlash } from '../lib/flash';
+import { serviceForPath, CATEGORIES } from '../lib/services';
+import { ENDPOINT } from '../lib/config';
+
+interface Props {
+  title: string;
+  /** Breadcrumb trail after the service crumb. */
+  crumbs?: Crumb[];
+  /** Inline error from a failed form submission. */
+  error?: string | null;
+  /** Inline success notice (for actions that re-render instead of redirecting). */
+  notice?: { text: string; detail?: string } | null;
+  sidebar?: boolean;
+  wide?: boolean;
+}
+const { title, crumbs = [], error = null, notice = null, sidebar = true, wide = false } = Astro.props;
+
+const ctx = getCtx(Astro.cookies);
+const snap = await getSnapshot();
+const flash = takeFlash(Astro.cookies);
+const service = serviceForPath(Astro.url.pathname);
+const trail: Crumb[] = service && sidebar ? [{ label: service.name, href: service.href }, ...crumbs] : crumbs;
+const showNav = sidebar && !!service?.nav;
+const color = service ? CATEGORIES[service.category].color : '';
+---
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title} | {service ? `${service.name} | ` : ''}LocalEmu Console</title>
+    <script is:inline>
+      (function () {
+        try {
+          var t = localStorage.getItem('lemu.theme');
+          if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          document.documentElement.dataset.theme = t;
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body
+    class="flex min-h-screen flex-col"
+    data-service-id={service?.id}
+    data-service-name={service?.name}
+    data-service-href={service?.href}
+    data-service-icon={service?.icon}
+    data-service-color={color}
+  >
+    <a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:bg-surface focus:p-2">Skip to content</a>
+    <TopNav catalog={snap.catalog} region={ctx.region} account={ctx.account} online={snap.online} version={snap.health?.version} />
+
+    <div class="flex min-h-0 flex-1">
+      {showNav && service && (
+        <aside class="sidenav-wrap hidden w-[272px] shrink-0 border-r border-line bg-surface lg:block data-[open=true]:fixed data-[open=true]:bottom-0 data-[open=true]:left-0 data-[open=true]:top-[52px] data-[open=true]:z-30 data-[open=true]:block data-[open=true]:overflow-y-auto data-[open=true]:shadow-xl lg:sticky lg:top-[52px] lg:h-[calc(100vh-52px)] lg:overflow-y-auto" data-sidenav>
+          <SideNav service={service} path={Astro.url.pathname} />
+        </aside>
+      )}
+      <main id="main" class="min-w-0 flex-1 px-4 pb-12 md:px-6">
+        <div class:list={[wide ? '' : 'mx-auto max-w-[1680px]']}>
+          {trail.length > 0 && <Breadcrumbs items={[{ label: 'Console Home', href: '/' }, ...trail]} />}
+          <div class="space-y-3 pb-3" data-flashbar>
+            {!snap.online && <Flash type="error" dismissible={false} text="Cannot reach LocalEmu" detail={`${ENDPOINT} - ${snap.error ?? 'no response'}. Start it with "localemu start" or set LOCALEMU_ENDPOINT.`} />}
+            {flash && <Flash type={flash.type} text={flash.text} detail={flash.detail} />}
+            {notice && <Flash type="success" text={notice.text} detail={notice.detail} />}
+            {error && <Flash type="error" text="Request failed" detail={error} />}
+          </div>
+          <slot />
+        </div>
+      </main>
+    </div>
+
+    <footer class="border-t border-line bg-surface px-6 py-3 text-[12px] text-muted">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span>LocalEmu Console · talking to <code>{ENDPOINT}</code></span>
+        <span class="flex items-center gap-3">
+          <a href="/settings">Settings</a>
+          <a href="/services">All services</a>
+          <a href={`${ENDPOINT}/_localemu/dashboard`} target="_blank" rel="noopener">Classic dashboard <Icon name="external-link" size={11} /></a>
+        </span>
+      </div>
+    </footer>
+
+    <dialog id="confirm-dialog" class="m-auto w-[min(520px,92vw)] rounded-lg border border-line bg-surface p-0 text-fg shadow-[var(--shadow-menu)]">
+      <form method="dialog">
+        <div class="flex items-start justify-between gap-4 px-5 pb-2 pt-4">
+          <h2 class="card-title" data-cd-title>Confirm</h2>
+          <button value="cancel" class="btn btn-ghost btn-icon" aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <div class="px-5 pb-4">
+          <p data-cd-body></p>
+          <ul class="mt-2 max-h-40 list-disc overflow-auto pl-5 font-mono text-[13px]" data-cd-list></ul>
+          <div class="mt-4 hidden" data-cd-type>
+            <label class="field-label" for="cd-input">To confirm, type <code class="rounded bg-canvas px-1" data-cd-word></code> below</label>
+            <input id="cd-input" class="input" autocomplete="off" spellcheck="false" data-cd-input />
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 border-t border-line px-5 py-3">
+          <button value="cancel" class="btn btn-normal">Cancel</button>
+          <button value="ok" class="btn btn-danger-solid" data-cd-ok>Delete</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script>
+      import '../scripts/console';
+    </script>
+  </body>
+</html>

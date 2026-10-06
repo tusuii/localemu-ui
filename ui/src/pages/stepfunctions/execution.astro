@@ -1,0 +1,50 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import Details from '../../components/Details.astro';
+import JsonView from '../../components/JsonView.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeExecutionCommand, GetExecutionHistoryCommand, StopExecutionCommand } from '@aws-sdk/client-sfn';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost } from '../../lib/action';
+import { load } from '../../lib/errors';
+import { dateTime, shortDateTime } from '../../lib/format';
+import { badge, copyable, stateStatus } from '../../lib/html';
+
+const arn = Astro.url.searchParams.get('arn');
+if (!arn) return Astro.redirect('/stepfunctions');
+const ctx = getCtx(Astro.cookies);
+const sfn = aws.sfn(ctx);
+const smName = arn.split(':')[6];
+const post = await handlePost(Astro, { stop: async () => { await sfn.send(new StopExecutionCommand({ executionArn: arn })); return 'Execution stopped.'; } });
+if (post.response) return post.response;
+const SFN_STATUS = { running: 'progress', succeeded: 'success', failed: 'error', timed_out: 'error', aborted: 'stopped' } as const;
+const ex = await load(() => sfn.send(new DescribeExecutionCommand({ executionArn: arn })));
+const hist = await load(async () => (await sfn.send(new GetExecutionHistoryCommand({ executionArn: arn, maxResults: 500 }))).events ?? []);
+const e = ex.data;
+const detailOf = (ev: any) => { const k = Object.keys(ev).find((x) => /EventDetails$/.test(x)); return k ? ev[k] : undefined; };
+---
+<Console title={e?.name ?? 'Execution'} crumbs={[{ label: 'State machines', href: '/stepfunctions' }, { label: smName, href: `/stepfunctions/${encodeURIComponent(smName)}` }, { label: e?.name ?? 'Execution' }]} error={post.error}>
+  <PageHeader title={e?.name ?? 'Execution'} badge={e?.status}>
+    {e?.status === 'RUNNING' && <form method="post"><input type="hidden" name="intent" value="stop" /><button class="btn btn-danger" data-confirm="Stops the running execution." data-confirm-title="Stop execution?" data-confirm-list="false" data-confirm-ok="Stop"><Icon name="square" size={16} /> Stop execution</button></form>}
+    <label class="flex items-center gap-2 text-muted" data-autorefresh data-interval="3000"><input type="checkbox" class="checkbox" /> Live refresh</label>
+  </PageHeader>
+  {ex.error && <Flash type="error" text="Couldn't load the execution" detail={ex.error} dismissible={false} />}
+  {e && (
+    <div class="space-y-4">
+      <Card title="Execution details"><Details items={[{ label: 'Status', value: stateStatus(e.status, SFN_STATUS) }, { label: 'Started', value: dateTime(e.startDate) }, { label: 'Ended', value: e.stopDate ? dateTime(e.stopDate) : '-' }, { label: 'Execution ARN', value: copyable(arn), wide: true }, e.error ? { label: 'Error', value: `${e.error}: ${e.cause ?? ''}`, wide: true } : { label: '', value: '' }].filter((x) => x.label)} /></Card>
+      <div class="grid gap-4 lg:grid-cols-2"><Card title="Input"><JsonView value={e.input ?? '{}'} maxHeight="260px" /></Card><Card title="Output"><JsonView value={e.output ?? '(none yet)'} maxHeight="260px" /></Card></div>
+      <Card title="Execution event history" count={hist.data?.length ?? 0} flush>
+        {hist.error ? <div class="px-5 pb-5"><Flash type="error" text="Couldn't load history" detail={hist.error} dismissible={false} /></div> : (
+          <div class="tbl-wrap border-t border-line"><table class="tbl"><thead><tr><th class="w-12">ID</th><th>Type</th><th>Timestamp</th><th>Details</th></tr></thead><tbody>
+            {hist.data!.map((ev) => { const d = detailOf(ev); return <tr><td>{ev.id}</td><td>{badge(ev.type, /Failed|TimedOut|Aborted/.test(ev.type ?? '') ? 'red' : /Succeeded/.test(ev.type ?? '') ? 'green' : 'soft')}</td><td class="nowrap font-mono text-[12.5px]">{shortDateTime(ev.timestamp)}</td>
+              <td>{d ? <details><summary class="cursor-pointer text-link">{d.name ?? d.resource ?? 'Show details'}</summary><pre class="code-block mt-1 max-h-48">{JSON.stringify(d, null, 2)}</pre></details> : '-'}</td></tr>; })}
+          </tbody></table></div>
+        )}
+      </Card>
+    </div>
+  )}
+</Console>

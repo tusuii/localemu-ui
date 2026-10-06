@@ -1,0 +1,275 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Card from '../../../components/Card.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import JsonView from '../../../components/JsonView.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  ListObjectsV2Command, PutObjectCommand, DeleteBucketCommand, GetBucketVersioningCommand, PutBucketVersioningCommand,
+  GetBucketTaggingCommand, GetBucketPolicyCommand, PutBucketPolicyCommand, DeleteBucketPolicyCommand,
+  GetBucketCorsCommand, PutBucketCorsCommand, DeleteBucketCorsCommand, GetBucketLifecycleConfigurationCommand,
+  GetBucketNotificationConfigurationCommand, GetBucketEncryptionCommand, HeadBucketCommand, DeleteObjectsCommand,
+} from '@aws-sdk/client-s3';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, jsonOf, required, str, strs } from '../../../lib/action';
+import { UserError, load, soft } from '../../../lib/errors';
+import { bytes, dateTime, plural } from '../../../lib/format';
+import { badge, tagList, copyable } from '../../../lib/html';
+import { baseName, deletePrefix, parentPrefix } from '../../../lib/s3';
+import { PUBLIC_ENDPOINT } from '../../../lib/config';
+
+const bucket = Astro.params.bucket!;
+const ctx = getCtx(Astro.cookies);
+const s3 = aws.s3(ctx);
+const sp = Astro.url.searchParams;
+const tab = ['objects', 'properties', 'permissions', 'management'].includes(sp.get('tab') ?? '') ? sp.get('tab')! : 'objects';
+const prefix = sp.get('prefix') ?? '';
+const token = sp.get('token') ?? undefined;
+const here = (p: Record<string, string | undefined>) => {
+  const u = new URLSearchParams();
+  for (const [k, v] of Object.entries({ tab: tab === 'objects' ? undefined : tab, ...p })) if (v) u.set(k, v);
+  const q = u.toString();
+  return `${Astro.url.pathname}${q ? '?' + q : ''}`;
+};
+
+const post = await handlePost(Astro, {
+  upload: async (f) => {
+    const files = f.getAll('files').filter((x): x is File => x instanceof File && x.size >= 0 && !!x.name);
+    if (!files.length) throw new UserError('Choose at least one file to upload.');
+    const base = str(f, 'prefix');
+    for (const file of files) {
+      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: base + file.name, Body: new Uint8Array(await file.arrayBuffer()), ContentType: file.type || undefined }));
+    }
+    return `Uploaded ${plural(files.length, 'object')}.`;
+  },
+  folder: async (f) => {
+    let name = required(f, 'name', 'Folder name').replace(/^\/+|\/+$/g, '');
+    if (!name) throw new UserError('Folder name is required.');
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: `${str(f, 'prefix')}${name}/`, Body: '' }));
+    return `Created folder "${name}".`;
+  },
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one object.');
+    const keys = ids.filter((i) => !i.endsWith('/'));
+    for (const folder of ids.filter((i) => i.endsWith('/'))) await deletePrefix(s3, bucket, folder);
+    for (let i = 0; i < keys.length; i += 1000) await s3.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: keys.slice(i, i + 1000).map((Key) => ({ Key })), Quiet: true } }));
+    return `Deleted ${plural(ids.length, 'item')}.`;
+  },
+  versioning: async (f) => {
+    await s3.send(new PutBucketVersioningCommand({ Bucket: bucket, VersioningConfiguration: { Status: str(f, 'status') === 'Enabled' ? 'Enabled' : 'Suspended' } }));
+    return 'Bucket versioning updated.';
+  },
+  putPolicy: async (f) => {
+    const doc = jsonOf(f, 'policy', 'Bucket policy');
+    await s3.send(new PutBucketPolicyCommand({ Bucket: bucket, Policy: JSON.stringify(doc) }));
+    return 'Bucket policy saved.';
+  },
+  deletePolicy: async () => { await s3.send(new DeleteBucketPolicyCommand({ Bucket: bucket })); return 'Bucket policy deleted.'; },
+  putCors: async (f) => {
+    const rules = jsonOf<unknown>(f, 'cors', 'CORS configuration');
+    const arr = Array.isArray(rules) ? rules : (rules as { CORSRules?: unknown[] }).CORSRules;
+    if (!Array.isArray(arr)) throw new UserError('CORS configuration must be a JSON array of rules (or an object with "CORSRules").');
+    await s3.send(new PutBucketCorsCommand({ Bucket: bucket, CORSConfiguration: { CORSRules: arr as never } }));
+    return 'CORS configuration saved.';
+  },
+  deleteCors: async () => { await s3.send(new DeleteBucketCorsCommand({ Bucket: bucket })); return 'CORS configuration deleted.'; },
+  empty: async () => { const n = await deletePrefix(s3, bucket); return `Emptied bucket (${plural(n, 'object')} removed).`; },
+  deleteBucket: async (f) => {
+    if (str(f, 'force') === '1') await deletePrefix(s3, bucket);
+    await s3.send(new DeleteBucketCommand({ Bucket: bucket }));
+    return { message: `Deleted bucket "${bucket}".`, redirect: '/s3' };
+  },
+});
+if (post.response) return post.response;
+
+// Make sure the bucket exists before rendering anything else.
+const head = await soft(() => s3.send(new HeadBucketCommand({ Bucket: bucket })));
+if (head.missing) return new Response(`Bucket "${bucket}" does not exist`, { status: 404 });
+
+const crumbs = [{ label: 'Buckets', href: '/s3' }, { label: bucket }];
+const tabs = [{ id: 'objects', label: 'Objects' }, { id: 'properties', label: 'Properties' }, { id: 'permissions', label: 'Permissions' }, { id: 'management', label: 'Management' }];
+
+// ---- Objects tab ----
+let rows: any[] = [];
+let listing: Awaited<ReturnType<typeof load<any>>> | undefined;
+let nextToken: string | undefined;
+if (tab === 'objects') {
+  listing = await load(async () => s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, Delimiter: '/', MaxKeys: 500, ContinuationToken: token })));
+  const r = listing.data as any;
+  if (r) {
+    nextToken = r.IsTruncated ? r.NextContinuationToken : undefined;
+    rows = [
+      ...(r.CommonPrefixes ?? []).map((p: any) => ({ id: p.Prefix, name: baseName(p.Prefix) + '/', kind: 'Folder' })),
+      ...(r.Contents ?? []).filter((o: any) => o.Key !== prefix).map((o: any) => ({ id: o.Key, name: baseName(o.Key), kind: 'Object', size: o.Size, modified: o.LastModified, storage: o.StorageClass ?? 'STANDARD', etag: o.ETag })),
+    ];
+  }
+}
+
+// ---- Properties / permissions / management ----
+const soft_ = {
+  versioning: tab === 'properties' ? await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: bucket }))) : undefined,
+  tags: tab === 'properties' ? await soft(() => s3.send(new GetBucketTaggingCommand({ Bucket: bucket }))) : undefined,
+  encryption: tab === 'properties' ? await soft(() => s3.send(new GetBucketEncryptionCommand({ Bucket: bucket }))) : undefined,
+  policy: tab === 'permissions' ? await soft(() => s3.send(new GetBucketPolicyCommand({ Bucket: bucket }))) : undefined,
+  cors: tab === 'permissions' ? await soft(() => s3.send(new GetBucketCorsCommand({ Bucket: bucket }))) : undefined,
+  lifecycle: tab === 'management' ? await soft(() => s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket }))) : undefined,
+  notifications: tab === 'management' ? await soft(() => s3.send(new GetBucketNotificationConfigurationCommand({ Bucket: bucket }))) : undefined,
+};
+const versioningStatus = (soft_.versioning?.value as any)?.Status as string | undefined;
+const policyText = (soft_.policy?.value as any)?.Policy as string | undefined;
+const corsRules = (soft_.cors?.value as any)?.CORSRules;
+const prettyPolicy = policyText ? JSON.stringify(JSON.parse(policyText), null, 2) : '';
+const stripMeta = (o: any) => { if (!o) return o; const { $metadata, ...rest } = o; return rest; };
+const prefixParts = prefix.split('/').filter(Boolean);
+---
+<Console title={bucket} crumbs={crumbs} error={post.error}>
+  <PageHeader title={bucket} badge={ctx.region} />
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'objects' && (
+      <div class="p-0">
+        <div class="flex flex-wrap items-center gap-1 px-5 pt-4 text-[14px]">
+          <a href={here({})}><Icon name="hard-drive" size={14} /> {bucket}</a>
+          {prefixParts.map((part, i) => (<><Icon name="chevron-right" size={12} class="text-faint" /><a href={here({ prefix: prefixParts.slice(0, i + 1).join('/') + '/' })}>{part}</a></>))}
+          {prefix && <a class="ml-3 text-[13px]" href={here({ prefix: parentPrefix(prefix) || undefined })}><Icon name="arrow-left" size={12} /> Up one level</a>}
+        </div>
+        <div class="-mx-px">
+          <DataTable
+            title="Objects" rows={rows} error={listing?.error} select="multi" nameKey="name" pageSize={50} id="objects" bare
+            filter="Find objects by name"
+            description={prefix ? `s3://${bucket}/${prefix}` : `s3://${bucket}/`}
+            emptyTitle="No objects" emptyText={prefix ? 'This folder is empty.' : 'You don\'t have any objects in this bucket.'}
+            columns={[
+              { key: 'name', label: 'Name', render: (r) => r.kind === 'Folder' ? `📁 ${r.name}` : r.name, href: (r) => r.kind === 'Folder' ? here({ prefix: r.id }) : `/s3/${encodeURIComponent(bucket)}/object?key=${encodeURIComponent(r.id)}`, sort: (r) => (r.kind === 'Folder' ? '0' : '1') + r.name.toLowerCase() },
+              { key: 'kind', label: 'Type' },
+              { key: 'modified', label: 'Last modified', nowrap: true, render: (r) => r.modified ? dateTime(r.modified) : '-', sort: (r) => new Date(r.modified ?? 0).getTime() },
+              { key: 'size', label: 'Size', nowrap: true, render: (r) => r.kind === 'Folder' ? '-' : bytes(r.size), sort: (r) => r.size ?? -1 },
+              { key: 'storage', label: 'Storage class', render: (r) => r.storage ? badge(r.storage) : '-' },
+            ]}
+          >
+            <Fragment slot="actions">
+              <a class="btn btn-normal" data-href-template={`/s3/${encodeURIComponent(bucket)}/download?key={id}`} data-min="1" data-max="1">Download</a>
+              <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected objects (and everything inside selected folders) will be permanently deleted." data-confirm-title="Delete objects?" data-confirm-type="permanently delete" data-confirm-ok="Delete objects">Delete</button>
+              <a class="btn btn-normal" href="#create-folder">Create folder</a>
+              <a class="btn btn-primary" href="#upload"><Icon name="file-up" size={16} /> Upload</a>
+            </Fragment>
+            <a slot="empty" class="btn btn-primary" href="#upload">Upload</a>
+          </DataTable>
+        </div>
+        {nextToken && <div class="flex justify-end border-t border-line px-5 py-3"><a class="btn btn-normal btn-sm" href={here({ prefix: prefix || undefined, token: nextToken })}>Load next 500 objects</a></div>}
+        {token && <div class="px-5 pb-3"><a class="text-[13px]" href={here({ prefix: prefix || undefined })}>← Back to first page</a></div>}
+      </div>
+    )}
+
+    {tab === 'properties' && (
+      <div class="space-y-6 p-5">
+        <section>
+          <h3 class="card-title mb-3">Bucket overview</h3>
+          <Details items={[
+            { label: 'AWS Region', value: ctx.region },
+            { label: 'Amazon Resource Name (ARN)', value: copyable(`arn:aws:s3:::${bucket}`) },
+            { label: 'Bucket endpoint (path style)', value: copyable(`${PUBLIC_ENDPOINT}/${bucket}`) },
+          ]} />
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Bucket Versioning</h3>
+          <p class="card-desc mb-3">Current status: <strong>{versioningStatus ?? 'Disabled (never enabled)'}</strong></p>
+          <form method="post" class="flex items-center gap-2">
+            <input type="hidden" name="intent" value="versioning" />
+            {versioningStatus === 'Enabled'
+              ? <button class="btn btn-normal" name="status" value="Suspended">Suspend versioning</button>
+              : <button class="btn btn-normal" name="status" value="Enabled">Enable versioning</button>}
+          </form>
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-2">Tags</h3>
+          {soft_.tags?.missing ? <p class="text-muted">No tags on this bucket.</p> : <div>{tagList(((soft_.tags?.value as any)?.TagSet ?? []))}</div>}
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-2">Default encryption</h3>
+          {soft_.encryption?.missing || !soft_.encryption?.value ? <p class="text-muted">Not configured.</p> : <JsonView value={stripMeta(soft_.encryption.value)} maxHeight="240px" />}
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1 text-danger">Danger zone</h3>
+          <p class="card-desc mb-3">These actions can't be undone.</p>
+          <form method="post" class="flex flex-wrap gap-2">
+            <button class="btn btn-danger" name="intent" value="empty" data-confirm="Permanently deletes every object and version in this bucket." data-confirm-title="Empty bucket?" data-confirm-type="permanently delete" data-confirm-name={bucket} data-confirm-ok="Empty bucket">Empty bucket</button>
+            <button class="btn btn-danger" name="intent" value="deleteBucket" data-confirm="The bucket must be empty. To delete a bucket with objects, empty it first or use the force option." data-confirm-title="Delete bucket?" data-confirm-name={bucket} data-confirm-type={bucket} data-confirm-ok="Delete bucket">Delete bucket</button>
+            <label class="flex items-center gap-2 text-muted"><input type="checkbox" class="checkbox" name="force" value="1" /> also delete all objects</label>
+          </form>
+        </section>
+      </div>
+    )}
+
+    {tab === 'permissions' && (
+      <div class="space-y-6 p-5">
+        <section>
+          <h3 class="card-title mb-1">Bucket policy</h3>
+          <p class="card-desc mb-3">JSON policy document controlling access to this bucket.</p>
+          {soft_.policy?.error && <Flash type="warning" text="Couldn't read the bucket policy" detail={soft_.policy.error} dismissible={false} class="mb-3" />}
+          <form method="post" class="space-y-3">
+            <textarea name="policy" class="textarea code-area" rows="12" data-code data-json spellcheck="false" placeholder={'{\n  "Version": "2012-10-17",\n  "Statement": []\n}'}>{post.values.policy ?? prettyPolicy}</textarea>
+            <div class="flex gap-2">
+              <button class="btn btn-primary" name="intent" value="putPolicy">Save policy</button>
+              {policyText && <button class="btn btn-danger" name="intent" value="deletePolicy" formnovalidate data-confirm="Removes the bucket policy." data-confirm-title="Delete bucket policy?" data-confirm-name="Bucket policy" data-confirm-list="false">Delete</button>}
+            </div>
+          </form>
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Cross-origin resource sharing (CORS)</h3>
+          <p class="card-desc mb-3">A JSON array of CORS rules.</p>
+          <form method="post" class="space-y-3">
+            <textarea name="cors" class="textarea code-area" rows="10" data-code data-json spellcheck="false" placeholder={'[\n  {\n    "AllowedOrigins": ["*"],\n    "AllowedMethods": ["GET"],\n    "AllowedHeaders": ["*"]\n  }\n]'}>{post.values.cors ?? (corsRules ? JSON.stringify(corsRules, null, 2) : '')}</textarea>
+            <div class="flex gap-2">
+              <button class="btn btn-primary" name="intent" value="putCors">Save CORS</button>
+              {corsRules && <button class="btn btn-danger" name="intent" value="deleteCors" formnovalidate data-confirm="Removes the CORS configuration." data-confirm-title="Delete CORS configuration?" data-confirm-name="CORS configuration" data-confirm-list="false">Delete</button>}
+            </div>
+          </form>
+        </section>
+      </div>
+    )}
+
+    {tab === 'management' && (
+      <div class="space-y-6 p-5">
+        <section>
+          <h3 class="card-title mb-2">Lifecycle rules</h3>
+          {soft_.lifecycle?.value ? <JsonView value={(soft_.lifecycle.value as any).Rules} maxHeight="320px" /> : <p class="text-muted">{soft_.lifecycle?.error ?? 'No lifecycle rules configured.'}</p>}
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-2">Event notifications</h3>
+          {(() => { const n = stripMeta(soft_.notifications?.value); const has = n && Object.values(n).some((v: any) => Array.isArray(v) ? v.length : !!v); return has ? <JsonView value={n} maxHeight="320px" /> : <p class="text-muted">{soft_.notifications?.error ?? 'No event notifications configured.'}</p>; })()}
+        </section>
+        <p class="text-[13px] text-muted">Lifecycle and notification rules are read-only here. Manage them with the AWS CLI, Terraform or CloudFormation.</p>
+      </div>
+    )}
+  </div>
+
+  {tab === 'objects' && (
+    <div class="mt-4 grid gap-4 lg:grid-cols-2">
+      <Card title="Upload" id="upload" description={`Files are uploaded to s3://${bucket}/${prefix}`}>
+        <form method="post" enctype="multipart/form-data" class="space-y-3">
+          <input type="hidden" name="intent" value="upload" />
+          <input type="hidden" name="prefix" value={prefix} />
+          <input type="file" name="files" multiple required class="input !py-1.5" />
+          <button class="btn btn-primary" type="submit"><Icon name="file-up" size={16} /> Upload</button>
+        </form>
+      </Card>
+      <Card title="Create folder" id="create-folder" description="Folders are zero-byte keys ending in a slash.">
+        <form method="post" class="flex items-end gap-2">
+          <input type="hidden" name="intent" value="folder" />
+          <input type="hidden" name="prefix" value={prefix} />
+          <div class="flex-1"><label class="field-label" for="folder-name">Folder name</label><input id="folder-name" name="name" class="input" required autocomplete="off" /></div>
+          <button class="btn btn-normal" type="submit">Create folder</button>
+        </form>
+      </Card>
+    </div>
+  )}
+</Console>

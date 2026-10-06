@@ -1,0 +1,33 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateStackCommand } from '@aws-sdk/client-cloudformation';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str, strs } from '../../lib/action';
+import { parseParams, SAMPLE_TEMPLATE } from '../../lib/cfn';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Stack name');
+    const body = required(f, 'template', 'Template');
+    await aws.cfn(ctx).send(new CreateStackCommand({ StackName: name, TemplateBody: body, Parameters: parseParams(str(f, 'params')), Capabilities: strs(f, 'caps') as never }));
+    return { message: `Stack ${name} creation started.`, redirect: `/cloudformation/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create stack" crumbs={[{ label: 'Stacks', href: '/cloudformation' }, { label: 'Create stack' }]} error={post.error}>
+  <PageHeader title="Create stack" description="Paste a JSON or YAML template." />
+  <form method="post" class="max-w-4xl space-y-4"><input type="hidden" name="intent" value="create" />
+    <Card title="Stack"><FormField label="Stack name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" pattern="[A-Za-z][A-Za-z0-9-]*" value={v.name ?? ''} /></FormField>
+      <FormField label="Parameters" for="params" optional hint="One Key=Value per line."><textarea id="params" name="params" class="textarea code-area" rows="3" data-code>{v.params ?? ''}</textarea></FormField>
+      <div class="flex flex-wrap gap-5">{['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'].map((c) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="caps" value={c} /> {c}</label>)}</div></Card>
+    <Card title="Template"><textarea name="template" class="textarea code-area" rows="24" data-code spellcheck="false" required>{v.template ?? SAMPLE_TEMPLATE}</textarea></Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/cloudformation">Cancel</a><button class="btn btn-primary" type="submit">Create stack</button></div>
+  </form>
+</Console>

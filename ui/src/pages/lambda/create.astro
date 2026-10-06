@@ -1,0 +1,96 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateFunctionCommand } from '@aws-sdk/client-lambda';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+import { RUNTIMES, parseEnv, runtimeDef, zipInline } from '../../lib/lambda';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Function name');
+    if (!/^[A-Za-z0-9-_]{1,64}$/.test(name)) throw new UserError('Function names are 1-64 characters: letters, numbers, hyphens and underscores.');
+    const runtime = required(f, 'runtime', 'Runtime');
+    const rt = runtimeDef(runtime);
+    const handler = required(f, 'handler', 'Handler');
+    let zip: Uint8Array;
+    if (str(f, 'source') === 'upload') {
+      const file = f.get('zip');
+      if (!(file instanceof File) || file.size === 0) throw new UserError('Choose a .zip deployment package to upload.');
+      zip = new Uint8Array(await file.arrayBuffer());
+    } else {
+      const code = String(f.get('code') ?? '');
+      if (!code.trim()) throw new UserError('Enter some code for the function.');
+      // The handler's module name decides the file name: "app.run" -> app.py / app.mjs / app.rb
+      const mod = handler.split('.')[0];
+      const ext = rt?.file.split('.').pop() ?? 'py';
+      zip = zipInline(`${mod}.${ext}`, code);
+    }
+    let env: Record<string, string> = {};
+    try { env = parseEnv(String(f.get('env') ?? '')); } catch (e) { throw new UserError((e as Error).message); }
+    await aws.lambda(ctx).send(new CreateFunctionCommand({
+      FunctionName: name, Runtime: runtime as never, Handler: handler, Role: required(f, 'role', 'Execution role'),
+      Code: { ZipFile: zip }, Description: str(f, 'description') || undefined,
+      MemorySize: intOf(f, 'memory', 'Memory') ?? 128, Timeout: intOf(f, 'timeout', 'Timeout') ?? 3,
+      Environment: Object.keys(env).length ? { Variables: env } : undefined,
+    }));
+    return { message: `Successfully created the function ${name}.`, redirect: `/lambda/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+const rt0 = runtimeDef(v.runtime ?? 'python3.13')!;
+---
+<Console title="Create function" crumbs={[{ label: 'Functions', href: '/lambda' }, { label: 'Create function' }]} error={post.error}>
+  <PageHeader title="Create function" description="Author a function with inline code, or upload a deployment package." />
+  <form method="post" enctype="multipart/form-data" class="max-w-4xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Basic information">
+      <FormField label="Function name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="64" placeholder="my-function" value={v.name ?? ''} /></FormField>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Runtime" for="runtime"><select id="runtime" name="runtime" class="select" data-runtime>{RUNTIMES.map((r) => <option value={r.id} selected={r.id === rt0.id} data-handler={r.handler} data-code={r.code}>{r.label}</option>)}<option value="java21" selected={v.runtime === 'java21'} data-handler="example.Handler::handleRequest">Java 21 (upload zip)</option><option value="provided.al2023" selected={v.runtime === 'provided.al2023'} data-handler="bootstrap">Custom (provided.al2023, upload zip)</option></select></FormField>
+        <FormField label="Handler" for="handler"><input id="handler" name="handler" class="input font-mono" required value={v.handler ?? rt0.handler} /></FormField>
+      </div>
+      <FormField label="Execution role (ARN)" for="role" hint="LocalEmu does not need the role to exist unless IAM enforcement is on."><input id="role" name="role" class="input font-mono" required value={v.role ?? `arn:aws:iam::${ctx.account}:role/lambda-role`} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+    </Card>
+
+    <Card title="Code source">
+      <div class="mb-3 flex gap-6">
+        <label class="flex items-center gap-2"><input type="radio" class="radio" name="source" value="inline" checked={(v.source ?? 'inline') === 'inline'} /> Write code inline</label>
+        <label class="flex items-center gap-2"><input type="radio" class="radio" name="source" value="upload" checked={v.source === 'upload'} /> Upload a .zip file</label>
+      </div>
+      <div data-show-when="source:inline"><textarea name="code" id="code" class="textarea code-area" rows="16" data-code spellcheck="false">{v.code ?? rt0.code}</textarea>
+        <p class="field-hint">Saved as <code>&lt;handler module&gt;.{rt0.file.split('.').pop()}</code> in the deployment package.</p></div>
+      <div data-show-when="source:upload" hidden><input type="file" name="zip" accept=".zip" class="input !py-1.5" /></div>
+    </Card>
+
+    <Card title="Configuration">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Memory (MB)" for="memory"><input id="memory" name="memory" type="number" min="128" max="10240" class="input" value={v.memory ?? '128'} /></FormField>
+        <FormField label="Timeout (seconds)" for="timeout"><input id="timeout" name="timeout" type="number" min="1" max="900" class="input" value={v.timeout ?? '3'} /></FormField>
+      </div>
+      <FormField label="Environment variables" for="env" optional hint="One KEY=value per line."><textarea id="env" name="env" class="textarea code-area" rows="4" data-code>{v.env ?? ''}</textarea></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/lambda">Cancel</a><button class="btn btn-primary" type="submit">Create function</button></div>
+  </form>
+
+  <script>
+    // Swap the sample code and handler when the runtime changes (unless the user edited them).
+    const sel = document.querySelector<HTMLSelectElement>('[data-runtime]');
+    const handler = document.querySelector<HTMLInputElement>('#handler');
+    const code = document.querySelector<HTMLTextAreaElement>('#code');
+    let lastSample = code?.value ?? '';
+    let lastHandler = handler?.value ?? '';
+    sel?.addEventListener('change', () => {
+      const opt = sel.selectedOptions[0];
+      if (handler && handler.value === lastHandler) { handler.value = opt.dataset.handler ?? handler.value; lastHandler = handler.value; }
+      if (code && opt.dataset.code && code.value === lastSample) { code.value = opt.dataset.code; lastSample = code.value; }
+    });
+  </script>
+</Console>

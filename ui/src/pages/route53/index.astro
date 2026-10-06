@@ -1,0 +1,32 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { ListHostedZonesCommand, CreateHostedZoneCommand } from '@aws-sdk/client-route-53';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { load } from '../../lib/errors';
+import { badge } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const r53 = aws.route53(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Domain name');
+    const r = await r53.send(new CreateHostedZoneCommand({ Name: name, CallerReference: `console-${Date.now()}`, ...(str(f, 'comment') ? { HostedZoneConfig: { Comment: str(f, 'comment') } } : {}) }));
+    return { message: `Hosted zone ${name} created.`, redirect: `/route53/${(r.HostedZone?.Id ?? '').replace('/hostedzone/', '')}` };
+  },
+});
+if (post.response) return post.response;
+const res = await load(async () => ((await r53.send(new ListHostedZonesCommand({}))).HostedZones ?? []).map((z) => ({ id: (z.Id ?? '').replace('/hostedzone/', ''), name: z.Name, priv: z.Config?.PrivateZone, records: z.ResourceRecordSetCount, comment: z.Config?.Comment })));
+---
+<Console title="Hosted zones" crumbs={[{ label: 'Hosted zones' }]} error={post.error}>
+  <PageHeader title="Hosted zones" description="Route 53 hosted zones hold the DNS records for a domain." />
+  <DataTable title="Hosted zones" rows={res.data ?? []} error={res.error} nameKey="name" pageSize={25} filter="Filter hosted zones" emptyTitle="No hosted zones" emptyText="Create one below."
+    columns={[{ key: 'name', label: 'Domain name', href: (r) => `/route53/${r.id}` }, { key: 'priv', label: 'Type', render: (r) => badge(r.priv ? 'Private' : 'Public', r.priv ? 'orange' : 'blue') }, { key: 'records', label: 'Records' }, { key: 'id', label: 'Hosted zone ID', mono: true }, { key: 'comment', label: 'Description' }]} />
+  <Card class="mt-4" title="Create hosted zone"><form method="post" class="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]"><input type="hidden" name="intent" value="create" />
+    <FormField label="Domain name" for="n" class="!mb-0"><input id="n" name="name" class="input" required placeholder="example.com" autocomplete="off" /></FormField><FormField label="Description" for="c" optional class="!mb-0"><input id="c" name="comment" class="input" /></FormField><button class="btn btn-primary" type="submit">Create</button></form></Card>
+</Console>

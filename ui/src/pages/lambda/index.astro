@@ -1,0 +1,58 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { ListFunctionsCommand, DeleteFunctionCommand } from '@aws-sdk/client-lambda';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { bytes, dateTime, plural } from '../../lib/format';
+import { badge, stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const lambda = aws.lambda(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one function.');
+    for (const n of ids) await lambda.send(new DeleteFunctionCommand({ FunctionName: n }));
+    return `Deleted ${plural(ids.length, 'function')}.`;
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const out: any[] = []; let marker: string | undefined;
+  do { const r = await lambda.send(new ListFunctionsCommand({ Marker: marker })); out.push(...(r.Functions ?? [])); marker = r.NextMarker; } while (marker && out.length < 500);
+  return out.map((f) => ({ id: f.FunctionName, name: f.FunctionName, runtime: f.Runtime ?? f.PackageType, handler: f.Handler, memory: f.MemorySize, timeout: f.Timeout, size: f.CodeSize, modified: f.LastModified, state: f.State ?? 'Active', pkg: f.PackageType }));
+});
+const rows = (res.data ?? []).sort((a: any, b: any) => a.name.localeCompare(b.name));
+---
+<Console title="Functions" crumbs={[{ label: 'Functions' }]} error={post.error}>
+  <PageHeader title="Functions" description="Run code in response to events without provisioning servers." />
+  <DataTable
+    title="Functions" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Filter by attributes or search by keyword" emptyTitle="No functions" emptyText="You haven't created any Lambda functions in this region."
+    columns={[
+      { key: 'name', label: 'Function name', href: (r) => `/lambda/${encodeURIComponent(r.name)}` },
+      { key: 'pkg', label: 'Package', render: (r) => badge(r.pkg ?? 'Zip') },
+      { key: 'runtime', label: 'Runtime' },
+      { key: 'handler', label: 'Handler', mono: true },
+      { key: 'memory', label: 'Memory', render: (r) => `${r.memory} MB`, sort: (r) => r.memory },
+      { key: 'timeout', label: 'Timeout', render: (r) => `${r.timeout} s`, sort: (r) => r.timeout },
+      { key: 'size', label: 'Code size', render: (r) => bytes(r.size), sort: (r) => r.size },
+      { key: 'modified', label: 'Last modified', nowrap: true, render: (r) => dateTime(r.modified), sort: (r) => r.modified },
+      { key: 'state', label: 'State', render: (r) => stateStatus(r.state) },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/lambda/{id}?tab=test" data-min="1" data-max="1">Test</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected functions will be permanently deleted." data-confirm-title="Delete functions?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/lambda/create"><Icon name="plus" size={16} /> Create function</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/lambda/create">Create function</a>
+  </DataTable>
+</Console>

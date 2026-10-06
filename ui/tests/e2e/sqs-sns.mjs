@@ -1,0 +1,52 @@
+import { start } from './lib.mjs';
+const t = await start(); const { p } = t;
+// ---- SQS
+await t.go('/sqs/create');
+await p.fill('#name', 'orders-q'); await p.fill('#visibility', '45');
+await t.submit('button:has-text("Create queue")');
+t.ok(p.url().endsWith('/sqs/orders-q') && (await t.flash()).includes('created successfully'), 'sqs create: ' + await t.flash());
+await p.fill('#body', '{"order": 1}'); await t.submit('button:has-text("Send message")');
+t.ok((await t.flash()).includes('Message sent'), 'sqs send: ' + await t.flash());
+await p.fill('#body', 'second'); await t.submit('button:has-text("Send message")');
+await p.click('button:has-text("Poll for messages")'); await p.waitForLoadState('load');
+await p.waitForSelector('text=Received');
+const bodies = await p.locator('pre.code-block').allInnerTexts();
+t.ok(bodies.some((b) => b.includes('"order": 1')) && bodies.some((b) => b.includes('second')), 'sqs poll shows both messages: ' + JSON.stringify(bodies));
+await p.locator('button:has-text("Delete message")').first().click(); await p.waitForLoadState('load');
+t.ok((await t.flash()).includes('Message deleted'), 'sqs delete message');
+await t.go('/sqs/orders-q?tab=details');
+t.ok((await p.innerText('main')).includes('45 seconds'), 'sqs details reflect visibility timeout');
+await t.go('/sqs');
+t.ok((await p.locator('tr[data-row]:has-text("orders-q")').count()) === 1, 'queue listed');
+await t.confirmAction('orders-q', 'Purge', 'purge');
+t.ok((await t.flash()).includes('Purged'), 'sqs purge');
+await t.confirmAction('orders-q', 'Delete', 'delete');
+t.ok((await p.locator('tr[data-row]:has-text("orders-q")').count()) === 0, 'sqs delete');
+// FIFO
+await t.go('/sqs/create'); await p.check('input[value=fifo]'); await p.fill('#name', 'events'); await t.submit('button:has-text("Create queue")');
+t.ok(p.url().endsWith('/sqs/events.fifo'), 'fifo queue gets .fifo suffix');
+await p.fill('#body', 'hello fifo'); await t.submit('button:has-text("Send message")');
+t.ok((await t.flash()).includes('Message sent'), 'fifo send: ' + await t.flash());
+await t.go('/sqs'); await t.confirmAction('events.fifo', 'Delete', 'delete');
+
+// ---- SNS
+await t.go('/sns/create'); await p.fill('#name', 'news'); await t.submit('button:has-text("Create topic")');
+t.ok(p.url().endsWith('/sns/news'), 'sns create');
+await t.go('/sqs/create'); await p.fill('#name', 'sub-q'); await t.submit('button:has-text("Create queue")');
+await t.go('/sns/news');
+await p.selectOption('#protocol', 'sqs'); await p.fill('#endpoint', `arn:aws:sqs:us-east-1:000000000000:sub-q`);
+await t.submit('button:has-text("Create subscription")');
+t.ok((await t.flash()).includes('Subscription created'), 'sns subscribe: ' + await t.flash());
+t.ok((await p.locator('tr[data-row]').count()) === 1, 'subscription listed');
+await t.go('/sns/news?tab=publish');
+await p.fill('#subject', 'Hi'); await p.fill('#message', 'breaking news');
+await t.submit('button:has-text("Publish message")');
+t.ok((await t.flash()).includes('Message published'), 'sns publish: ' + await t.flash());
+await t.go('/sqs/sub-q'); await p.click('button:has-text("Poll for messages")'); await p.waitForLoadState('load');
+t.ok((await p.locator('pre.code-block').allInnerTexts()).join().includes('breaking news'), 'message fanned out to subscribed queue');
+await t.go('/sns/subscriptions');
+t.ok((await p.locator('tr[data-row]').count()) >= 1, 'global subscriptions list');
+await t.go('/sns'); await t.confirmAction('news', 'Delete', 'delete me');
+t.ok((await p.locator('tr[data-row]:has-text("news")').count()) === 0, 'topic deleted');
+await t.go('/sqs'); await t.confirmAction('sub-q', 'Delete', 'delete');
+await t.done();

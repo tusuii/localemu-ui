@@ -1,0 +1,57 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { CreateRoleCommand, AttachRolePolicyCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, jsonOf, required, str } from '../../../lib/action';
+import { UserError } from '../../../lib/errors';
+import { TRUST_PRESETS, trustPolicyFor } from '../../../lib/iam';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Role name');
+    if (!/^[\w+=,.@-]{1,64}$/.test(name)) throw new UserError('Role names may contain letters, numbers and + = , . @ _ -');
+    jsonOf(f, 'trust', 'Trust policy');
+    const iam = aws.iam(ctx);
+    await iam.send(new CreateRoleCommand({ RoleName: name, AssumeRolePolicyDocument: str(f, 'trust'), Description: str(f, 'description') || undefined, MaxSessionDuration: intOf(f, 'session', 'Max session duration') }));
+    for (const arn of str(f, 'policies').split(/[\s,]+/).filter(Boolean)) await iam.send(new AttachRolePolicyCommand({ RoleName: name, PolicyArn: arn }));
+    return { message: `Role ${name} created.`, redirect: `/iam/roles/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+const defaultTrust = trustPolicyFor('lambda.amazonaws.com');
+---
+<Console title="Create role" crumbs={[{ label: 'Roles', href: '/iam/roles' }, { label: 'Create role' }]} error={post.error}>
+  <PageHeader title="Create role" />
+  <form method="post" class="max-w-4xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Role details">
+      <FormField label="Role name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+      <FormField label="Maximum session duration (seconds)" for="session" optional hint="3600-43200"><input id="session" name="session" type="number" min="3600" max="43200" class="input !w-40" value={v.session ?? ''} /></FormField>
+    </Card>
+    <Card title="Trust policy" description="Who can assume this role.">
+      <FormField label="Start from a service" for="preset">
+        <select id="preset" class="select !w-64" data-trust-preset><option value="">Custom</option>{TRUST_PRESETS.map((p) => <option value={p.principal} data-doc={trustPolicyFor(p.principal)} selected={!v.trust && p.id === 'lambda'}>{p.label}</option>)}</select>
+      </FormField>
+      <textarea id="trust" name="trust" class="textarea code-area" rows="12" data-code data-json spellcheck="false" required>{v.trust ?? defaultTrust}</textarea>
+    </Card>
+    <Card title="Permissions" description="Optionally attach managed policies now.">
+      <FormField label="Policy ARNs" for="policies" optional hint="Space or comma separated, e.g. arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"><input id="policies" name="policies" class="input font-mono" value={v.policies ?? ''} /></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/iam/roles">Cancel</a><button class="btn btn-primary" type="submit">Create role</button></div>
+  </form>
+  <script>
+    const preset = document.querySelector<HTMLSelectElement>('[data-trust-preset]');
+    const trust = document.querySelector<HTMLTextAreaElement>('#trust');
+    preset?.addEventListener('change', () => {
+      const doc = preset.selectedOptions[0]?.dataset.doc;
+      if (doc && trust) trust.value = doc;
+    });
+  </script>
+</Console>

@@ -1,0 +1,73 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { ListQueuesCommand, GetQueueAttributesCommand, DeleteQueueCommand, PurgeQueueCommand } from '@aws-sdk/client-sqs';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, num, plural } from '../../lib/format';
+import { badge } from '../../lib/html';
+import { epoch, isFifo, queueName } from '../../lib/sqs';
+
+const ctx = getCtx(Astro.cookies);
+const sqs = aws.sqs(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one queue.');
+    for (const url of ids) await sqs.send(new DeleteQueueCommand({ QueueUrl: url }));
+    return `Deleted ${plural(ids.length, 'queue')}.`;
+  },
+  purge: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one queue.');
+    for (const url of ids) await sqs.send(new PurgeQueueCommand({ QueueUrl: url }));
+    return `Purged ${plural(ids.length, 'queue')}. It can take up to 60 seconds for messages to disappear.`;
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const urls: string[] = [];
+  let token: string | undefined;
+  do {
+    const r = await sqs.send(new ListQueuesCommand({ NextToken: token, MaxResults: 1000 }));
+    urls.push(...(r.QueueUrls ?? []));
+    token = r.NextToken;
+  } while (token && urls.length < 500);
+  return Promise.all(urls.map(async (url) => {
+    const a = (await sqs.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ['All'] })).catch(() => ({ Attributes: {} as Record<string, string> }))).Attributes ?? {};
+    const name = queueName(url);
+    return { id: url, name, type: isFifo(name) ? 'FIFO' : 'Standard', available: Number(a.ApproximateNumberOfMessages ?? 0), inflight: Number(a.ApproximateNumberOfMessagesNotVisible ?? 0), delayed: Number(a.ApproximateNumberOfMessagesDelayed ?? 0), created: epoch(a.CreatedTimestamp), encrypted: !!(a.KmsMasterKeyId || a.SqsManagedSseEnabled === 'true') };
+  }));
+});
+const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
+---
+<Console title="Queues" crumbs={[{ label: 'Queues' }]} error={post.error}>
+  <PageHeader title="Queues" description="Amazon SQS queues decouple and scale microservices, distributed systems and serverless applications." />
+  <DataTable
+    title="Queues" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Search queues" emptyTitle="No queues" emptyText="You don't have any queues in this region."
+    columns={[
+      { key: 'name', label: 'Name', href: (r) => `/sqs/${encodeURIComponent(r.name)}` },
+      { key: 'type', label: 'Type', render: (r) => badge(r.type, r.type === 'FIFO' ? 'blue' : 'soft') },
+      { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+      { key: 'available', label: 'Messages available', render: (r) => num(r.available) },
+      { key: 'inflight', label: 'Messages in flight', render: (r) => num(r.inflight) },
+      { key: 'delayed', label: 'Delayed', render: (r) => num(r.delayed) },
+      { key: 'encrypted', label: 'Encryption', render: (r) => (r.encrypted ? 'Enabled' : '-') },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/sqs/{name}" data-min="1" data-max="1">Send and receive</a>
+      <button class="btn btn-normal" name="intent" value="purge" data-min="1" data-confirm="All messages in the selected queues will be deleted." data-confirm-title="Purge queues?" data-confirm-type="purge" data-confirm-ok="Purge">Purge</button>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected queues and their messages will be permanently deleted." data-confirm-title="Delete queues?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/sqs/create"><Icon name="plus" size={16} /> Create queue</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/sqs/create">Create queue</a>
+  </DataTable>
+</Console>

@@ -1,0 +1,37 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Icon from '../../../components/Icon.astro';
+import { ListPoliciesCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { load } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { badge } from '../../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const scope = Astro.url.searchParams.get('scope') === 'aws' ? 'AWS' : Astro.url.searchParams.get('scope') === 'all' ? 'All' : 'Local';
+const res = await load(async () => {
+  const out: any[] = []; let marker: string | undefined;
+  do { const r = await aws.iam(ctx).send(new ListPoliciesCommand({ Scope: scope, Marker: marker, MaxItems: 1000 })); out.push(...(r.Policies ?? [])); marker = r.IsTruncated ? r.Marker : undefined; } while (marker && out.length < 3000);
+  return out.map((p) => ({ id: p.Arn, name: p.PolicyName, arn: p.Arn, aws: p.Arn?.includes(':aws:policy/'), attached: p.AttachmentCount, created: p.CreateDate, updated: p.UpdateDate }));
+});
+---
+<Console title="Policies" crumbs={[{ label: 'Policies' }]}>
+  <PageHeader title="Policies" description="A policy is an object that defines permissions.">
+    <a class="btn btn-primary" href="/iam/policies/create"><Icon name="plus" size={16} /> Create policy</a>
+  </PageHeader>
+  <div class="mb-3 flex gap-2">
+    <a href="?scope=customer" class:list={['btn btn-sm', scope === 'Local' ? 'btn-primary' : 'btn-normal']}>Customer managed</a>
+    <a href="?scope=aws" class:list={['btn btn-sm', scope === 'AWS' ? 'btn-primary' : 'btn-normal']}>AWS managed</a>
+    <a href="?scope=all" class:list={['btn btn-sm', scope === 'All' ? 'btn-primary' : 'btn-normal']}>All</a>
+  </div>
+  <DataTable title="Policies" rows={res.data ?? []} error={res.error} nameKey="name" pageSize={25} filter="Filter policies by name" emptyTitle="No policies" emptyText="No customer managed policies exist yet."
+    columns={[
+      { key: 'name', label: 'Policy name', href: (r) => `/iam/policies/detail?arn=${encodeURIComponent(r.arn)}` },
+      { key: 'aws', label: 'Type', render: (r) => badge(r.aws ? 'AWS managed' : 'Customer managed', r.aws ? 'orange' : 'blue'), sort: (r) => (r.aws ? 1 : 0) },
+      { key: 'attached', label: 'Attached entities' },
+      { key: 'updated', label: 'Last updated', nowrap: true, render: (r) => dateTime(r.updated), sort: (r) => new Date(r.updated ?? 0).getTime() },
+    ]} />
+</Console>

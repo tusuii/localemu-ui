@@ -1,0 +1,70 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import Details from '../../components/Details.astro';
+import DataTable from '../../components/DataTable.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeStateMachineCommand, UpdateStateMachineCommand, DeleteStateMachineCommand, ListExecutionsCommand, StartExecutionCommand } from '@aws-sdk/client-sfn';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, jsonOf, str } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, shortDateTime } from '../../lib/format';
+import { copyable, stateStatus } from '../../lib/html';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const sfn = aws.sfn(ctx);
+const arn = `arn:aws:states:${ctx.region}:${ctx.account}:stateMachine:${name}`;
+const tab = ['definition', 'executions', 'details'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'executions';
+const SFN_STATUS = { running: 'progress', succeeded: 'success', failed: 'error', timed_out: 'error', aborted: 'stopped' } as const;
+const post = await handlePost(Astro, {
+  start: async (f) => {
+    const input = str(f, 'input') || '{}';
+    try { JSON.parse(input); } catch (e) { throw new UserError(`Input is not valid JSON: ${(e as Error).message}`); }
+    const r = await sfn.send(new StartExecutionCommand({ stateMachineArn: arn, input, name: str(f, 'name') || undefined }));
+    return { message: 'Execution started.', redirect: `/stepfunctions/execution?arn=${encodeURIComponent(r.executionArn!)}` };
+  },
+  update: async (f) => { jsonOf(f, 'definition', 'Definition'); await sfn.send(new UpdateStateMachineCommand({ stateMachineArn: arn, definition: str(f, 'definition') })); return { message: 'State machine updated.', redirect: `${Astro.url.pathname}?tab=definition` }; },
+  delete: async () => { await sfn.send(new DeleteStateMachineCommand({ stateMachineArn: arn })); return { message: `Deleted ${name}.`, redirect: '/stepfunctions' }; },
+});
+if (post.response) return post.response;
+const sm = await load(() => sfn.send(new DescribeStateMachineCommand({ stateMachineArn: arn })));
+if (sm.error && /DoesNotExist|not exist/i.test(sm.error)) return new Response(`State machine "${name}" does not exist`, { status: 404 });
+const execs = tab === 'executions' ? await load(async () => ((await sfn.send(new ListExecutionsCommand({ stateMachineArn: arn, maxResults: 200 }))).executions ?? []).map((e) => ({ id: e.executionArn, name: e.name, status: e.status, start: e.startDate, stop: e.stopDate }))) : undefined;
+const d = sm.data;
+const tabs = [{ id: 'executions', label: 'Executions' }, { id: 'definition', label: 'Definition' }, { id: 'details', label: 'Details' }];
+const v = post.values;
+---
+<Console title={name} crumbs={[{ label: 'State machines', href: '/stepfunctions' }, { label: name }]} error={post.error}>
+  <PageHeader title={name} badge={d?.type}>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The state machine will be deleted." data-confirm-title="Delete state machine?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {sm.error && <Flash type="error" text="Couldn't load the state machine" detail={sm.error} dismissible={false} />}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    {tab === 'executions' && (
+      <div>
+        <DataTable title="Executions" rows={execs?.data ?? []} error={execs?.error} bare idKey="id" nameKey="name" id="execs" pageSize={25} filter="Search executions" emptyTitle="No executions" emptyText="Start one below."
+          columns={[
+            { key: 'name', label: 'Name', href: (r) => `/stepfunctions/execution?arn=${encodeURIComponent(r.id)}` }, { key: 'status', label: 'Status', render: (r) => stateStatus(r.status, SFN_STATUS) },
+            { key: 'start', label: 'Started', nowrap: true, render: (r) => shortDateTime(r.start), sort: (r) => new Date(r.start ?? 0).getTime() }, { key: 'stop', label: 'Ended', nowrap: true, render: (r) => (r.stop ? shortDateTime(r.stop) : '-') },
+          ]} />
+        <form method="post" class="space-y-1 border-t border-line p-5"><input type="hidden" name="intent" value="start" />
+          <h3 class="card-title mb-3">Start execution</h3>
+          <FormField label="Input (JSON)" for="input"><textarea id="input" name="input" class="textarea code-area" rows="6" data-code data-json spellcheck="false">{v.input ?? '{\n  "key": "value"\n}'}</textarea></FormField>
+          <FormField label="Name" for="ename" optional hint="Auto-generated if empty."><input id="ename" name="name" class="input max-w-md" /></FormField>
+          <button class="btn btn-primary" type="submit"><Icon name="play" size={16} /> Start execution</button></form>
+      </div>
+    )}
+    {tab === 'definition' && d && (
+      <form method="post" class="space-y-3 p-5"><input type="hidden" name="intent" value="update" />
+        <textarea name="definition" class="textarea code-area" rows="26" data-code data-json spellcheck="false">{v.definition ?? (() => { try { return JSON.stringify(JSON.parse(d.definition!), null, 2); } catch { return d.definition; } })()}</textarea>
+        <button class="btn btn-primary" type="submit">Save definition</button></form>
+    )}
+    {tab === 'details' && d && <div class="p-5"><Details items={[{ label: 'Name', value: d.name }, { label: 'Type', value: d.type }, { label: 'Status', value: stateStatus(d.status ?? 'ACTIVE') }, { label: 'Created', value: dateTime(d.creationDate) }, { label: 'Role ARN', value: d.roleArn, wide: true }, { label: 'ARN', value: copyable(arn), wide: true }]} /></div>}
+  </div>
+</Console>

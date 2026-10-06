@@ -1,0 +1,139 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import DataTable from '../../../components/DataTable.astro';
+import FormField from '../../../components/FormField.astro';
+import JsonView from '../../../components/JsonView.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  GetTopicAttributesCommand, ListSubscriptionsByTopicCommand, SubscribeCommand, UnsubscribeCommand,
+  PublishCommand, DeleteTopicCommand, SetTopicAttributesCommand,
+} from '@aws-sdk/client-sns';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, jsonOf, required, str, strs } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { plural, arnName } from '../../../lib/format';
+import { badge, copyable, mono } from '../../../lib/html';
+
+const name = Astro.params.topic!;
+const ctx = getCtx(Astro.cookies);
+const sns = aws.sns(ctx);
+const arn = `arn:aws:sns:${ctx.region}:${ctx.account}:${name}`;
+const tab = ['subscriptions', 'publish', 'details'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'subscriptions';
+const fifo = name.endsWith('.fifo');
+
+const attrsRes = await load(async () => (await sns.send(new GetTopicAttributesCommand({ TopicArn: arn }))).Attributes ?? {});
+if (attrsRes.error && /NotFound|does not exist/i.test(attrsRes.error)) return new Response(`Topic "${name}" does not exist`, { status: 404 });
+const a = attrsRes.data ?? {};
+
+const post = await handlePost(Astro, {
+  publish: async (f) => {
+    const attrsText = str(f, 'attrs');
+    const attrs = attrsText ? jsonOf<Record<string, string | number>>(f, 'attrs', 'Message attributes') : {};
+    const MessageAttributes = Object.fromEntries(Object.entries(attrs).map(([k, v]) => [k, typeof v === 'number' ? { DataType: 'Number', StringValue: String(v) } : { DataType: 'String', StringValue: String(v) }]));
+    const r = await sns.send(new PublishCommand({
+      TopicArn: arn, Message: required(f, 'message', 'Message body'), Subject: str(f, 'subject') || undefined,
+      MessageGroupId: fifo ? str(f, 'group') || 'default' : undefined, MessageDeduplicationId: fifo ? (str(f, 'dedup') || (a.ContentBasedDeduplication === 'true' ? undefined : crypto.randomUUID())) : undefined,
+      MessageAttributes: Object.keys(MessageAttributes).length ? MessageAttributes : undefined,
+    }));
+    return { message: 'Message published.', detail: `Message ID: ${r.MessageId}`, redirect: `${Astro.url.pathname}?tab=publish` };
+  },
+  subscribe: async (f) => {
+    const protocol = required(f, 'protocol', 'Protocol');
+    const endpoint = required(f, 'endpoint', 'Endpoint');
+    const r = await sns.send(new SubscribeCommand({ TopicArn: arn, Protocol: protocol, Endpoint: endpoint, ReturnSubscriptionArn: true }));
+    return { message: 'Subscription created.', detail: r.SubscriptionArn, redirect: Astro.url.pathname };
+  },
+  unsubscribe: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one subscription.');
+    for (const s of ids) await sns.send(new UnsubscribeCommand({ SubscriptionArn: s }));
+    return { message: `Deleted ${plural(ids.length, 'subscription')}.`, redirect: Astro.url.pathname };
+  },
+  display: async (f) => { await sns.send(new SetTopicAttributesCommand({ TopicArn: arn, AttributeName: 'DisplayName', AttributeValue: str(f, 'display') })); return 'Display name updated.'; },
+  delete: async () => { await sns.send(new DeleteTopicCommand({ TopicArn: arn })); return { message: `Deleted topic "${name}".`, redirect: '/sns' }; },
+});
+if (post.response) return post.response;
+
+const subs = tab === 'subscriptions' ? await load(async () => {
+  const out: any[] = []; let token: string | undefined;
+  do { const r = await sns.send(new ListSubscriptionsByTopicCommand({ TopicArn: arn, NextToken: token })); out.push(...(r.Subscriptions ?? [])); token = r.NextToken; } while (token);
+  return out.map((s) => ({ id: s.SubscriptionArn, arn: s.SubscriptionArn, protocol: s.Protocol, endpoint: s.Endpoint, pending: s.SubscriptionArn === 'PendingConfirmation' }));
+}) : undefined;
+const tabs = [{ id: 'subscriptions', label: 'Subscriptions', count: Number(a.SubscriptionsConfirmed ?? 0) + Number(a.SubscriptionsPending ?? 0) }, { id: 'publish', label: 'Publish message' }, { id: 'details', label: 'Details' }];
+const v = post.values;
+const protocols = [['sqs', 'Amazon SQS'], ['lambda', 'AWS Lambda'], ['http', 'HTTP'], ['https', 'HTTPS'], ['email', 'Email'], ['email-json', 'Email-JSON'], ['sms', 'SMS'], ['firehose', 'Amazon Data Firehose'], ['application', 'Platform application endpoint']];
+---
+<Console title={name} crumbs={[{ label: 'Topics', href: '/sns' }, { label: name }]} error={post.error}>
+  <PageHeader title={name} badge={fifo ? 'FIFO' : 'Standard'} />
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'subscriptions' && (
+      <div class="space-y-5 p-5">
+        <DataTable title="Subscriptions" rows={subs?.data ?? []} error={subs?.error} bare select="multi" idKey="id" nameKey="endpoint" id="subs" pageSize={15}
+          emptyTitle="No subscriptions" emptyText="Subscribe an endpoint to receive messages published to this topic."
+          columns={[
+            { key: 'arn', label: 'ID', render: (r) => (r.pending ? badge('Pending confirmation', 'orange') : mono(arnName(r.arn).split(':').pop())) },
+            { key: 'protocol', label: 'Protocol', render: (r) => badge(r.protocol) },
+            { key: 'endpoint', label: 'Endpoint', mono: true },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="unsubscribe" data-min="1" data-confirm="The selected subscriptions will be deleted." data-confirm-title="Delete subscriptions?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        <form method="post" class="border-t border-line pt-5">
+          <input type="hidden" name="intent" value="subscribe" />
+          <h3 class="card-title mb-3">Create subscription</h3>
+          <div class="grid gap-4 md:grid-cols-[240px_1fr_auto] md:items-end">
+            <FormField label="Protocol" for="protocol" class="!mb-0"><select id="protocol" name="protocol" class="select">{protocols.map(([p, l]) => <option value={p} selected={v.protocol === p}>{l}</option>)}</select></FormField>
+            <FormField label="Endpoint" for="endpoint" class="!mb-0" hint="e.g. a queue ARN, function ARN, URL or email address."><input id="endpoint" name="endpoint" class="input" required autocomplete="off" value={v.endpoint ?? ''} /></FormField>
+            <button class="btn btn-primary mb-[22px]" type="submit">Create subscription</button>
+          </div>
+        </form>
+      </div>
+    )}
+
+    {tab === 'publish' && (
+      <form method="post" class="max-w-3xl space-y-1 p-5">
+        <input type="hidden" name="intent" value="publish" />
+        <FormField label="Subject" for="subject" optional><input id="subject" name="subject" class="input" value={v.subject ?? ''} /></FormField>
+        <FormField label="Message body" for="message"><textarea id="message" name="message" class="textarea code-area" rows="8" required>{v.message ?? ''}</textarea></FormField>
+        {fifo && (
+          <div class="grid gap-4 sm:grid-cols-2">
+            <FormField label="Message group ID" for="group"><input id="group" name="group" class="input" value={v.group ?? 'default'} /></FormField>
+            <FormField label="Deduplication ID" for="dedup" optional hint="Generated automatically when left blank."><input id="dedup" name="dedup" class="input" value={v.dedup ?? ''} /></FormField>
+          </div>
+        )}
+        <details class="mb-4"><summary class="cursor-pointer font-bold text-link">Message attributes</summary>
+          <div class="mt-2"><textarea name="attrs" class="textarea code-area" rows="3" data-json data-code placeholder={'{ "eventType": "order.created", "priority": 1 }'}>{v.attrs ?? ''}</textarea><p class="field-hint">A JSON object, usable in subscription filter policies.</p></div>
+        </details>
+        <button class="btn btn-primary" type="submit"><Icon name="send" size={16} /> Publish message</button>
+      </form>
+    )}
+
+    {tab === 'details' && (
+      <div class="space-y-5 p-5">
+        <Details items={[
+          { label: 'Name', value: name }, { label: 'Type', value: fifo ? 'FIFO' : 'Standard' }, { label: 'Display name', value: a.DisplayName },
+          { label: 'Subscriptions confirmed', value: a.SubscriptionsConfirmed }, { label: 'Subscriptions pending', value: a.SubscriptionsPending }, { label: 'Owner', value: a.Owner },
+          { label: 'ARN', value: copyable(arn), wide: true },
+        ]} />
+        <form method="post" class="flex max-w-xl items-end gap-2 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="display" />
+          <div class="flex-1"><label class="field-label" for="d">Display name</label><input id="d" name="display" class="input" value={a.DisplayName ?? ''} /></div>
+          <button class="btn btn-normal" type="submit">Update</button>
+        </form>
+        {a.Policy && <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Access policy</h3><JsonView value={JSON.parse(a.Policy)} /></div>}
+        {a.EffectiveDeliveryPolicy && <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Delivery policy</h3><JsonView value={JSON.parse(a.EffectiveDeliveryPolicy)} maxHeight="240px" /></div>}
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3 text-danger">Danger zone</h3>
+          <form method="post"><input type="hidden" name="intent" value="delete" />
+            <button class="btn btn-danger" data-confirm="The topic and all of its subscriptions will be permanently deleted." data-confirm-title="Delete topic?" data-confirm-name={name} data-confirm-type="delete me" data-confirm-ok="Delete topic"><Icon name="trash-2" size={16} /> Delete topic</button></form>
+        </div>
+      </div>
+    )}
+  </div>
+</Console>

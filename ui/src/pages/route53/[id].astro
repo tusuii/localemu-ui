@@ -1,0 +1,64 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import DataTable from '../../components/DataTable.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { GetHostedZoneCommand, ListResourceRecordSetsCommand, ChangeResourceRecordSetsCommand, DeleteHostedZoneCommand, type ResourceRecordSet } from '@aws-sdk/client-route-53';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { badge } from '../../lib/html';
+
+const id = Astro.params.id!;
+const ctx = getCtx(Astro.cookies);
+const r53 = aws.route53(ctx);
+const listAll = async () => { const out: ResourceRecordSet[] = []; let n: string | undefined; let t: string | undefined; do { const r = await r53.send(new ListResourceRecordSetsCommand({ HostedZoneId: id, StartRecordName: n, StartRecordType: t as never })); out.push(...(r.ResourceRecordSets ?? [])); n = r.IsTruncated ? r.NextRecordName : undefined; t = r.NextRecordType; } while (n); return out; };
+const post = await handlePost(Astro, {
+  upsert: async (f) => {
+    const values = String(f.get('values') ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (!values.length) throw new UserError('Enter at least one value.');
+    await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: id, ChangeBatch: { Changes: [{ Action: 'UPSERT', ResourceRecordSet: { Name: required(f, 'name', 'Record name'), Type: required(f, 'type') as never, TTL: intOf(f, 'ttl', 'TTL') ?? 300, ResourceRecords: values.map((Value) => ({ Value })) } }] } }));
+    return 'Record saved.';
+  },
+  deleteRecords: async (f) => {
+    const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one record.');
+    const all = await listAll();
+    const del = all.filter((r) => ids.includes(`${r.Name}|${r.Type}`));
+    await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: id, ChangeBatch: { Changes: del.map((ResourceRecordSet) => ({ Action: 'DELETE' as const, ResourceRecordSet })) } }));
+    return `Deleted ${del.length} record${del.length === 1 ? '' : 's'}.`;
+  },
+  delete: async () => {
+    const del = (await listAll()).filter((r) => r.Type !== 'NS' && r.Type !== 'SOA');
+    if (del.length) await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: id, ChangeBatch: { Changes: del.map((ResourceRecordSet) => ({ Action: 'DELETE' as const, ResourceRecordSet })) } }));
+    await r53.send(new DeleteHostedZoneCommand({ Id: id }));
+    return { message: 'Hosted zone deleted.', redirect: '/route53' };
+  },
+});
+if (post.response) return post.response;
+const z = await load(async () => (await r53.send(new GetHostedZoneCommand({ Id: id }))).HostedZone!);
+if (z.error && /NoSuchHostedZone|No hosted zone/i.test(z.error)) return new Response('Hosted zone does not exist', { status: 404 });
+const recs = await load(async () => (await listAll()).map((r) => ({ id: `${r.Name}|${r.Type}`, name: r.Name, type: r.Type, ttl: r.TTL, values: r.ResourceRecords?.map((x) => x.Value).join('\n') ?? (r.AliasTarget ? `alias → ${r.AliasTarget.DNSName}` : ''), locked: r.Type === 'NS' || r.Type === 'SOA' })));
+const v = post.values;
+---
+<Console title={z.data?.Name ?? id} crumbs={[{ label: 'Hosted zones', href: '/route53' }, { label: z.data?.Name ?? id }]} error={post.error}>
+  <PageHeader title={z.data?.Name ?? id} description={id}>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The zone and all of its records (except NS/SOA) will be deleted." data-confirm-title="Delete hosted zone?" data-confirm-name={z.data?.Name} data-confirm-type="delete" data-confirm-ok="Delete zone"><Icon name="trash-2" size={16} /> Delete zone</button></form>
+  </PageHeader>
+  {z.error && <Flash type="error" text="Couldn't load the hosted zone" detail={z.error} dismissible={false} />}
+  <DataTable title="Records" rows={recs.data ?? []} error={recs.error} select="multi" idKey="id" nameKey="name" pageSize={25} filter="Filter records" emptyTitle="No records" emptyText="Add one below."
+    columns={[{ key: 'name', label: 'Record name', mono: true }, { key: 'type', label: 'Type', render: (r) => badge(r.type) }, { key: 'ttl', label: 'TTL' }, { key: 'values', label: 'Value / route traffic to', render: (r) => r.values.split('\n').map((x: string) => x).join(', '), mono: true }]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="deleteRecords" data-min="1" data-confirm="The selected records will be deleted. NS and SOA records can't be removed." data-confirm-title="Delete records?" data-confirm-ok="Delete">Delete records</button>
+  </DataTable>
+  <Card class="mt-4" title="Create / update record">
+    <form method="post" class="grid items-start gap-3 lg:grid-cols-[1.4fr_130px_100px_2fr_auto]"><input type="hidden" name="intent" value="upsert" />
+      <FormField label="Record name" for="rn" class="!mb-0"><input id="rn" name="name" class="input font-mono" required placeholder={`www.${z.data?.Name ?? 'example.com.'}`} value={v.name ?? ''} /></FormField>
+      <FormField label="Type" for="rt" class="!mb-0"><select id="rt" name="type" class="select">{['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'NS', 'SRV', 'CAA', 'PTR'].map((t) => <option value={t} selected={v.type === t}>{t}</option>)}</select></FormField>
+      <FormField label="TTL" for="rttl" class="!mb-0"><input id="rttl" name="ttl" type="number" min="0" class="input" value={v.ttl ?? '300'} /></FormField>
+      <FormField label="Values" for="rv" hint="One per line." class="!mb-0"><textarea id="rv" name="values" class="textarea code-area" rows="2" required>{v.values ?? ''}</textarea></FormField>
+      <button class="btn btn-primary mt-[22px]" type="submit">Save record</button></form>
+  </Card>
+</Console>

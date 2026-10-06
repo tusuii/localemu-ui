@@ -1,0 +1,64 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import Details from '../../components/Details.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeStreamCommand, PutRecordCommand, GetShardIteratorCommand, GetRecordsCommand, DeleteStreamCommand } from '@aws-sdk/client-kinesis';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { load } from '../../lib/errors';
+import { dateTime, shortDateTime } from '../../lib/format';
+import { copyable, stateStatus } from '../../lib/html';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const k = aws.kinesis(ctx);
+const tab = ['data', 'shards', 'details'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'data';
+const post = await handlePost(Astro, {
+  put: async (f) => { const r = await k.send(new PutRecordCommand({ StreamName: name, Data: Buffer.from(required(f, 'data', 'Data')), PartitionKey: str(f, 'key') || 'default' })); return { message: 'Record written.', detail: `Shard ${r.ShardId}, sequence ${r.SequenceNumber}`, redirect: `${Astro.url.pathname}?tab=data` }; },
+  delete: async () => { await k.send(new DeleteStreamCommand({ StreamName: name, EnforceConsumerDeletion: true })); return { message: `Deleted stream ${name}.`, redirect: '/kinesis' }; },
+});
+if (post.response) return post.response;
+const d = await load(async () => (await k.send(new DescribeStreamCommand({ StreamName: name }))).StreamDescription!);
+if (d.error && /ResourceNotFound|not found/i.test(d.error)) return new Response(`Stream "${name}" does not exist`, { status: 404 });
+const s = d.data;
+const records = tab === 'data' && s ? await load(async () => {
+  const out: any[] = [];
+  for (const sh of s.Shards ?? []) {
+    const it = (await k.send(new GetShardIteratorCommand({ StreamName: name, ShardId: sh.ShardId!, ShardIteratorType: 'TRIM_HORIZON' }))).ShardIterator;
+    const r = await k.send(new GetRecordsCommand({ ShardIterator: it, Limit: 50 }));
+    for (const x of r.Records ?? []) out.push({ shard: sh.ShardId, seq: x.SequenceNumber, key: x.PartitionKey, at: x.ApproximateArrivalTimestamp, data: Buffer.from(x.Data ?? []).toString('utf8') });
+  }
+  return out.sort((a, b) => new Date(b.at ?? 0).getTime() - new Date(a.at ?? 0).getTime());
+}) : undefined;
+const tabs = [{ id: 'data', label: 'Data viewer' }, { id: 'shards', label: 'Shards', count: s?.Shards?.length }, { id: 'details', label: 'Details' }];
+---
+<Console title={name} crumbs={[{ label: 'Data streams', href: '/kinesis' }, { label: name }]} error={post.error}>
+  <PageHeader title={name} badge={s?.StreamStatus}>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The stream and its data will be deleted." data-confirm-title="Delete stream?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete stream"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {d.error && <Flash type="error" text="Couldn't load the stream" detail={d.error} dismissible={false} />}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    {tab === 'data' && (
+      <div class="space-y-5 p-5">
+        <form method="post" class="grid items-end gap-3 sm:grid-cols-[1fr_220px_auto]"><input type="hidden" name="intent" value="put" />
+          <div><label class="field-label" for="data">Put record</label><input id="data" name="data" class="input font-mono" required placeholder='{"event":"click"}' autocomplete="off" /></div>
+          <div><label class="field-label" for="key">Partition key</label><input id="key" name="key" class="input" value="default" /></div><button class="btn btn-primary" type="submit"><Icon name="send" size={14} /> Put</button></form>
+        {records?.error ? <Flash type="error" text="Couldn't read records" detail={records.error} dismissible={false} /> : (records?.data ?? []).length === 0 ? <p class="text-muted">No records in the stream.</p> : (
+          <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Arrived</th><th>Shard</th><th>Partition key</th><th>Data</th></tr></thead><tbody>
+            {records!.data!.map((r) => <tr><td class="nowrap font-mono text-[12.5px]">{shortDateTime(r.at)}</td><td class="font-mono text-[12.5px]">{r.shard}</td><td>{r.key}</td><td class="font-mono text-[13px] break-all">{r.data}</td></tr>)}
+          </tbody></table></div>
+        )}
+        <p class="text-[13px] text-muted">Showing up to 50 records per shard from the beginning of the stream (TRIM_HORIZON).</p>
+      </div>
+    )}
+    {tab === 'shards' && s && <div class="p-5"><div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Shard ID</th><th>Starting hash key</th><th>Ending hash key</th><th>Starting sequence</th></tr></thead><tbody>
+      {(s.Shards ?? []).map((sh) => <tr><td class="font-mono text-[13px]">{sh.ShardId}</td><td class="font-mono text-[12px] break-all">{sh.HashKeyRange?.StartingHashKey}</td><td class="font-mono text-[12px] break-all">{sh.HashKeyRange?.EndingHashKey}</td><td class="font-mono text-[12px] break-all">{sh.SequenceNumberRange?.StartingSequenceNumber}</td></tr>)}
+    </tbody></table></div></div>}
+    {tab === 'details' && s && <div class="p-5"><Details items={[{ label: 'Status', value: stateStatus(s.StreamStatus) }, { label: 'Capacity mode', value: s.StreamModeDetails?.StreamMode }, { label: 'Retention', value: `${s.RetentionPeriodHours} hours` }, { label: 'Created', value: dateTime(s.StreamCreationTimestamp) }, { label: 'Encryption', value: s.EncryptionType }, { label: 'ARN', value: copyable(s.StreamARN ?? ''), wide: true }]} /></div>}
+  </div>
+</Console>

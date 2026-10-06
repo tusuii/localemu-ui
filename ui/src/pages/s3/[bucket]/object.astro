@@ -1,0 +1,105 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Details from '../../../components/Details.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import JsonView from '../../../components/JsonView.astro';
+import { HeadObjectCommand, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, GetObjectTaggingCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, str } from '../../../lib/action';
+import { load, soft } from '../../../lib/errors';
+import { bytes, dateTime } from '../../../lib/format';
+import { copyable, tagList } from '../../../lib/html';
+import { baseName, isImage, isTextual, parentPrefix } from '../../../lib/s3';
+import { PUBLIC_ENDPOINT } from '../../../lib/config';
+
+const bucket = Astro.params.bucket!;
+const key = Astro.url.searchParams.get('key');
+if (!key) return Astro.redirect(`/s3/${encodeURIComponent(bucket)}`);
+const ctx = getCtx(Astro.cookies);
+const s3 = aws.s3(ctx);
+const folder = parentPrefix(key);
+const back = `/s3/${encodeURIComponent(bucket)}${folder ? `?prefix=${encodeURIComponent(folder)}` : ''}`;
+
+const head = await load(() => s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key })));
+
+const post = await handlePost(Astro, {
+  save: async (f) => {
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: str(f, 'body') === '' ? '' : String(f.get('body')), ContentType: head.data?.ContentType, Metadata: head.data?.Metadata }));
+    return 'Object saved.';
+  },
+  delete: async () => {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+    return { message: `Deleted "${key}".`, redirect: back };
+  },
+});
+if (post.response) return post.response;
+
+const o = head.data;
+const textual = !!o && isTextual(o.ContentType, key);
+let text: string | undefined;
+let tooLarge = false;
+if (o && textual) {
+  if ((o.ContentLength ?? 0) > 256 * 1024) tooLarge = true;
+  else {
+    const body = await load(async () => (await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }))).Body!.transformToString());
+    text = body.data;
+  }
+}
+const tags = o ? await soft(() => s3.send(new GetObjectTaggingCommand({ Bucket: bucket, Key: key }))) : undefined;
+const presigned = o ? await load(() => getSignedUrl(aws.s3Public(ctx), new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn: 3600 })) : undefined;
+const dl = `/s3/${encodeURIComponent(bucket)}/download?key=${encodeURIComponent(key)}`;
+---
+<Console title={baseName(key)} crumbs={[{ label: 'Buckets', href: '/s3' }, { label: bucket, href: `/s3/${encodeURIComponent(bucket)}` }, { label: baseName(key) }]} error={post.error}>
+  <PageHeader title={baseName(key)} description={`s3://${bucket}/${key}`}>
+    <a class="btn btn-normal" href={back}><Icon name="arrow-left" size={16} /> Back</a>
+    {o && <a class="btn btn-normal" href={dl}><Icon name="download" size={16} /> Download</a>}
+    {o && (isImage(o.ContentType) || textual) && <a class="btn btn-normal" href={`${dl}&inline=1`} target="_blank" rel="noopener"><Icon name="external-link" size={16} /> Open</a>}
+    {o && (
+      <form method="post"><input type="hidden" name="intent" value="delete" />
+        <button class="btn btn-danger" data-confirm="This object will be permanently deleted." data-confirm-title="Delete object?" data-confirm-name={key} data-confirm-ok="Delete object"><Icon name="trash-2" size={16} /> Delete</button></form>
+    )}
+  </PageHeader>
+
+  {head.error ? <Flash type="error" text="Couldn't load the object" detail={head.error} dismissible={false} /> : o && (
+    <div class="space-y-4">
+      <Card title="Object overview">
+        <Details items={[
+          { label: 'Owner', value: ctx.account },
+          { label: 'AWS Region', value: ctx.region },
+          { label: 'Last modified', value: dateTime(o.LastModified) },
+          { label: 'Size', value: `${bytes(o.ContentLength)} (${o.ContentLength} bytes)` },
+          { label: 'Type', value: o.ContentType },
+          { label: 'Storage class', value: o.StorageClass ?? 'STANDARD' },
+          { label: 'ETag', value: copyable(String(o.ETag ?? '').replace(/"/g, '')) },
+          { label: 'Version ID', value: o.VersionId },
+          { label: 'Object URL', value: copyable(`${PUBLIC_ENDPOINT}/${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`), wide: true },
+          { label: 'Pre-signed URL (1 hour)', value: presigned?.data ? copyable(presigned.data, 'Copy URL') : presigned?.error, wide: true },
+        ]} />
+      </Card>
+
+      {Object.keys(o.Metadata ?? {}).length > 0 && <Card title="Metadata"><JsonView value={o.Metadata} maxHeight="200px" /></Card>}
+      <Card title="Tags">{tags?.value && (tags.value as any).TagSet?.length ? tagList((tags.value as any).TagSet) : <span class="text-muted">No tags</span>}</Card>
+
+      {isImage(o.ContentType) && !/svg/i.test(o.ContentType ?? '') && (
+        <Card title="Preview"><img src={`${dl}&inline=1`} alt={key} class="max-h-[480px] max-w-full rounded border border-line" /></Card>
+      )}
+
+      {textual && (
+        <Card title="Contents" description={tooLarge ? 'Too large to edit in the browser (over 256 KB). Download it instead.' : 'Edit and save to overwrite the object.'}>
+          {!tooLarge && text !== undefined && (
+            <form method="post" class="space-y-3">
+              <input type="hidden" name="intent" value="save" />
+              <textarea name="body" class="textarea code-area" rows="16" data-code spellcheck="false">{post.values.body ?? text}</textarea>
+              <button class="btn btn-primary" type="submit">Save changes</button>
+            </form>
+          )}
+        </Card>
+      )}
+    </div>
+  )}
+</Console>

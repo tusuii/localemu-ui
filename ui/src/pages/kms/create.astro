@@ -1,0 +1,49 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateKeyCommand, CreateAliasCommand } from '@aws-sdk/client-kms';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const alias = str(f, 'alias').replace(/^alias\//, '');
+    if (alias && !/^[A-Za-z0-9/_-]{1,250}$/.test(alias)) throw new UserError('Aliases may contain letters, numbers, / _ and -.');
+    const kms = aws.kms(ctx);
+    const usage = str(f, 'usage') || 'ENCRYPT_DECRYPT';
+    const spec = str(f, 'spec') || 'SYMMETRIC_DEFAULT';
+    const r = await kms.send(new CreateKeyCommand({ Description: str(f, 'description') || undefined, KeyUsage: usage as never, KeySpec: spec as never }));
+    const id = r.KeyMetadata!.KeyId!;
+    if (alias) await kms.send(new CreateAliasCommand({ AliasName: `alias/${alias}`, TargetKeyId: id }));
+    return { message: `Key ${alias ? `"${alias}" ` : ''}created successfully.`, redirect: `/kms/${id}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+const specs = [
+  ['SYMMETRIC_DEFAULT', 'Symmetric (AES-256-GCM)', 'ENCRYPT_DECRYPT'], ['RSA_2048', 'RSA 2048', 'ENCRYPT_DECRYPT|SIGN_VERIFY'], ['RSA_3072', 'RSA 3072', 'ENCRYPT_DECRYPT|SIGN_VERIFY'],
+  ['RSA_4096', 'RSA 4096', 'ENCRYPT_DECRYPT|SIGN_VERIFY'], ['ECC_NIST_P256', 'ECC NIST P-256', 'SIGN_VERIFY'], ['ECC_NIST_P384', 'ECC NIST P-384', 'SIGN_VERIFY'],
+  ['ECC_SECG_P256K1', 'ECC secp256k1', 'SIGN_VERIFY'], ['HMAC_256', 'HMAC 256', 'GENERATE_VERIFY_MAC'],
+];
+---
+<Console title="Create key" crumbs={[{ label: 'Customer managed keys', href: '/kms' }, { label: 'Create key' }]} error={post.error}>
+  <PageHeader title="Create key" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Configure key">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Key type / spec" for="spec"><select id="spec" name="spec" class="select">{specs.map(([id, label]) => <option value={id} selected={(v.spec ?? 'SYMMETRIC_DEFAULT') === id}>{label}</option>)}</select></FormField>
+        <FormField label="Key usage" for="usage"><select id="usage" name="usage" class="select">{['ENCRYPT_DECRYPT', 'SIGN_VERIFY', 'GENERATE_VERIFY_MAC'].map((u) => <option value={u} selected={(v.usage ?? 'ENCRYPT_DECRYPT') === u}>{u.replace(/_/g, ' ').toLowerCase()}</option>)}</select></FormField>
+      </div>
+      <p class="field-hint -mt-3 mb-4">Pick a usage compatible with the key spec: symmetric keys encrypt/decrypt, ECC keys sign/verify, HMAC keys generate MACs.</p>
+      <FormField label="Alias" for="alias" optional hint="A friendly name; stored as alias/<name>."><input id="alias" name="alias" class="input" autocomplete="off" value={v.alias ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/kms">Cancel</a><button class="btn btn-primary" type="submit">Create key</button></div>
+  </form>
+</Console>

@@ -1,0 +1,70 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import Details from '../../components/Details.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeStacksCommand, DescribeStackResourcesCommand, DescribeStackEventsCommand, GetTemplateCommand, UpdateStackCommand, DeleteStackCommand } from '@aws-sdk/client-cloudformation';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { load } from '../../lib/errors';
+import { dateTime, shortDateTime } from '../../lib/format';
+import { copyable, stateStatus } from '../../lib/html';
+import { parseParams } from '../../lib/cfn';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const cfn = aws.cfn(ctx);
+const tab = ['overview', 'resources', 'events', 'template'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'overview';
+const post = await handlePost(Astro, {
+  update: async (f) => { await cfn.send(new UpdateStackCommand({ StackName: name, TemplateBody: required(f, 'template', 'Template'), Parameters: parseParams(str(f, 'params')), Capabilities: ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'] })); return { message: 'Stack update started.', redirect: `${Astro.url.pathname}?tab=events` }; },
+  delete: async () => { await cfn.send(new DeleteStackCommand({ StackName: name })); return { message: `Deleting stack ${name}.`, redirect: '/cloudformation' }; },
+});
+if (post.response) return post.response;
+const s = await load(async () => (await cfn.send(new DescribeStacksCommand({ StackName: name }))).Stacks?.[0]);
+if (s.error && /does not exist/i.test(s.error)) return new Response(`Stack "${name}" does not exist`, { status: 404 });
+const st = s.data;
+const resources = tab === 'resources' ? await load(async () => (await cfn.send(new DescribeStackResourcesCommand({ StackName: name }))).StackResources ?? []) : undefined;
+const events = tab === 'events' ? await load(async () => (await cfn.send(new DescribeStackEventsCommand({ StackName: name }))).StackEvents ?? []) : undefined;
+const template = tab === 'template' ? await load(async () => { const t = (await cfn.send(new GetTemplateCommand({ StackName: name }))).TemplateBody; return typeof t === 'string' ? t : JSON.stringify(t, null, 2); }) : undefined;
+const tabs = [{ id: 'overview', label: 'Overview' }, { id: 'resources', label: 'Resources' }, { id: 'events', label: 'Events' }, { id: 'template', label: 'Template' }];
+const busy = !!st?.StackStatus?.endsWith('IN_PROGRESS');
+---
+<Console title={name} crumbs={[{ label: 'Stacks', href: '/cloudformation' }, { label: name }]} error={post.error}>
+  <PageHeader title={name} badge={st?.StackStatus}>
+    <label class="flex items-center gap-2 text-muted" data-autorefresh data-interval="3000"><input type="checkbox" class="checkbox" /> Live refresh</label>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The stack and all of its resources will be deleted." data-confirm-title="Delete stack?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete stack"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {busy && <Flash type="info" class="mb-3" dismissible={false} text={`Stack status: ${st?.StackStatus}`} detail="Enable live refresh to follow progress." />}
+  {st?.StackStatus?.includes('FAILED') && <Flash type="error" class="mb-3" dismissible={false} text={`Stack status: ${st.StackStatus}`} detail={st.StackStatusReason} />}
+  {s.error && <Flash type="error" text="Couldn't load the stack" detail={s.error} dismissible={false} />}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    {tab === 'overview' && st && (
+      <div class="space-y-6 p-5">
+        <Details items={[{ label: 'Status', value: stateStatus(st.StackStatus) }, { label: 'Created', value: dateTime(st.CreationTime) }, { label: 'Last updated', value: st.LastUpdatedTime ? dateTime(st.LastUpdatedTime) : '-' }, { label: 'Stack ID', value: copyable(st.StackId ?? ''), wide: true }, { label: 'Description', value: st.Description, wide: true }]} />
+        <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Outputs ({st.Outputs?.length ?? 0})</h3>
+          {(st.Outputs ?? []).length === 0 ? <p class="text-muted">No outputs.</p> : <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Key</th><th>Value</th><th>Description</th></tr></thead><tbody>{st.Outputs!.map((o) => <tr><td class="font-bold">{o.OutputKey}</td><td class="font-mono text-[13px] break-all">{o.OutputValue}</td><td>{o.Description ?? '-'}</td></tr>)}</tbody></table></div>}</div>
+        <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Parameters ({st.Parameters?.length ?? 0})</h3>
+          {(st.Parameters ?? []).length === 0 ? <p class="text-muted">No parameters.</p> : <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>{st.Parameters!.map((o) => <tr><td class="font-bold">{o.ParameterKey}</td><td class="font-mono text-[13px]">{o.ParameterValue}</td></tr>)}</tbody></table></div>}</div>
+      </div>
+    )}
+    {tab === 'resources' && <div class="p-5">{resources?.error ? <Flash type="error" text="Couldn't list resources" detail={resources.error} dismissible={false} /> : (
+      <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Logical ID</th><th>Physical ID</th><th>Type</th><th>Status</th></tr></thead><tbody>
+        {(resources?.data ?? []).map((r) => <tr><td class="font-bold">{r.LogicalResourceId}</td><td class="font-mono text-[13px] break-all">{r.PhysicalResourceId ?? '-'}</td><td>{r.ResourceType}</td><td set:html={stateStatus(r.ResourceStatus).v} /></tr>)}
+      </tbody></table></div>)}</div>}
+    {tab === 'events' && <div class="p-5">{events?.error ? <Flash type="error" text="Couldn't list events" detail={events.error} dismissible={false} /> : (
+      <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Timestamp</th><th>Logical ID</th><th>Status</th><th>Reason</th></tr></thead><tbody>
+        {(events?.data ?? []).map((e) => <tr><td class="nowrap font-mono text-[12.5px]">{shortDateTime(e.Timestamp)}</td><td>{e.LogicalResourceId}</td><td set:html={stateStatus(e.ResourceStatus).v} /><td class="text-[13px]">{e.ResourceStatusReason ?? '-'}</td></tr>)}
+      </tbody></table></div>)}</div>}
+    {tab === 'template' && (
+      <form method="post" class="space-y-3 p-5"><input type="hidden" name="intent" value="update" />
+        {template?.error && <Flash type="error" text="Couldn't load the template" detail={template.error} dismissible={false} />}
+        <textarea name="template" class="textarea code-area" rows="24" data-code spellcheck="false">{post.values.template ?? template?.data ?? ''}</textarea>
+        <div><label class="field-label" for="params">Parameters <span class="opt font-normal text-muted">- optional, Key=Value per line</span></label><textarea id="params" name="params" class="textarea code-area" rows="2" data-code>{post.values.params ?? (st?.Parameters ?? []).map((p) => `${p.ParameterKey}=${p.ParameterValue}`).join('\n')}</textarea></div>
+        <button class="btn btn-primary" type="submit">Update stack</button></form>
+    )}
+  </div>
+</Console>

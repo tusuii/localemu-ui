@@ -1,0 +1,67 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { ListTablesCommand, DescribeTableCommand, DeleteTableCommand } from '@aws-sdk/client-dynamodb';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { bytes, num, plural } from '../../lib/format';
+import { stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ddb = aws.dynamodb(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one table.');
+    for (const t of ids) await ddb.send(new DeleteTableCommand({ TableName: t }));
+    return `Deleted ${plural(ids.length, 'table')}.`;
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const names: string[] = [];
+  let start: string | undefined;
+  do {
+    const r = await ddb.send(new ListTablesCommand({ ExclusiveStartTableName: start }));
+    names.push(...(r.TableNames ?? []));
+    start = r.LastEvaluatedTableName;
+  } while (start && names.length < 500);
+  const descs = await Promise.all(names.map((n) => ddb.send(new DescribeTableCommand({ TableName: n })).then((d) => d.Table!).catch(() => undefined)));
+  return names.map((n, i) => {
+    const t = descs[i];
+    const pk = t?.KeySchema?.find((k) => k.KeyType === 'HASH')?.AttributeName;
+    const sk = t?.KeySchema?.find((k) => k.KeyType === 'RANGE')?.AttributeName;
+    const type = (a?: string) => t?.AttributeDefinitions?.find((d) => d.AttributeName === a)?.AttributeType;
+    return { id: n, name: n, status: t?.TableStatus, pk: pk ? `${pk} (${type(pk)})` : '-', sk: sk ? `${sk} (${type(sk)})` : '-', items: t?.ItemCount, size: t?.TableSizeBytes, billing: t?.BillingModeSummary?.BillingMode ?? 'PROVISIONED' };
+  });
+});
+---
+<Console title="Tables" crumbs={[{ label: 'Tables' }]} error={post.error}>
+  <PageHeader title="Tables" description="Tables store DynamoDB items. Each item is uniquely identified by its primary key." />
+  <DataTable
+    title="Tables" rows={res.data ?? []} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Find tables" emptyTitle="No tables" emptyText="You have no tables in this region."
+    columns={[
+      { key: 'name', label: 'Name', href: (r) => `/dynamodb/${encodeURIComponent(r.name)}` },
+      { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
+      { key: 'pk', label: 'Partition key' },
+      { key: 'sk', label: 'Sort key' },
+      { key: 'items', label: 'Item count', render: (r) => num(r.items), sort: (r) => r.items ?? 0 },
+      { key: 'size', label: 'Table size', render: (r) => bytes(r.size), sort: (r) => r.size ?? 0 },
+      { key: 'billing', label: 'Capacity mode', render: (r) => (r.billing === 'PAY_PER_REQUEST' ? 'On-demand' : 'Provisioned') },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/dynamodb/{id}" data-min="1" data-max="1">Explore items</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected tables and all of their items will be permanently deleted." data-confirm-title="Delete tables?" data-confirm-type="confirm" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/dynamodb/create"><Icon name="plus" size={16} /> Create table</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/dynamodb/create">Create table</a>
+  </DataTable>
+</Console>

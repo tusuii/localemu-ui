@@ -1,0 +1,44 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateTopicCommand } from '@aws-sdk/client-sns';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    let name = required(f, 'name', 'Topic name');
+    const fifo = str(f, 'type') === 'fifo';
+    if (fifo && !name.endsWith('.fifo')) name += '.fifo';
+    if (!/^[A-Za-z0-9_-]{1,256}(\.fifo)?$/.test(name)) throw new UserError('Topic names are up to 256 characters: letters, numbers, hyphens and underscores.');
+    const attrs: Record<string, string> = {};
+    if (fifo) { attrs.FifoTopic = 'true'; if (str(f, 'dedup') === '1') attrs.ContentBasedDeduplication = 'true'; }
+    if (str(f, 'display')) attrs.DisplayName = str(f, 'display');
+    await aws.sns(ctx).send(new CreateTopicCommand({ Name: name, Attributes: attrs }));
+    return { message: `Topic ${name} created successfully.`, redirect: `/sns/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create topic" crumbs={[{ label: 'Topics', href: '/sns' }, { label: 'Create topic' }]} error={post.error}>
+  <PageHeader title="Create topic" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Details">
+      <div class="mb-4 space-y-2">
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="standard" checked={(v.type ?? 'standard') === 'standard'} /><span><strong>Standard</strong><br /><span class="text-muted">Best-effort ordering, at-least-once delivery.</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="fifo" checked={v.type === 'fifo'} /><span><strong>FIFO</strong><br /><span class="text-muted">Strict ordering and deduplication. The name will end with <code>.fifo</code>.</span></span></label>
+      </div>
+      <FormField label="Name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Display name" for="display" optional hint="Shown as the sender for SMS/email subscriptions."><input id="display" name="display" class="input" value={v.display ?? ''} /></FormField>
+      <label class="flex items-center gap-2" data-show-when="type:fifo" hidden><input type="checkbox" class="checkbox" name="dedup" value="1" checked={v.dedup === '1'} /> Content-based deduplication</label>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/sns">Cancel</a><button class="btn btn-primary" type="submit">Create topic</button></div>
+  </form>
+</Console>

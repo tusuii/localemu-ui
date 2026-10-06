@@ -1,0 +1,70 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import Details from '../../components/Details.astro';
+import JsonView from '../../components/JsonView.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeRuleCommand, ListTargetsByRuleCommand, PutTargetsCommand, RemoveTargetsCommand, EnableRuleCommand, DisableRuleCommand, DeleteRuleCommand } from '@aws-sdk/client-eventbridge';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { copyable, stateStatus } from '../../lib/html';
+
+const name = Astro.url.searchParams.get('name');
+const bus = Astro.url.searchParams.get('bus') ?? 'default';
+if (!name) return Astro.redirect('/events/rules');
+const ctx = getCtx(Astro.cookies);
+const eb = aws.events(ctx);
+const post = await handlePost(Astro, {
+  addTarget: async (f) => {
+    let input = str(f, 'input');
+    if (input) { try { JSON.parse(input); } catch { throw new UserError('Constant input must be valid JSON.'); } }
+    await eb.send(new PutTargetsCommand({ Rule: name, EventBusName: bus, Targets: [{ Id: str(f, 'id') || `target-${Date.now() % 100000}`, Arn: required(f, 'arn', 'Target ARN'), Input: input || undefined, RoleArn: str(f, 'role') || undefined }] }));
+    return 'Target added.';
+  },
+  removeTarget: async (f) => { await eb.send(new RemoveTargetsCommand({ Rule: name, EventBusName: bus, Ids: [required(f, 'id')] })); return 'Target removed.'; },
+  enable: async () => { await eb.send(new EnableRuleCommand({ Name: name, EventBusName: bus })); return 'Rule enabled.'; },
+  disable: async () => { await eb.send(new DisableRuleCommand({ Name: name, EventBusName: bus })); return 'Rule disabled.'; },
+  delete: async () => {
+    const t = (await eb.send(new ListTargetsByRuleCommand({ Rule: name, EventBusName: bus }))).Targets ?? [];
+    if (t.length) await eb.send(new RemoveTargetsCommand({ Rule: name, EventBusName: bus, Ids: t.map((x) => x.Id!), Force: true }));
+    await eb.send(new DeleteRuleCommand({ Name: name, EventBusName: bus, Force: true }));
+    return { message: `Deleted rule ${name}.`, redirect: `/events/rules?bus=${encodeURIComponent(bus)}` };
+  },
+});
+if (post.response) return post.response;
+const r = await load(() => eb.send(new DescribeRuleCommand({ Name: name, EventBusName: bus })));
+if (r.error && /ResourceNotFound|does not exist/i.test(r.error)) return new Response('Rule does not exist', { status: 404 });
+const targets = await load(async () => (await eb.send(new ListTargetsByRuleCommand({ Rule: name, EventBusName: bus }))).Targets ?? []);
+const d = r.data;
+---
+<Console title={name} crumbs={[{ label: 'Rules', href: `/events/rules?bus=${encodeURIComponent(bus)}` }, { label: name }]} error={post.error}>
+  <PageHeader title={name} badge={bus}>
+    <form method="post" class="flex gap-2"><button class="btn btn-normal" name="intent" value={d?.State === 'ENABLED' ? 'disable' : 'enable'}>{d?.State === 'ENABLED' ? 'Disable' : 'Enable'}</button>
+      <button class="btn btn-danger" name="intent" value="delete" data-confirm="The rule and its targets will be deleted." data-confirm-title="Delete rule?" data-confirm-name={name} data-confirm-ok="Delete"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {r.error && <Flash type="error" text="Couldn't load the rule" detail={r.error} dismissible={false} />}
+  {d && (
+    <div class="space-y-4">
+      <Card title="Details"><Details items={[{ label: 'Status', value: stateStatus(d.State, { enabled: 'success', disabled: 'stopped' }) }, { label: 'Schedule', value: d.ScheduleExpression }, { label: 'Managed by', value: d.ManagedBy }, { label: 'ARN', value: copyable(d.Arn ?? ''), wide: true }, { label: 'Description', value: d.Description, wide: true }]} />
+        {d.EventPattern && <div class="mt-4 border-t border-line pt-4"><div class="kv-label mb-1">Event pattern</div><JsonView value={d.EventPattern} maxHeight="260px" /></div>}</Card>
+      <Card title="Targets" count={targets.data?.length ?? 0}>
+        {targets.error ? <Flash type="error" text="Couldn't list targets" detail={targets.error} dismissible={false} /> : (targets.data ?? []).length === 0 ? <p class="mb-4 text-muted">This rule has no targets.</p> : (
+          <div class="tbl-wrap mb-4 rounded-lg border border-line"><table class="tbl"><thead><tr><th>Target ID</th><th>ARN</th><th>Input</th><th class="w-28"></th></tr></thead><tbody>
+            {targets.data!.map((t) => <tr><td class="font-mono text-[13px]">{t.Id}</td><td class="font-mono text-[13px] break-all">{t.Arn}</td><td class="font-mono text-[12.5px]">{t.Input ?? (t.InputPath ?? '-')}</td>
+              <td><form method="post"><input type="hidden" name="intent" value="removeTarget" /><input type="hidden" name="id" value={t.Id} /><button class="btn btn-danger btn-sm" data-confirm="Remove this target?" data-confirm-title="Remove target?" data-confirm-list="false" data-confirm-ok="Remove">Remove</button></form></td></tr>)}
+          </tbody></table></div>
+        )}
+        <form method="post" class="grid items-end gap-3 border-t border-line pt-4 sm:grid-cols-2 lg:grid-cols-4"><input type="hidden" name="intent" value="addTarget" />
+          <FormField label="Target ARN" for="arn" class="!mb-0 lg:col-span-2" hint="SQS queue, SNS topic, Lambda function, Step Functions state machine…"><input id="arn" name="arn" class="input font-mono" required placeholder="arn:aws:sqs:us-east-1:000000000000:jobs" /></FormField>
+          <FormField label="Target ID" for="tid" optional class="!mb-0"><input id="tid" name="id" class="input" /></FormField>
+          <FormField label="Constant input (JSON)" for="input" optional class="!mb-0"><input id="input" name="input" class="input font-mono" placeholder='{"a":1}' /></FormField>
+          <button class="btn btn-primary" type="submit">Add target</button></form>
+      </Card>
+    </div>
+  )}
+</Console>

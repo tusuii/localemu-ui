@@ -1,0 +1,39 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { ListMetricsCommand, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const cw = aws.cloudwatch(ctx);
+const post = await handlePost(Astro, {
+  put: async (f) => {
+    const val = Number(required(f, 'value', 'Value')); if (Number.isNaN(val)) throw new UserError('Value must be a number.');
+    const dim = str(f, 'dim');
+    const dims = dim ? dim.split(',').map((p) => { const [Name, Value] = p.split('='); if (!Name || Value === undefined) throw new UserError('Dimensions look like Name=Value,Name2=Value2.'); return { Name: Name.trim(), Value: Value.trim() }; }) : undefined;
+    await cw.send(new PutMetricDataCommand({ Namespace: required(f, 'namespace', 'Namespace'), MetricData: [{ MetricName: required(f, 'metric', 'Metric name'), Value: val, Unit: (str(f, 'unit') || 'None') as never, Dimensions: dims, Timestamp: new Date() }] }));
+    return 'Metric data published.';
+  },
+});
+if (post.response) return post.response;
+const res = await load(async () => ((await cw.send(new ListMetricsCommand({}))).Metrics ?? []).map((m, i) => ({ id: String(i), ns: m.Namespace, name: m.MetricName, dims: (m.Dimensions ?? []).map((d) => `${d.Name}=${d.Value}`).join(', ') })));
+const v = post.values;
+---
+<Console title="Metrics" crumbs={[{ label: 'Metrics' }]} error={post.error}>
+  <PageHeader title="Metrics" description="Metrics known to CloudWatch in this region." />
+  <DataTable title="All metrics" rows={res.data ?? []} error={res.error} idKey="id" pageSize={25} filter="Search metrics" emptyTitle="No metrics" emptyText="Publish a data point below, or use any service that emits metrics."
+    columns={[{ key: 'ns', label: 'Namespace' }, { key: 'name', label: 'Metric name' }, { key: 'dims', label: 'Dimensions', mono: true }]} />
+  <Card class="mt-4" title="Publish a metric data point">
+    <form method="post" class="space-y-1"><input type="hidden" name="intent" value="put" />
+      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><FormField label="Namespace" for="ns"><input id="ns" name="namespace" class="input" required value={v.namespace ?? 'Custom/App'} /></FormField><FormField label="Metric name" for="m"><input id="m" name="metric" class="input" required value={v.metric ?? ''} /></FormField>
+        <FormField label="Value" for="val"><input id="val" name="value" type="number" step="any" class="input" required value={v.value ?? ''} /></FormField><FormField label="Unit" for="unit"><select id="unit" name="unit" class="select">{['None', 'Count', 'Seconds', 'Milliseconds', 'Bytes', 'Percent'].map((u) => <option>{u}</option>)}</select></FormField></div>
+      <FormField label="Dimensions" for="dim" optional hint="Name=Value pairs, comma separated."><input id="dim" name="dim" class="input font-mono max-w-xl" value={v.dim ?? ''} /></FormField>
+      <button class="btn btn-primary" type="submit">Publish</button></form>
+  </Card>
+</Console>

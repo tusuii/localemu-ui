@@ -1,0 +1,56 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { DescribeVolumesCommand, CreateVolumeCommand, DeleteVolumeCommand, CreateSnapshotCommand, DescribeAvailabilityZonesCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, str, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, plural } from '../../lib/format';
+import { nameOf } from '../../lib/ec2';
+import { stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const r = await ec2.send(new CreateVolumeCommand({ AvailabilityZone: str(f, 'az'), Size: intOf(f, 'size', 'Size') ?? 8, VolumeType: (str(f, 'type') || 'gp3') as never,
+      TagSpecifications: str(f, 'name') ? [{ ResourceType: 'volume', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined }));
+    return `Created volume ${r.VolumeId}.`;
+  },
+  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one volume.'); for (const v of ids) await ec2.send(new DeleteVolumeCommand({ VolumeId: v })); return `Deleted ${plural(ids.length, 'volume')}.`; },
+  snapshot: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one volume.'); for (const v of ids) await ec2.send(new CreateSnapshotCommand({ VolumeId: v })); return `Created ${plural(ids.length, 'snapshot')}.`; },
+});
+if (post.response) return post.response;
+const [res, azs] = await Promise.all([
+  load(async () => ((await ec2.send(new DescribeVolumesCommand({}))).Volumes ?? []).map((v) => ({ id: v.VolumeId, name: nameOf(v.Tags) || '-', type: v.VolumeType, size: v.Size, state: v.State, az: v.AvailabilityZone, attached: v.Attachments?.map((a) => a.InstanceId).join(', ') || '-', created: v.CreateTime }))),
+  load(async () => ((await ec2.send(new DescribeAvailabilityZonesCommand({}))).AvailabilityZones ?? []).map((z) => z.ZoneName!)),
+]);
+const v = post.values;
+---
+<Console title="Volumes" crumbs={[{ label: 'Volumes' }]} error={post.error}>
+  <PageHeader title="Volumes" />
+  <DataTable title="Volumes" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="id" pageSize={25} filter="Filter volumes" emptyTitle="No volumes" emptyText="Create a volume below."
+    columns={[
+      { key: 'name', label: 'Name' }, { key: 'id', label: 'Volume ID', mono: true }, { key: 'type', label: 'Type' }, { key: 'size', label: 'Size', render: (r) => `${r.size} GiB`, sort: (r) => r.size },
+      { key: 'state', label: 'State', render: (r) => stateStatus(r.state) }, { key: 'az', label: 'Availability Zone' }, { key: 'attached', label: 'Attached to', mono: true },
+      { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => new Date(r.created ?? 0).getTime() },
+    ]}>
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="snapshot" data-min="1">Create snapshot</button>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected volumes will be permanently deleted." data-confirm-title="Delete volumes?" data-confirm-ok="Delete">Delete</button>
+    </Fragment>
+  </DataTable>
+  <Card class="mt-4" title="Create volume">
+    <form method="post" class="grid items-end gap-4 sm:grid-cols-2 lg:grid-cols-5"><input type="hidden" name="intent" value="create" />
+      <FormField label="Name" for="name" optional class="!mb-0"><input id="name" name="name" class="input" value={v.name ?? ''} /></FormField>
+      <FormField label="Type" for="type" class="!mb-0"><select id="type" name="type" class="select">{['gp3', 'gp2', 'io1', 'io2', 'st1', 'sc1', 'standard'].map((t) => <option value={t}>{t}</option>)}</select></FormField>
+      <FormField label="Size (GiB)" for="size" class="!mb-0"><input id="size" name="size" type="number" min="1" class="input" value={v.size ?? '8'} /></FormField>
+      <FormField label="Availability Zone" for="az" class="!mb-0"><select id="az" name="az" class="select" required>{(azs.data ?? []).map((z) => <option value={z}>{z}</option>)}</select></FormField>
+      <button class="btn btn-primary" type="submit">Create volume</button>
+    </form>
+  </Card>
+</Console>

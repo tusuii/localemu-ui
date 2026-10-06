@@ -1,0 +1,62 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import PermissionsPanel from '../../../components/PermissionsPanel.astro';
+import { GetGroupCommand, DeleteGroupCommand, AddUserToGroupCommand, RemoveUserFromGroupCommand, ListUsersCommand, ListPoliciesCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required } from '../../../lib/action';
+import { load } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { getInline, listPerms, permissionHandlers, purgeIdentity } from '../../../lib/iam';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const iam = aws.iam(ctx);
+const tab = ['permissions', 'users'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'users';
+const post = await handlePost(Astro, {
+  ...permissionHandlers(iam, 'group', name),
+  addUser: async (f) => { await iam.send(new AddUserToGroupCommand({ GroupName: name, UserName: required(f, 'user', 'User') })); return 'User added to group.'; },
+  removeUser: async (f) => { await iam.send(new RemoveUserFromGroupCommand({ GroupName: name, UserName: required(f, 'user', 'User') })); return 'User removed from group.'; },
+  delete: async () => { await purgeIdentity(iam, 'group', name); await iam.send(new DeleteGroupCommand({ GroupName: name })); return { message: `Deleted group ${name}.`, redirect: '/iam/groups' }; },
+});
+if (post.response) return post.response;
+const g = await load(async () => await iam.send(new GetGroupCommand({ GroupName: name })));
+if (g.error && /NoSuchEntity|cannot be found/i.test(g.error)) return new Response(`Group "${name}" does not exist`, { status: 404 });
+const members = g.data?.Users ?? [];
+const allUsers = tab === 'users' ? await load(async () => (await iam.send(new ListUsersCommand({}))).Users ?? []) : undefined;
+const perms = tab === 'permissions' ? await load(async () => {
+  const p = await listPerms(iam, 'group', name);
+  const docs = Object.fromEntries(await Promise.all(p.inline.map(async (n) => [n, await getInline(iam, 'group', name, n)])));
+  const sug = (await iam.send(new ListPoliciesCommand({ Scope: 'All', MaxItems: 1000 }))).Policies ?? [];
+  return { p, docs, sug: sug.map((s) => ({ name: s.PolicyName!, arn: s.Arn! })) };
+}) : undefined;
+const tabs = [{ id: 'users', label: 'Users', count: members.length }, { id: 'permissions', label: 'Permissions' }];
+---
+<Console title={name} crumbs={[{ label: 'User groups', href: '/iam/groups' }, { label: name }]} error={post.error}>
+  <PageHeader title={name} description={g.data?.Group?.Arn}>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The group will be deleted; its members are removed from it." data-confirm-title="Delete group?" data-confirm-name={name} data-confirm-ok="Delete group"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {g.error && <Flash type="error" text="Couldn't load the group" detail={g.error} dismissible={false} />}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    <div class="p-5">
+      {tab === 'users' && (
+        <div class="space-y-5">
+          {members.length === 0 ? <p class="text-muted">This group has no users.</p> : (
+            <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>User name</th><th>Created</th><th class="w-28"></th></tr></thead><tbody>
+              {members.map((u) => <tr><td><a href={`/iam/users/${encodeURIComponent(u.UserName!)}`}>{u.UserName}</a></td><td class="nowrap">{dateTime(u.CreateDate)}</td><td><form method="post"><input type="hidden" name="intent" value="removeUser" /><input type="hidden" name="user" value={u.UserName} /><button class="btn btn-danger btn-sm">Remove</button></form></td></tr>)}
+            </tbody></table></div>
+          )}
+          <form method="post" class="flex max-w-lg gap-2 border-t border-line pt-5"><input type="hidden" name="intent" value="addUser" />
+            <select name="user" class="select" required><option value="">Select a user…</option>{(allUsers?.data ?? []).filter((u) => !members.some((m) => m.UserName === u.UserName)).map((u) => <option value={u.UserName}>{u.UserName}</option>)}</select>
+            <button class="btn btn-normal" type="submit">Add user</button></form>
+        </div>
+      )}
+      {tab === 'permissions' && (perms?.error ? <Flash type="error" text="Couldn't load permissions" detail={perms.error} dismissible={false} /> : <PermissionsPanel perms={perms!.data!.p} inlineDocs={perms!.data!.docs} suggestions={perms!.data!.sug} />)}
+    </div>
+  </div>
+</Console>
