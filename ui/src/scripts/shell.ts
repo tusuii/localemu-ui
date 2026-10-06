@@ -23,6 +23,8 @@ if (panel) {
     panel.dataset.collapsed = String(collapsed);
     panel.style.setProperty('--shell-panel-h', Math.min(height, window.innerHeight - 120) + 'px');
     root.style.setProperty('--shell-h', open ? (collapsed ? '40px' : Math.min(height, window.innerHeight - 120) + 'px') : '0px');
+    const g = $('[data-shell-resize]', panel);
+    g?.setAttribute('aria-valuenow', String(Math.round(height))); g?.setAttribute('aria-valuemin', '140'); g?.setAttribute('aria-valuemax', String(Math.max(200, window.innerHeight - 120)));
     toggles.forEach((t) => t.setAttribute('aria-expanded', String(open)));
     $('[data-shell-collapse]', panel)?.setAttribute('aria-expanded', String(!collapsed));
   };

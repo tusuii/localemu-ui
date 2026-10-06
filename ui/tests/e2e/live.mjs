@@ -1,6 +1,7 @@
 import { start, BASE } from './lib.mjs';
 const t = await start(); const { p } = t;
 const sh = async (command) => (await (await fetch(BASE + '/api/shell', { method: 'POST', headers: { 'content-type': 'application/json', 'x-lemu-console': '1', origin: BASE }, body: JSON.stringify({ command }) })).json());
+await sh('aws sqs delete-queue --queue-url http://localhost:4566/000000000000/live-a');
 await sh('aws sqs create-queue --queue-name live-a');
 await sh('aws sqs create-queue --queue-name live-b');
 const url = 'http://localhost:4566/000000000000/live-a';

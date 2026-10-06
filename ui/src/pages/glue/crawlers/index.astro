@@ -1,0 +1,67 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Icon from '../../../components/Icon.astro';
+import { GetCrawlersCommand, StartCrawlerCommand, DeleteCrawlerCommand } from '@aws-sdk/client-glue';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, strs } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { dateTime, plural } from '../../../lib/format';
+import { stateStatus } from '../../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const glue = aws.glue(ctx);
+
+const post = await handlePost(Astro, {
+  start: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one crawler.');
+    for (const n of ids) await glue.send(new StartCrawlerCommand({ Name: n }));
+    return `Started ${plural(ids.length, 'crawler')}.`;
+  },
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one crawler.');
+    for (const n of ids) await glue.send(new DeleteCrawlerCommand({ Name: n }));
+    return `Deleted ${plural(ids.length, 'crawler')}.`;
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const out: any[] = []; let token: string | undefined;
+  do { const r = await glue.send(new GetCrawlersCommand({ NextToken: token })); out.push(...(r.Crawlers ?? [])); token = r.NextToken; } while (token);
+  return out.map((c) => ({
+    id: c.Name, name: c.Name, state: c.State, db: c.DatabaseName, role: (c.Role ?? '').split('/').pop(),
+    targets: [...(c.Targets?.S3Targets ?? []).map((t: any) => t.Path), ...(c.Targets?.JdbcTargets ?? []).map((t: any) => t.Path), ...(c.Targets?.DynamoDBTargets ?? []).map((t: any) => `dynamodb:${t.Path}`)].join(', '),
+    last: c.LastCrawl?.Status, lastStart: c.LastCrawl?.StartTime, schedule: c.Schedule?.ScheduleExpression, created: c.CreationTime,
+  }));
+});
+const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
+---
+<Console title="Crawlers" crumbs={[{ label: 'Crawlers' }]} error={post.error}>
+  <PageHeader title="Crawlers" description="Crawlers scan your data stores and populate the Data Catalog with tables." />
+  <DataTable
+    title="Crawlers" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Filter crawlers" emptyTitle="No crawlers" emptyText="You don't have any crawlers in this region."
+    columns={[
+      { key: 'name', label: 'Name' },
+      { key: 'state', label: 'State', render: (r) => stateStatus(r.state, { ready: 'success', running: 'progress', stopping: 'progress' }) },
+      { key: 'db', label: 'Database' },
+      { key: 'targets', label: 'Targets', mono: true },
+      { key: 'schedule', label: 'Schedule', render: (r) => r.schedule ?? 'On demand' },
+      { key: 'last', label: 'Last run', render: (r) => (r.last ? stateStatus(r.last, { succeeded: 'success', running: 'progress' }) : '-') },
+      { key: 'lastStart', label: 'Last run started', nowrap: true, render: (r) => (r.lastStart ? dateTime(r.lastStart) : '-'), sort: (r) => r.lastStart?.getTime() ?? 0 },
+      { key: 'role', label: 'IAM role' },
+    ]}
+  >
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="start" data-min="1"><Icon name="play" size={16} /> Run</button>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected crawlers will be permanently deleted. Tables they created are kept." data-confirm-title="Delete crawlers?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/glue/crawlers/create"><Icon name="plus" size={16} /> Create crawler</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/glue/crawlers/create">Create crawler</a>
+  </DataTable>
+</Console>

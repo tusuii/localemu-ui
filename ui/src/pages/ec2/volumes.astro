@@ -23,7 +23,7 @@ const post = await handlePost(Astro, {
     return `Created volume ${r.VolumeId}.`;
   },
   delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'volume' }, (v) => ec2.send(new DeleteVolumeCommand({ VolumeId: v }))),
-  snapshot: async (f) => bulk(strs(f, 'id'), { verb: 'Created', noun: 'volume' }, (v) => ec2.send(new CreateSnapshotCommand({ VolumeId: v }))),
+  snapshot: async (f) => bulk(strs(f, 'id'), { verb: 'Created', noun: 'snapshot', pick: 'volume' }, (v) => ec2.send(new CreateSnapshotCommand({ VolumeId: v }))),
 });
 if (post.response) return post.response;
 const [res, azs] = await Promise.all([

@@ -18,10 +18,10 @@ const ctx = getCtx(Astro.cookies);
 const ec2 = aws.ec2(ctx);
 const ids = (f: FormData) => { const x = strs(f, 'id'); if (!x.length) throw new UserError('Select at least one instance.'); return x; };
 const post = await handlePost(Astro, {
-  start: async (f) => bulk(strs(f, 'id'), { verb: 'Started', noun: 'instance' }, (i) => ec2.send(new StartInstancesCommand({ InstanceIds: [i] }))),
-  stop: async (f) => bulk(strs(f, 'id'), { verb: 'Stopped', noun: 'instance' }, (i) => ec2.send(new StopInstancesCommand({ InstanceIds: [i] }))),
-  reboot: async (f) => bulk(strs(f, 'id'), { verb: 'Rebooted', noun: 'instance' }, (i) => ec2.send(new RebootInstancesCommand({ InstanceIds: [i] }))),
-  terminate: async (f) => bulk(strs(f, 'id'), { verb: 'Terminated', noun: 'instance' }, (i) => ec2.send(new TerminateInstancesCommand({ InstanceIds: [i] }))),
+  start: async (f) => bulk(strs(f, 'id'), { verb: 'Starting', noun: 'instance' }, (i) => ec2.send(new StartInstancesCommand({ InstanceIds: [i] }))),
+  stop: async (f) => bulk(strs(f, 'id'), { verb: 'Stopping', noun: 'instance' }, (i) => ec2.send(new StopInstancesCommand({ InstanceIds: [i] }))),
+  reboot: async (f) => bulk(strs(f, 'id'), { verb: 'Rebooting', noun: 'instance' }, (i) => ec2.send(new RebootInstancesCommand({ InstanceIds: [i] }))),
+  terminate: async (f) => bulk(strs(f, 'id'), { verb: 'Terminating', noun: 'instance' }, (i) => ec2.send(new TerminateInstancesCommand({ InstanceIds: [i] }))),
 });
 if (post.response) return post.response;
 

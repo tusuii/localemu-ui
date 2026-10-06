@@ -37,7 +37,7 @@ const post = await handlePost(Astro, {
 if (post.response) return post.response;
 
 const res = await load(async () => (await athena.send(new GetWorkGroupCommand({ WorkGroup: name }))).WorkGroup!);
-if (res.error && /NotFound|not found|does not exist|InvalidRequest/i.test(res.error)) return new Response(`Workgroup "${name}" does not exist`, { status: 404 });
+if (!res.error && !res.data?.Name || res.error && /NotFound|not found|does not exist|InvalidRequest/i.test(res.error)) return new Response(`Workgroup "${name}" does not exist`, { status: 404 });
 const w = res.data;
 const c = w?.Configuration;
 ---

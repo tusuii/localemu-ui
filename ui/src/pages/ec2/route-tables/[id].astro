@@ -17,7 +17,7 @@ import { handlePost, required, str, strs } from '../../../lib/action';
 import { bulk } from '../../../lib/bulk';
 import { UserError, load, soft } from '../../../lib/errors';
 import { isIpv6Cidr, nameOf, routeDest, routeTarget, routeTargetParams } from '../../../lib/ec2';
-import { badge, copyable, stateStatus } from '../../../lib/html';
+import { badge, copyable, raw, stateStatus } from '../../../lib/html';
 
 const id = Astro.params.id!;
 const ctx = getCtx(Astro.cookies);
@@ -117,7 +117,7 @@ const v = post.values;
     columns={[
       { key: 'dest', label: 'Destination', mono: true }, { key: 'target', label: 'Target', mono: true }, { key: 'state', label: 'Status', render: (r) => stateStatus(r.state) },
       { key: 'origin', label: 'Propagated / origin' },
-      { key: 'edit', label: '', render: (r) => (r.local ? '' : `<a href="?edit=${encodeURIComponent(r.dest)}#route-form">Edit</a>`) },
+      { key: 'edit', label: '', render: (r) => raw(r.local ? '' : `<a href="?edit=${encodeURIComponent(r.dest)}#route-form">Edit</a>`) },
     ]}>
     <button slot="actions" class="btn btn-normal" name="intent" value="deleteRoutes" data-min="1" data-confirm="The selected routes will be deleted. The local route can't be removed." data-confirm-title="Delete routes?" data-confirm-ok="Delete">Delete routes</button>
   </DataTable>

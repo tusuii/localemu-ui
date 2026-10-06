@@ -1,0 +1,62 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { CreateJobCommand } from '@aws-sdk/client-glue';
+import { ListRolesCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str } from '../../../lib/action';
+import { UserError, soft } from '../../../lib/errors';
+import { GLUE_VERSIONS, WORKER_TYPES } from '../../../lib/glue';
+
+const ctx = getCtx(Astro.cookies);
+const glue = aws.glue(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Job name');
+    const script = required(f, 'script', 'Script location');
+    if (!script.startsWith('s3://')) throw new UserError('The script location must start with s3://.');
+    const type = str(f, 'type') || 'glueetl';
+    await glue.send(new CreateJobCommand({
+      Name: name, Role: required(f, 'role', 'IAM role'), Description: str(f, 'description') || undefined,
+      Command: { Name: type, ScriptLocation: script, PythonVersion: '3' }, GlueVersion: str(f, 'version') || undefined,
+      WorkerType: type === 'pythonshell' ? undefined : ((str(f, 'worker') || 'G.1X') as never), NumberOfWorkers: type === 'pythonshell' ? undefined : (intOf(f, 'workers', 'Number of workers') ?? 2),
+    }));
+    return { message: `Job ${name} created.`, redirect: `/glue/jobs/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const roles = await soft(async () => ((await aws.iam(ctx).send(new ListRolesCommand({}))).Roles ?? []).map((r) => r.Arn!));
+const v = post.values;
+---
+<Console title="Create job" crumbs={[{ label: 'Jobs', href: '/glue/jobs' }, { label: 'Create job' }]} error={post.error}>
+  <PageHeader title="Create job" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Job properties">
+      <FormField label="Name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+      <FormField label="IAM role" for="role">
+        <input id="role" name="role" class="input" list="roles" required autocomplete="off" value={v.role ?? `arn:aws:iam::${ctx.account}:role/AWSGlueServiceRole`} />
+        <datalist id="roles">{(roles.value ?? []).map((r) => <option value={r} />)}</datalist>
+      </FormField>
+    </Card>
+    <Card title="Script">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Type" for="type"><select id="type" name="type" class="select"><option value="glueetl" selected={v.type !== 'pythonshell'}>Spark (glueetl)</option><option value="pythonshell" selected={v.type === 'pythonshell'}>Python shell</option></select></FormField>
+        <FormField label="Glue version" for="version"><select id="version" name="version" class="select">{GLUE_VERSIONS.map((x) => <option value={x} selected={v.version === x}>{x}</option>)}</select></FormField>
+      </div>
+      <FormField label="Script location" for="script"><input id="script" name="script" class="input" required placeholder="s3://bucket/scripts/job.py" value={v.script ?? ''} /></FormField>
+    </Card>
+    <Card title="Capacity" description="Spark jobs only.">
+      <div data-show-when="type:glueetl" class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Worker type" for="worker"><select id="worker" name="worker" class="select">{WORKER_TYPES.map((x) => <option value={x} selected={v.worker === x}>{x}</option>)}</select></FormField>
+        <FormField label="Number of workers" for="workers"><input id="workers" name="workers" type="number" min="2" max="299" class="input" value={v.workers ?? '2'} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/glue/jobs">Cancel</a><button class="btn btn-primary" type="submit">Create job</button></div>
+  </form>
+</Console>

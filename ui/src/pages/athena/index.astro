@@ -2,7 +2,6 @@
 import Console from '../../layouts/Console.astro';
 import PageHeader from '../../components/PageHeader.astro';
 import Tabs from '../../components/Tabs.astro';
-import Card from '../../components/Card.astro';
 import DataTable from '../../components/DataTable.astro';
 import FormField from '../../components/FormField.astro';
 import Flash from '../../components/Flash.astro';
@@ -16,7 +15,7 @@ import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, str, strs } from '../../lib/action';
 import { UserError, load, soft } from '../../lib/errors';
-import { bytes, dateTime, plural, shortDateTime } from '../../lib/format';
+import { bytes, plural, shortDateTime } from '../../lib/format';
 import { mono, stateStatus, copyable } from '../../lib/html';
 import { clip, queryState, supported, waitForQuery } from '../../lib/athena';
 
