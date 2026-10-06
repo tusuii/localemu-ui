@@ -3,31 +3,40 @@ import Console from '../../layouts/Console.astro';
 import PageHeader from '../../components/PageHeader.astro';
 import Card from '../../components/Card.astro';
 import FormField from '../../components/FormField.astro';
-import { CreateStackCommand } from '@aws-sdk/client-cloudformation';
+import TemplateInput from '../../components/TemplateInput.astro';
+import Flash from '../../components/Flash.astro';
+import { CreateStackCommand, ValidateTemplateCommand } from '@aws-sdk/client-cloudformation';
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, str, strs } from '../../lib/action';
-import { parseParams, SAMPLE_TEMPLATE } from '../../lib/cfn';
+import { parseParams, SAMPLE_TEMPLATE, templateFrom, CAPABILITIES } from '../../lib/cfn';
 
 const ctx = getCtx(Astro.cookies);
+const validateIt = async (f: FormData) => {
+  const r = await aws.cfn(ctx).send(new ValidateTemplateCommand(await templateFrom(f)));
+  return { stay: true, message: 'Template is valid.', data: { description: r.Description, params: r.Parameters ?? [], caps: r.Capabilities ?? [] } };
+};
 const post = await handlePost(Astro, {
   create: async (f) => {
+    if (str(f, 'validate') === '1') return validateIt(f);
     const name = required(f, 'name', 'Stack name');
-    const body = required(f, 'template', 'Template');
-    await aws.cfn(ctx).send(new CreateStackCommand({ StackName: name, TemplateBody: body, Parameters: parseParams(str(f, 'params')), Capabilities: strs(f, 'caps') as never }));
+    const tpl = await templateFrom(f);
+    await aws.cfn(ctx).send(new CreateStackCommand({ StackName: name, ...tpl, Parameters: parseParams(str(f, 'params')), Capabilities: strs(f, 'caps') as never }));
     return { message: `Stack ${name} creation started.`, redirect: `/cloudformation/${encodeURIComponent(name)}` };
   },
 });
 if (post.response) return post.response;
 const v = post.values;
+const validated = post.result?.data ? (post.result.data as { description?: string; params: { ParameterKey?: string; DefaultValue?: string; Description?: string }[]; caps: string[] } | undefined) : undefined;
 ---
 <Console title="Create stack" crumbs={[{ label: 'Stacks', href: '/cloudformation' }, { label: 'Create stack' }]} error={post.error}>
-  <PageHeader title="Create stack" description="Paste a JSON or YAML template." />
-  <form method="post" class="max-w-4xl space-y-4"><input type="hidden" name="intent" value="create" />
+  <PageHeader title="Create stack" description="Paste, upload or link a JSON or YAML template." />
+  <form method="post" enctype="multipart/form-data" class="max-w-4xl space-y-4"><input type="hidden" name="intent" value="create" />
     <Card title="Stack"><FormField label="Stack name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" pattern="[A-Za-z][A-Za-z0-9-]*" value={v.name ?? ''} /></FormField>
       <FormField label="Parameters" for="params" optional hint="One Key=Value per line."><textarea id="params" name="params" class="textarea code-area" rows="3" data-code>{v.params ?? ''}</textarea></FormField>
-      <div class="flex flex-wrap gap-5">{['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'].map((c) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="caps" value={c} /> {c}</label>)}</div></Card>
-    <Card title="Template"><textarea name="template" class="textarea code-area" rows="24" data-code spellcheck="false" required>{v.template ?? SAMPLE_TEMPLATE}</textarea></Card>
-    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/cloudformation">Cancel</a><button class="btn btn-primary" type="submit">Create stack</button></div>
+      <div class="flex flex-wrap gap-5">{CAPABILITIES.map((c) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="caps" value={c} /> {c}</label>)}</div></Card>
+    <Card title="Template"><TemplateInput body={v.template ?? SAMPLE_TEMPLATE} url={v.templateUrl ?? ''} />
+      {validated && <div class="mt-3"><Flash type="success" dismissible={false} text="Template is valid" detail={`${validated.description ? validated.description + '. ' : ''}${validated.params.length} parameter(s): ${validated.params.map((p) => p.ParameterKey + (p.DefaultValue ? ` (default ${p.DefaultValue})` : '')).join(', ') || 'none'}${validated.caps.length ? '. Requires ' + validated.caps.join(', ') : ''}`} /></div>}</Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/cloudformation">Cancel</a><button class="btn btn-primary order-last" type="submit">Create stack</button><button class="btn btn-normal" type="submit" name="validate" value="1" formnovalidate>Validate template</button></div>
   </form>
 </Console>

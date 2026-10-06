@@ -3,6 +3,8 @@ import Console from '../../layouts/Console.astro';
 import PageHeader from '../../components/PageHeader.astro';
 import DataTable from '../../components/DataTable.astro';
 import Icon from '../../components/Icon.astro';
+import Pager from '../../components/Pager.astro';
+import { pageLinks, pageState } from '../../lib/paging';
 import { ListQueuesCommand, GetQueueAttributesCommand, DeleteQueueCommand, PurgeQueueCommand } from '@aws-sdk/client-sqs';
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
@@ -26,20 +28,20 @@ const post = await handlePost(Astro, {
 });
 if (post.response) return post.response;
 
+const state = pageState(Astro.url);
+const size = [25, 50, 100].includes(Number(Astro.url.searchParams.get('limit'))) ? Number(Astro.url.searchParams.get('limit')) : 50;
+let nextToken: string | undefined;
 const res = await load(async () => {
-  const urls: string[] = [];
-  let token: string | undefined;
-  do {
-    const r = await sqs.send(new ListQueuesCommand({ NextToken: token, MaxResults: 1000 }));
-    urls.push(...(r.QueueUrls ?? []));
-    token = r.NextToken;
-  } while (token && urls.length < 500);
+  const r = await sqs.send(new ListQueuesCommand({ NextToken: state.token as string | undefined, MaxResults: size }));
+  const urls = r.QueueUrls ?? [];
+  nextToken = r.NextToken;
   return Promise.all(urls.map(async (url) => {
     const a = (await sqs.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ['All'] })).catch(() => ({ Attributes: {} as Record<string, string> }))).Attributes ?? {};
     const name = queueName(url);
     return { id: url, name, type: isFifo(name) ? 'FIFO' : 'Standard', available: Number(a.ApproximateNumberOfMessages ?? 0), inflight: Number(a.ApproximateNumberOfMessagesNotVisible ?? 0), delayed: Number(a.ApproximateNumberOfMessagesDelayed ?? 0), created: epoch(a.CreatedTimestamp), encrypted: !!(a.KmsMasterKeyId || a.SqsManagedSseEnabled === 'true') };
   }));
 });
+const links = pageLinks(Astro.url, state, nextToken);
 const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
 ---
 <Console title="Queues" crumbs={[{ label: 'Queues' }]} error={post.error}>
@@ -65,4 +67,5 @@ const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
     </Fragment>
     <a slot="empty" class="btn btn-primary" href="/sqs/create">Create queue</a>
   </DataTable>
+  {!res.error && (rows.length > 0 || links.index > 0) && <div class="card -mt-3 rounded-t-none"><Pager links={links} count={rows.length} noun="queues" /></div>}
 </Console>

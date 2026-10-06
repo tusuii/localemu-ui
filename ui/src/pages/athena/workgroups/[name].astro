@@ -1,0 +1,76 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Details from '../../../components/Details.astro';
+import FormField from '../../../components/FormField.astro';
+import Icon from '../../../components/Icon.astro';
+import { GetWorkGroupCommand, UpdateWorkGroupCommand, DeleteWorkGroupCommand } from '@aws-sdk/client-athena';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, str } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { bytes, dateTime } from '../../../lib/format';
+import { copyable, stateStatus } from '../../../lib/html';
+import { supported } from '../../../lib/athena';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const athena = aws.athena(ctx);
+
+const post = await handlePost(Astro, {
+  update: async (f) => {
+    const out = str(f, 'output');
+    if (out && !out.startsWith('s3://')) throw new UserError('The query result location must start with s3://.');
+    await supported('Updating workgroups', () => athena.send(new UpdateWorkGroupCommand({
+      WorkGroup: name, Description: str(f, 'description'),
+      ConfigurationUpdates: out ? { ResultConfigurationUpdates: { OutputLocation: out } } : undefined,
+    })));
+    return 'Workgroup updated.';
+  },
+  delete: async () => {
+    if (name === 'primary') throw new UserError('The primary workgroup cannot be deleted.');
+    await athena.send(new DeleteWorkGroupCommand({ WorkGroup: name, RecursiveDeleteOption: true }));
+    return { message: `Deleted workgroup "${name}".`, redirect: '/athena/workgroups' };
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => (await athena.send(new GetWorkGroupCommand({ WorkGroup: name }))).WorkGroup!);
+if (res.error && /NotFound|not found|does not exist|InvalidRequest/i.test(res.error)) return new Response(`Workgroup "${name}" does not exist`, { status: 404 });
+const w = res.data;
+const c = w?.Configuration;
+---
+<Console title={name} crumbs={[{ label: 'Workgroups', href: '/athena/workgroups' }, { label: name }]} error={post.error ?? res.error}>
+  <PageHeader title={name} badge={w?.State}>
+    <a class="btn btn-primary" href={`/athena?wg=${encodeURIComponent(name)}`}><Icon name="play" size={16} /> Open in query editor</a>
+  </PageHeader>
+  {w && (
+    <div class="space-y-4">
+      <Card title="Details">
+        <Details items={[
+          { label: 'Name', value: w.Name }, { label: 'State', value: stateStatus(w.State) }, { label: 'Created', value: dateTime(w.CreationTime) },
+          { label: 'Description', value: w.Description, wide: true },
+          { label: 'Query result location', value: c?.ResultConfiguration?.OutputLocation ? copyable(c.ResultConfiguration.OutputLocation) : undefined, wide: true },
+          { label: 'Override client-side settings', value: c?.EnforceWorkGroupConfiguration ? 'Yes' : 'No' },
+          { label: 'CloudWatch metrics', value: c?.PublishCloudWatchMetricsEnabled ? 'Enabled' : 'Disabled' },
+          { label: 'Data usage limit per query', value: c?.BytesScannedCutoffPerQuery ? bytes(c.BytesScannedCutoffPerQuery) : 'None' },
+          { label: 'Engine version', value: c?.EngineVersion?.EffectiveEngineVersion ?? c?.EngineVersion?.SelectedEngineVersion },
+          { label: 'Requester pays', value: c?.RequesterPaysEnabled ? 'Enabled' : 'Disabled' },
+        ]} />
+      </Card>
+      <Card title="Edit">
+        <form method="post" class="max-w-2xl">
+          <input type="hidden" name="intent" value="update" />
+          <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={w.Description ?? ''} /></FormField>
+          <FormField label="Query result location" for="output" optional><input id="output" name="output" class="input" placeholder="s3://my-bucket/athena/" value={c?.ResultConfiguration?.OutputLocation ?? ''} /></FormField>
+          <button class="btn btn-normal" type="submit">Save changes</button>
+        </form>
+      </Card>
+      <Card title="Delete workgroup">
+        <form method="post"><input type="hidden" name="intent" value="delete" />
+          <button class="btn btn-danger" disabled={name === 'primary'} data-confirm="The workgroup and its saved queries will be permanently deleted." data-confirm-title="Delete workgroup?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete workgroup"><Icon name="trash-2" size={16} /> Delete workgroup</button></form>
+      </Card>
+    </div>
+  )}
+</Console>

@@ -3,6 +3,8 @@ import Console from '../../layouts/Console.astro';
 import PageHeader from '../../components/PageHeader.astro';
 import DataTable from '../../components/DataTable.astro';
 import Icon from '../../components/Icon.astro';
+import Pager from '../../components/Pager.astro';
+import { pageLinks, pageState } from '../../lib/paging';
 import { ListTopicsCommand, GetTopicAttributesCommand, DeleteTopicCommand } from '@aws-sdk/client-sns';
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
@@ -22,15 +24,18 @@ const post = await handlePost(Astro, {
 });
 if (post.response) return post.response;
 
+const state = pageState(Astro.url);
+let nextToken: string | undefined;
 const res = await load(async () => {
-  const arns: string[] = [];
-  let token: string | undefined;
-  do { const r = await sns.send(new ListTopicsCommand({ NextToken: token })); arns.push(...(r.Topics ?? []).map((t) => t.TopicArn!)); token = r.NextToken; } while (token && arns.length < 500);
+  const r = await sns.send(new ListTopicsCommand({ NextToken: state.token as string | undefined }));
+  const arns = (r.Topics ?? []).map((t) => t.TopicArn!);
+  nextToken = r.NextToken;
   return Promise.all(arns.map(async (arn) => {
     const a = (await sns.send(new GetTopicAttributesCommand({ TopicArn: arn })).catch(() => ({ Attributes: {} as Record<string, string> }))).Attributes ?? {};
     return { id: arn, name: arnName(arn), arn, fifo: a.FifoTopic === 'true', confirmed: Number(a.SubscriptionsConfirmed ?? 0), pending: Number(a.SubscriptionsPending ?? 0) };
   }));
 });
+const links = pageLinks(Astro.url, state, nextToken);
 const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
 ---
 <Console title="Topics" crumbs={[{ label: 'Topics' }]} error={post.error}>
@@ -52,4 +57,5 @@ const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
     </Fragment>
     <a slot="empty" class="btn btn-primary" href="/sns/create">Create topic</a>
   </DataTable>
+  {!res.error && (rows.length > 0 || links.index > 0) && <div class="card -mt-3 rounded-t-none"><Pager links={links} count={rows.length} noun="topics" /></div>}
 </Console>

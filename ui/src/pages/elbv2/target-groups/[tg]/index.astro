@@ -1,0 +1,161 @@
+---
+import Console from '../../../../layouts/Console.astro';
+import PageHeader from '../../../../components/PageHeader.astro';
+import Tabs from '../../../../components/Tabs.astro';
+import Details from '../../../../components/Details.astro';
+import DataTable from '../../../../components/DataTable.astro';
+import FormField from '../../../../components/FormField.astro';
+import Icon from '../../../../components/Icon.astro';
+import {
+  DescribeTargetGroupsCommand, DeleteTargetGroupCommand, DescribeTargetHealthCommand, RegisterTargetsCommand, DeregisterTargetsCommand,
+  DescribeTargetGroupAttributesCommand, ModifyTargetGroupAttributesCommand, ModifyTargetGroupCommand, DescribeTagsCommand,
+} from '@aws-sdk/client-elastic-load-balancing-v2';
+import { DescribeInstancesCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../../../lib/aws';
+import { getCtx } from '../../../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../../../lib/action';
+import { UserError, load, soft } from '../../../../lib/errors';
+import { plural } from '../../../../lib/format';
+import { badge, copyable, mono, stateStatus, tagList } from '../../../../lib/html';
+import { lbShort, uniq } from '../../../../lib/elbv2';
+import { nameOf } from '../../../../lib/ec2';
+
+const name = Astro.params.tg!;
+const ctx = getCtx(Astro.cookies);
+const elb = aws.elbv2(ctx);
+const TABS = ['targets', 'health', 'attributes', 'details'];
+const tab = TABS.includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'targets';
+const here = (t = tab) => `${Astro.url.pathname}?tab=${t}`;
+
+const tgRes = await load(async () => (await elb.send(new DescribeTargetGroupsCommand({ Names: [name] }))).TargetGroups![0]);
+if (tgRes.error && /NotFound|not found|does not exist/i.test(tgRes.error)) return new Response(`Target group "${name}" does not exist`, { status: 404 });
+const tg = tgRes.data;
+const arn = tg?.TargetGroupArn ?? '';
+
+const parseTarget = (s: string) => { const [id, port] = s.split('|'); return { Id: id, Port: port ? Number(port) : undefined }; };
+
+const post = await handlePost(Astro, {
+  register: async (f) => {
+    const id = required(f, 'target', 'Target');
+    const port = intOf(f, 'port', 'Port');
+    await elb.send(new RegisterTargetsCommand({ TargetGroupArn: arn, Targets: [{ Id: id, Port: port }] }));
+    return { message: `Registered target ${id}.`, redirect: here('targets') };
+  },
+  deregister: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one target.');
+    await elb.send(new DeregisterTargetsCommand({ TargetGroupArn: arn, Targets: ids.map(parseTarget) }));
+    return { message: `Deregistered ${plural(ids.length, 'target')}.`, redirect: here('targets') };
+  },
+  health: async (f) => {
+    await elb.send(new ModifyTargetGroupCommand({
+      TargetGroupArn: arn, HealthCheckPath: str(f, 'path') || undefined, HealthCheckIntervalSeconds: intOf(f, 'interval', 'Interval'),
+      HealthyThresholdCount: intOf(f, 'healthy', 'Healthy threshold'), UnhealthyThresholdCount: intOf(f, 'unhealthy', 'Unhealthy threshold'),
+    }));
+    return { message: 'Health check settings updated.', redirect: here('health') };
+  },
+  attributes: async (f) => {
+    const Attributes = ['deregistration_delay.timeout_seconds', 'stickiness.enabled', 'load_balancing.algorithm.type', 'slow_start.duration_seconds']
+      .filter((k) => str(f, k) !== '').map((k) => ({ Key: k, Value: str(f, k) }));
+    await elb.send(new ModifyTargetGroupAttributesCommand({ TargetGroupArn: arn, Attributes }));
+    return { message: 'Attributes updated.', redirect: here('attributes') };
+  },
+  deleteTg: async () => { await elb.send(new DeleteTargetGroupCommand({ TargetGroupArn: arn })); return { message: `Deleted target group "${name}".`, redirect: '/elbv2/target-groups' }; },
+});
+if (post.response) return post.response;
+
+const targets = tab === 'targets' ? await load(async () => ((await elb.send(new DescribeTargetHealthCommand({ TargetGroupArn: arn }))).TargetHealthDescriptions ?? []).map((d) => ({
+  id: `${d.Target?.Id}|${d.Target?.Port ?? ''}`, target: d.Target?.Id, port: d.Target?.Port, state: d.TargetHealth?.State, reason: d.TargetHealth?.Reason, description: d.TargetHealth?.Description,
+}))) : undefined;
+const instances = tab === 'targets' && tg?.TargetType === 'instance' ? await soft(async () => ((await aws.ec2(ctx).send(new DescribeInstancesCommand({}))).Reservations ?? []).flatMap((r) => r.Instances ?? [])) : undefined;
+const attrs = tab === 'attributes' ? await soft(async () => (await elb.send(new DescribeTargetGroupAttributesCommand({ TargetGroupArn: arn }))).Attributes ?? []) : undefined;
+const tags = tab === 'details' ? await soft(async () => (await elb.send(new DescribeTagsCommand({ ResourceArns: [arn] }))).TagDescriptions?.[0]?.Tags ?? []) : undefined;
+const attrMap = Object.fromEntries((attrs?.value ?? []).map((a) => [a.Key!, a.Value!]));
+const v = post.values;
+const tabs = [{ id: 'targets', label: 'Targets' }, { id: 'health', label: 'Health checks' }, { id: 'attributes', label: 'Attributes' }, { id: 'details', label: 'Details' }];
+---
+<Console title={name} crumbs={[{ label: 'Target groups', href: '/elbv2/target-groups' }, { label: name }]} error={post.error ?? tgRes.error}>
+  <PageHeader title={name} badge={tg?.Protocol ? `${tg.Protocol}:${tg.Port ?? ''}` : tg?.TargetType} />
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'targets' && (
+      <div class="space-y-5 p-5">
+        <DataTable title="Registered targets" rows={targets?.data ?? []} error={targets?.error} bare select="multi" idKey="id" nameKey="target" id="targets" pageSize={15}
+          emptyTitle="No registered targets" emptyText="Register targets to receive traffic from this target group."
+          columns={[
+            { key: 'target', label: 'Instance ID / target', mono: true },
+            { key: 'port', label: 'Port' },
+            { key: 'state', label: 'Health status', render: (r) => stateStatus(r.state, { healthy: 'success', unhealthy: 'error', initial: 'progress', unused: 'stopped', draining: 'progress' }) },
+            { key: 'reason', label: 'Reason', render: (r) => r.reason ?? '-' },
+            { key: 'description', label: 'Details' },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deregister" data-min="1" data-confirm="The selected targets will stop receiving traffic." data-confirm-title="Deregister targets?" data-confirm-ok="Deregister">Deregister</button>
+        </DataTable>
+        <form method="post" class="border-t border-line pt-5">
+          <input type="hidden" name="intent" value="register" />
+          <h3 class="card-title mb-3">Register target</h3>
+          <div class="grid gap-4 md:grid-cols-[1fr_160px_auto] md:items-end">
+            <FormField label={tg?.TargetType === 'instance' ? 'Instance ID' : tg?.TargetType === 'ip' ? 'IP address' : 'Target'} for="target" class="!mb-0">
+              <input id="target" name="target" class="input" list="instance-list" required autocomplete="off" value={v.target ?? ''} />
+              <datalist id="instance-list">{(instances?.value ?? []).map((i) => <option value={i.InstanceId}>{nameOf(i.Tags)}</option>)}</datalist>
+            </FormField>
+            <FormField label="Port" for="tport" optional class="!mb-0"><input id="tport" name="port" type="number" min="1" max="65535" class="input" value={v.port ?? String(tg?.Port ?? '')} /></FormField>
+            <button class="btn btn-primary" type="submit">Register</button>
+          </div>
+        </form>
+      </div>
+    )}
+
+    {tab === 'health' && tg && (
+      <form method="post" class="max-w-3xl space-y-3 p-5">
+        <input type="hidden" name="intent" value="health" />
+        <Details columns={3} items={[{ label: 'Protocol', value: tg.HealthCheckProtocol }, { label: 'Port', value: tg.HealthCheckPort }, { label: 'Success codes', value: tg.Matcher?.HttpCode }]} />
+        <div class="grid gap-4 pt-3 sm:grid-cols-2">
+          <FormField label="Health check path" for="hpath"><input id="hpath" name="path" class="input" value={tg.HealthCheckPath ?? ''} /></FormField>
+          <FormField label="Interval (seconds)" for="hint"><input id="hint" name="interval" type="number" min="5" max="300" class="input" value={tg.HealthCheckIntervalSeconds ?? ''} /></FormField>
+          <FormField label="Healthy threshold" for="hhealthy"><input id="hhealthy" name="healthy" type="number" min="2" max="10" class="input" value={tg.HealthyThresholdCount ?? ''} /></FormField>
+          <FormField label="Unhealthy threshold" for="hunhealthy"><input id="hunhealthy" name="unhealthy" type="number" min="2" max="10" class="input" value={tg.UnhealthyThresholdCount ?? ''} /></FormField>
+        </div>
+        <button class="btn btn-primary" type="submit">Save health check settings</button>
+      </form>
+    )}
+
+    {tab === 'attributes' && (
+      <div class="space-y-5 p-5">
+        {attrs?.error && <p class="text-danger">{attrs.error}</p>}
+        <form method="post" class="max-w-3xl space-y-3">
+          <input type="hidden" name="intent" value="attributes" />
+          <div class="grid gap-4 sm:grid-cols-2">
+            <FormField label="Deregistration delay (seconds)" for="a1"><input id="a1" name="deregistration_delay.timeout_seconds" type="number" min="0" max="3600" class="input" value={attrMap['deregistration_delay.timeout_seconds'] ?? ''} /></FormField>
+            <FormField label="Slow start duration (seconds)" for="a2"><input id="a2" name="slow_start.duration_seconds" type="number" min="0" max="900" class="input" value={attrMap['slow_start.duration_seconds'] ?? ''} /></FormField>
+            <FormField label="Stickiness" for="a3"><select id="a3" name="stickiness.enabled" class="select"><option value="false" selected={attrMap['stickiness.enabled'] !== 'true'}>Disabled</option><option value="true" selected={attrMap['stickiness.enabled'] === 'true'}>Enabled</option></select></FormField>
+            <FormField label="Load balancing algorithm" for="a4"><select id="a4" name="load_balancing.algorithm.type" class="select">{['round_robin', 'least_outstanding_requests'].map((x) => <option value={x} selected={attrMap['load_balancing.algorithm.type'] === x}>{x}</option>)}</select></FormField>
+          </div>
+          <button class="btn btn-primary" type="submit">Save attributes</button>
+        </form>
+        <div class="border-t border-line pt-5">
+          <DataTable title="All attributes" bare filter={false} refresh={false} id="attrs" pageSize={50} rows={(attrs?.value ?? []).map((a) => ({ id: a.Key, key: a.Key, value: a.Value }))}
+            columns={[{ key: 'key', label: 'Key', mono: true }, { key: 'value', label: 'Value' }]} />
+        </div>
+      </div>
+    )}
+
+    {tab === 'details' && tg && (
+      <div class="space-y-5 p-5">
+        <Details items={[
+          { label: 'Name', value: tg.TargetGroupName }, { label: 'Target type', value: tg.TargetType }, { label: 'Protocol : Port', value: tg.Protocol ? `${tg.Protocol}: ${tg.Port}` : '-' },
+          { label: 'VPC', value: mono(tg.VpcId) }, { label: 'IP address type', value: tg.IpAddressType }, { label: 'Protocol version', value: tg.ProtocolVersion },
+          { label: 'Load balancers', value: uniq(tg.LoadBalancerArns).map((a) => lbShort(a)).join(', ') || 'None associated' },
+          { label: 'ARN', value: copyable(arn), wide: true },
+        ]} />
+        <div class="border-t border-line pt-5"><h3 class="card-title mb-2">Tags</h3>{tagList(tags?.value)}</div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3 text-danger">Danger zone</h3>
+          <form method="post"><input type="hidden" name="intent" value="deleteTg" />
+            <button class="btn btn-danger" data-confirm="The target group will be permanently deleted." data-confirm-title="Delete target group?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete target group"><Icon name="trash-2" size={16} /> Delete target group</button></form>
+        </div>
+      </div>
+    )}
+  </div>
+</Console>

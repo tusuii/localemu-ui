@@ -1,0 +1,58 @@
+---
+import Console from '../layouts/Console.astro';
+import PageHeader from '../components/PageHeader.astro';
+import Flash from '../components/Flash.astro';
+import { getCtx } from '../lib/context';
+import { searchResources } from '../lib/search';
+import { CONSOLES } from '../lib/services';
+
+const ctx = getCtx(Astro.cookies);
+const q = (Astro.url.searchParams.get('q') ?? '').trim().slice(0, 200);
+const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+const res = q.length >= 2 ? await searchResources(ctx, q, 50) : null;
+const services = terms.length
+  ? CONSOLES.filter((s) => terms.every((t) => [s.name, s.id, s.description, ...(s.keywords ?? [])].join(' ').toLowerCase().includes(t)))
+  : [];
+---
+<Console title={q ? `Search: ${q}` : 'Search'} sidebar={false} crumbs={[{ label: 'Search' }]}>
+  <PageHeader title="Search" description={`Services and resources in account ${ctx.account}, ${ctx.region}.`} />
+  <form method="get" action="/search" role="search" class="mb-4 flex max-w-xl gap-2">
+    <input type="search" name="q" value={q} class="input" aria-label="Search services and resources" placeholder="Search services and resources (2+ characters)" autofocus />
+    <button class="btn btn-primary" type="submit">Search</button>
+  </form>
+
+  {q.length > 0 && q.length < 2 && <p class="text-muted">Type at least 2 characters to search resources.</p>}
+
+  {services.length > 0 && (
+    <section class="card mb-4" aria-labelledby="sr-services">
+      <header class="card-header"><h2 class="card-title" id="sr-services">Services <span class="count">({services.length})</span></h2></header>
+      <ul class="card-body grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
+        {services.map((s) => <li><a href={s.href}>{s.name}</a> <span class="text-muted">{s.description}</span></li>)}
+      </ul>
+    </section>
+  )}
+
+  {res?.groups.map((g) => (
+    <section class="card mb-4" aria-labelledby={`sr-${g.id}`} data-search-group={g.id}>
+      <header class="card-header"><h2 class="card-title" id={`sr-${g.id}`}>{g.label} <span class="count">({g.total})</span></h2></header>
+      <ul class="card-body space-y-1">
+        {g.hits.map((h) => (
+          <li><a href={h.href} class="font-bold">{h.name}</a>{h.sub && <span class="ml-2 text-muted font-mono text-[12px]">{h.sub}</span>}</li>
+        ))}
+        {g.total > g.hits.length && <li class="text-muted">and {g.total - g.hits.length} more…</li>}
+      </ul>
+    </section>
+  ))}
+
+  {res && res.count === 0 && services.length === 0 && (
+    <div class="card"><div class="empty"><h3>No results</h3><p>Nothing matches “{q}” in this account and region.</p></div></div>
+  )}
+
+  {res && res.slow.length > 0 && <Flash type="info" dismissible={false} text="Some services are still loading" detail={`${res.slow.join(', ')}. Reload in a moment to include them.`} />}
+  {res && res.errors.length > 0 && (
+    <details class="mt-4 text-muted">
+      <summary>{res.errors.length} service{res.errors.length > 1 ? 's' : ''} could not be searched</summary>
+      <ul class="mt-2 list-disc pl-5">{res.errors.map((e) => <li><strong>{e.label}</strong>: {e.message}</li>)}</ul>
+    </details>
+  )}
+</Console>

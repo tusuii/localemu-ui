@@ -6,12 +6,11 @@
  * filtering, sorting and the confirm dialog) if this script fails to load.
  */
 
-const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector<T>(sel);
-const $$ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => [...root.querySelectorAll<T>(sel)];
-const store = {
-  get(k: string): string | null { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
-};
+import { $, $$, store } from './util';
+import { initLive } from './live';
+import { initCli } from './cli';
+import { initKeys, openers } from './keys';
+import './shell';
 
 /* ------------------------------------------------------------------ menus */
 
@@ -251,7 +250,7 @@ window.addEventListener('pageshow', () => {
 function initTable(form: HTMLFormElement) {
   const tbody = $<HTMLTableSectionElement>('tbody', form);
   if (!tbody) { bindSelection(form, [], () => []); return; }
-  const rows = $$<HTMLTableRowElement>('tr[data-row]', tbody);
+  const rows = $$<HTMLTableRowElement>('tr[data-row]', tbody); // mutated in place by live refresh
   const pageSize = Number(form.dataset.pageSize || 20);
   const hasSel = !!$('[data-row-select]', form);
   const ths = $$<HTMLTableCellElement>('thead th', form);
@@ -265,7 +264,16 @@ function initTable(form: HTMLFormElement) {
   let sortDir = 1;
   let matched = rows;
 
-  rows.forEach((r) => { r.dataset.search = (r.textContent ?? '').toLowerCase().replace(/\s+/g, ' '); });
+  const indexRow = (r: HTMLTableRowElement) => { r.dataset.search = (r.textContent ?? '').toLowerCase().replace(/\s+/g, ' '); };
+  rows.forEach(indexRow);
+  // Accessibility: caption, filter result announcements, keyboard-sortable headers.
+  const table = $<HTMLTableElement>('table', form);
+  const heading = $('.card-title', form)?.childNodes[0]?.textContent?.trim();
+  if (table && heading && !table.caption) { const cap = table.createCaption(); cap.className = 'sr-only'; cap.textContent = heading; }
+  const status = document.createElement('div');
+  status.className = 'sr-live'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+  form.appendChild(status);
+  ths.forEach((th) => { if (th.classList.contains('sortable')) { th.tabIndex = 0; th.setAttribute('role', 'columnheader'); th.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); th.click(); } }); } });
 
   const cellValue = (r: HTMLTableRowElement, i: number) => {
     const td = r.cells[i + colOffset];
@@ -292,6 +300,7 @@ function initTable(form: HTMLFormElement) {
     if (noMatch) noMatch.classList.toggle('hidden', matched.length > 0);
     $('.tbl-wrap', form)?.classList.toggle('hidden', matched.length === 0);
     if (info) info.textContent = matched.length ? `${start + 1}–${Math.min(start + pageSize, matched.length)} of ${matched.length}` : '';
+    status.textContent = terms.length ? (matched.length ? `${matched.length} of ${rows.length} match the filter` : 'No matches') : '';
     if (pager) {
       pager.innerHTML = '';
       if (pages > 1) {
@@ -335,6 +344,21 @@ function initTable(form: HTMLFormElement) {
   });
 
   const sync = bindSelection(form, rows, () => $$<HTMLTableRowElement>('tr[data-row]:not([hidden])', tbody));
+
+  /** Live refresh: adopt the rows of a freshly fetched copy of this table, keeping selection, filter, sort, page. */
+  (form as any).__swap = (src: HTMLFormElement) => {
+    const nb = $<HTMLTableSectionElement>('tbody', src);
+    if (!nb) return false;
+    const sel = new Set(rows.filter((r) => $<HTMLInputElement>('[data-row-select]', r)?.checked).map((r) => r.dataset.id));
+    const fresh = $$<HTMLTableRowElement>('tr[data-row]', nb);
+    tbody.replaceChildren(...fresh);
+    rows.splice(0, rows.length, ...fresh);
+    rows.forEach((r) => { indexRow(r); const c = $<HTMLInputElement>('[data-row-select]', r); if (c && sel.has(r.dataset.id)) c.checked = true; });
+    const cnt = $('.card-title .count', form), ncnt = $('.card-title .count', src);
+    if (cnt && ncnt) cnt.textContent = ncnt.textContent;
+    render();
+    return true;
+  };
   render();
   return hasSel;
 }
@@ -428,6 +452,7 @@ if (dlg) {
     dlg.addEventListener('close', () => {
       if (dlg.returnValue === 'ok' && form) { btn.dataset.confirmed = '1'; form.requestSubmit(btn); }
     }, { once: true });
+    openers.set(dlg, btn);
     dlg.showModal();
     (word ? input : ok).focus();
   }, true);
@@ -513,3 +538,8 @@ $$('[data-autorefresh]').forEach((el) => {
   box.addEventListener('change', () => { store.set(key, box.checked ? '1' : '0'); arm(); });
   arm();
 });
+
+/* ---------------------------------------------- live refresh, CLI, shortcuts */
+initLive();
+initCli();
+initKeys();

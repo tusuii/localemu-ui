@@ -13,7 +13,7 @@ import { load } from '../../../lib/errors';
 import { cpuMem } from '../../../lib/ecs';
 import { copyable, stateStatus } from '../../../lib/html';
 
-const id = Astro.params.td!;
+const id = decodeURIComponent(Astro.params.td!);
 const ctx = getCtx(Astro.cookies);
 const ecs = aws.ecs(ctx);
 

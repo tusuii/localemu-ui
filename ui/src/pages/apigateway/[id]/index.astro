@@ -32,7 +32,7 @@ const v1 = aws.apigw(ctx);
 const v2 = aws.apigwv2(ctx);
 
 // ---- which kind of API is this?
-let param = Astro.params.id!;
+let param = decodeURIComponent(Astro.params.id!);
 let kind: 'rest' | 'v2' | null = null;
 if (param.startsWith('rest:')) { kind = 'rest'; param = param.slice(5); }
 else if (param.startsWith('v2:')) { kind = 'v2'; param = param.slice(3); }

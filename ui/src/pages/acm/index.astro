@@ -1,0 +1,60 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { ListCertificatesCommand, DeleteCertificateCommand } from '@aws-sdk/client-acm';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, plural } from '../../lib/format';
+import { badge, stateStatus } from '../../lib/html';
+import { certId } from '../../lib/acm';
+
+const ctx = getCtx(Astro.cookies);
+const acm = aws.acm(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one certificate.');
+    for (const arn of ids) await acm.send(new DeleteCertificateCommand({ CertificateArn: arn }));
+    return `Deleted ${plural(ids.length, 'certificate')}.`;
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const out: any[] = []; let token: string | undefined;
+  do { const r = await acm.send(new ListCertificatesCommand({ NextToken: token, MaxItems: 100 })); out.push(...(r.CertificateSummaryList ?? [])); token = r.NextToken; } while (token && out.length < 500);
+  return out.map((c) => ({
+    id: c.CertificateArn, certId: certId(c.CertificateArn), domain: c.DomainName, status: c.Status, type: c.Type, inUse: !!c.InUse, key: c.KeyAlgorithm,
+    created: c.CreatedAt ?? c.ImportedAt, notAfter: c.NotAfter, sans: (c.SubjectAlternativeNameSummaries ?? []).length,
+  }));
+});
+const rows = (res.data ?? []).sort((a, b) => a.domain.localeCompare(b.domain));
+---
+<Console title="Certificates" crumbs={[{ label: 'Certificates' }]} error={post.error}>
+  <PageHeader title="Certificates" description="AWS Certificate Manager provisions, manages and deploys public and private SSL/TLS certificates." />
+  <DataTable
+    title="Certificates" rows={rows} error={res.error} select="multi" nameKey="domain" pageSize={25}
+    filter="Search certificates" emptyTitle="No certificates" emptyText="You don't have any certificates in this region."
+    columns={[
+      { key: 'domain', label: 'Domain name', href: (r) => `/acm/${encodeURIComponent(r.certId)}` },
+      { key: 'type', label: 'Type', render: (r) => badge(r.type === 'IMPORTED' ? 'Imported' : r.type === 'AMAZON_ISSUED' ? 'Amazon issued' : r.type, r.type === 'IMPORTED' ? 'blue' : 'soft') },
+      { key: 'status', label: 'Status', render: (r) => stateStatus(r.status, { pending_validation: 'pending', issued: 'success' }) },
+      { key: 'inUse', label: 'In use', render: (r) => (r.inUse ? 'Yes' : 'No') },
+      { key: 'key', label: 'Key algorithm' },
+      { key: 'notAfter', label: 'Not after', nowrap: true, render: (r) => (r.notAfter ? dateTime(r.notAfter) : '-'), sort: (r) => r.notAfter?.getTime() ?? 0 },
+      { key: 'created', label: 'Requested / imported', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+    ]}
+  >
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected certificates will be permanently deleted. Certificates in use cannot be deleted." data-confirm-title="Delete certificates?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-normal" href="/acm/import">Import</a>
+      <a class="btn btn-primary" href="/acm/request"><Icon name="plus" size={16} /> Request certificate</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/acm/request">Request certificate</a>
+  </DataTable>
+</Console>

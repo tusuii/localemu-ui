@@ -106,7 +106,10 @@ for (const t of todo) {
   const page = await ctx.newPage();
   page.on('pageerror', (e) => pageErrors.push(`${t.name}: ${e.message}`));
   let png;
-  try { png = await capture(page, t.shot, t.viewport); } catch (e) { console.log(`FAIL ${t.name}: ${e.message.split('\n')[0]}`); failed++; await ctx.close(); continue; }
+  try {
+    try { png = await capture(page, t.shot, t.viewport); }
+    catch (e) { if (!/context was destroyed|navigation/i.test(e.message)) throw e; png = await capture(page, t.shot, t.viewport); }
+  } catch (e) { console.log(`FAIL ${t.name}: ${e.message.split('\n')[0]}`); failed++; await ctx.close(); continue; }
   await ctx.close();
 
   const file = path.join(baseDir, `${t.name}.png`);

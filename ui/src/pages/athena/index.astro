@@ -1,0 +1,197 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import Card from '../../components/Card.astro';
+import DataTable from '../../components/DataTable.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import {
+  ListWorkGroupsCommand, StartQueryExecutionCommand, GetQueryExecutionCommand, GetQueryResultsCommand, StopQueryExecutionCommand,
+  ListQueryExecutionsCommand, ListNamedQueriesCommand, GetNamedQueryCommand, CreateNamedQueryCommand, DeleteNamedQueryCommand,
+} from '@aws-sdk/client-athena';
+import { GetDatabasesCommand } from '@aws-sdk/client-glue';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str, strs } from '../../lib/action';
+import { UserError, load, soft } from '../../lib/errors';
+import { bytes, dateTime, plural, shortDateTime } from '../../lib/format';
+import { mono, stateStatus, copyable } from '../../lib/html';
+import { clip, queryState, supported, waitForQuery } from '../../lib/athena';
+
+const ctx = getCtx(Astro.cookies);
+const athena = aws.athena(ctx);
+const glue = aws.glue(ctx);
+const q = Astro.url.searchParams;
+const tab = ['editor', 'history', 'saved'].includes(q.get('tab') ?? '') ? q.get('tab')! : 'editor';
+const wgParam = q.get('wg') ?? 'primary';
+const execId = q.get('exec') ?? '';
+const namedId = q.get('named') ?? '';
+const withWg = (extra: string) => `/athena?${extra}${wgParam !== 'primary' ? `&wg=${encodeURIComponent(wgParam)}` : ''}`;
+
+const post = await handlePost(Astro, {
+  run: async (f) => {
+    const sql = required(f, 'sql', 'Query');
+    const wg = str(f, 'wg') || 'primary';
+    const db = str(f, 'db');
+    const r = await athena.send(new StartQueryExecutionCommand({ QueryString: sql, WorkGroup: wg, QueryExecutionContext: db ? { Database: db } : undefined }));
+    const final = await waitForQuery(athena, r.QueryExecutionId!, 6000);
+    const st = final?.Status?.State;
+    return { message: st === 'SUCCEEDED' ? 'Query succeeded.' : st === 'FAILED' ? 'Query failed.' : 'Query submitted.', detail: `Execution ID: ${r.QueryExecutionId}`, redirect: `/athena?exec=${r.QueryExecutionId}&wg=${encodeURIComponent(wg)}&db=${encodeURIComponent(db)}` };
+  },
+  save: async (f) => {
+    const name = required(f, 'qname', 'Query name');
+    const wg = str(f, 'wg') || 'primary';
+    const r = await supported('Saving queries', () => athena.send(new CreateNamedQueryCommand({ Name: name, QueryString: required(f, 'sql', 'Query'), Database: str(f, 'db') || 'default', WorkGroup: wg, Description: str(f, 'qdesc') || undefined })));
+    return { message: `Query "${name}" saved.`, detail: r.NamedQueryId, redirect: `/athena?tab=saved&wg=${encodeURIComponent(wg)}` };
+  },
+  stop: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one query.');
+    for (const id of ids) await athena.send(new StopQueryExecutionCommand({ QueryExecutionId: id }));
+    return { message: `Stopped ${plural(ids.length, 'query', 'queries')}.`, redirect: withWg('tab=history') };
+  },
+  deleteNamed: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one saved query.');
+    await supported('Deleting saved queries', async () => { for (const id of ids) await athena.send(new DeleteNamedQueryCommand({ NamedQueryId: id })); });
+    return { message: `Deleted ${plural(ids.length, 'saved query', 'saved queries')}.`, redirect: withWg('tab=saved') };
+  },
+});
+if (post.response) return post.response;
+
+const wgs = await load(async () => ((await athena.send(new ListWorkGroupsCommand({}))).WorkGroups ?? []).map((w) => w.Name!));
+const wgNames = wgs.data?.length ? wgs.data : ['primary'];
+const dbs = await soft(async () => ((await glue.send(new GetDatabasesCommand({}))).DatabaseList ?? []).map((d) => d.Name!));
+const dbNames = [...new Set(['default', ...(dbs.value ?? [])])];
+
+const exec = execId ? await load(async () => (await athena.send(new GetQueryExecutionCommand({ QueryExecutionId: execId }))).QueryExecution!) : undefined;
+const state = exec?.data?.Status?.State;
+const results = exec?.data && state === 'SUCCEEDED' ? await load(async () => {
+  const r = await athena.send(new GetQueryResultsCommand({ QueryExecutionId: execId, MaxResults: 500 }));
+  const cols = (r.ResultSet?.ResultSetMetadata?.ColumnInfo ?? []).map((c) => c.Label ?? c.Name ?? '');
+  let rows = (r.ResultSet?.Rows ?? []).map((x) => (x.Data ?? []).map((d) => d.VarCharValue ?? ''));
+  let header = cols;
+  if (rows.length && (!cols.length || rows[0].every((c, i) => c === cols[i]))) { if (!cols.length) header = rows[0]; rows = rows.slice(1); }
+  return { header, rows };
+}) : undefined;
+const named = namedId ? await soft(async () => (await athena.send(new GetNamedQueryCommand({ NamedQueryId: namedId }))).NamedQuery) : undefined;
+
+const history = tab === 'history' ? await load(async () => {
+  const ids = (await athena.send(new ListQueryExecutionsCommand({ WorkGroup: wgParam, MaxResults: 50 }))).QueryExecutionIds ?? [];
+  const list = await Promise.all(ids.map((id) => athena.send(new GetQueryExecutionCommand({ QueryExecutionId: id })).then((r) => r.QueryExecution).catch(() => undefined)));
+  return list.filter(Boolean).map((e) => ({
+    id: e!.QueryExecutionId!, sql: e!.Query, state: e!.Status?.State, db: e!.QueryExecutionContext?.Database, wg: e!.WorkGroup,
+    submitted: e!.Status?.SubmissionDateTime, ms: e!.Statistics?.TotalExecutionTimeInMillis, scanned: e!.Statistics?.DataScannedInBytes,
+  })).sort((a, b) => (b.submitted?.getTime() ?? 0) - (a.submitted?.getTime() ?? 0));
+}) : undefined;
+const saved = tab === 'saved' ? await load(async () => {
+  const ids = (await athena.send(new ListNamedQueriesCommand({ WorkGroup: wgParam, MaxResults: 50 }))).NamedQueryIds ?? [];
+  const list = await Promise.all(ids.map((id) => athena.send(new GetNamedQueryCommand({ NamedQueryId: id })).then((r) => r.NamedQuery).catch(() => undefined)));
+  return list.filter(Boolean).map((n) => ({ id: n!.NamedQueryId!, name: n!.Name, db: n!.Database, sql: n!.QueryString, description: n!.Description, wg: n!.WorkGroup }));
+}) : undefined;
+
+const v = post.values;
+const sql = v.sql ?? named?.value?.QueryString ?? exec?.data?.Query ?? 'SELECT 1';
+const selWg = v.wg ?? exec?.data?.WorkGroup ?? named?.value?.WorkGroup ?? wgParam;
+const selDb = v.db ?? q.get('db') ?? exec?.data?.QueryExecutionContext?.Database ?? named?.value?.Database ?? 'default';
+const tabs = [{ id: 'editor', label: 'Query editor' }, { id: 'history', label: 'Recent queries' }, { id: 'saved', label: 'Saved queries' }];
+const running = state === 'QUEUED' || state === 'RUNNING';
+---
+<Console title="Query editor" crumbs={[{ label: 'Query editor' }]} error={post.error}>
+  <PageHeader title="Query editor" description="Run SQL against data in S3 using the Glue Data Catalog." />
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'editor' && (
+      <div class="space-y-5 p-5">
+        <form method="post" class="space-y-3">
+          <div class="grid max-w-3xl gap-4 sm:grid-cols-2">
+            <FormField label="Workgroup" for="wg" class="!mb-0"><select id="wg" name="wg" class="select">{wgNames.map((w) => <option value={w} selected={w === selWg}>{w}</option>)}</select></FormField>
+            <FormField label="Database" for="db" class="!mb-0"><select id="db" name="db" class="select">{dbNames.map((d) => <option value={d} selected={d === selDb}>{d}</option>)}</select></FormField>
+          </div>
+          <FormField label="Query" for="sql" class="!mb-0"><textarea id="sql" name="sql" class="textarea code-area" data-code rows="9" spellcheck="false">{sql}</textarea></FormField>
+          <details class="max-w-3xl"><summary class="cursor-pointer font-bold text-link">Save this query</summary>
+            <div class="mt-3 grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+              <FormField label="Name" for="qname" class="!mb-0"><input id="qname" name="qname" class="input" autocomplete="off" value={v.qname ?? named?.value?.Name ?? ''} /></FormField>
+              <FormField label="Description" for="qdesc" optional class="!mb-0"><input id="qdesc" name="qdesc" class="input" autocomplete="off" /></FormField>
+              <button class="btn btn-normal" type="submit" name="intent" value="save" formnovalidate>Save query</button>
+            </div>
+          </details>
+          <div class="flex gap-2"><button class="btn btn-primary" type="submit" name="intent" value="run"><Icon name="play" size={16} /> Run query</button></div>
+        </form>
+
+        {exec && (
+          <div class="space-y-4 border-t border-line pt-5" id="result">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <h3 class="card-title">Query results</h3>
+              {running && <label class="flex items-center gap-2 text-muted" data-autorefresh data-interval="2000"><input type="checkbox" class="checkbox" /> Live refresh</label>}
+            </div>
+            {exec.error && <Flash type="error" text="Failed to load the query execution" detail={exec.error} dismissible={false} />}
+            {exec.data && (
+              <>
+                <dl class="grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div><dt class="kv-label">Status</dt><dd class="kv-value" data-query-state set:html={stateStatus(queryState(state), { queued: 'pending', running: 'progress', succeeded: 'success', failed: 'error', cancelled: 'stopped' }).v} /></div>
+                  <div><dt class="kv-label">Query ID</dt><dd class="kv-value" set:html={copyable(execId).v} /></div>
+                  <div><dt class="kv-label">Run time</dt><dd class="kv-value">{exec.data.Statistics?.TotalExecutionTimeInMillis ?? 0} ms</dd></div>
+                  <div><dt class="kv-label">Data scanned</dt><dd class="kv-value">{bytes(exec.data.Statistics?.DataScannedInBytes ?? 0)}</dd></div>
+                </dl>
+                {state === 'FAILED' && <Flash type="error" text="Query failed" detail={exec.data.Status?.StateChangeReason ?? 'No reason was reported.'} dismissible={false} />}
+                {state === 'CANCELLED' && <Flash type="warning" text="Query was cancelled" detail={exec.data.Status?.StateChangeReason} dismissible={false} />}
+                {exec.data.ResultConfiguration?.OutputLocation && <p class="text-muted">Results location: <code class="text-[13px]">{exec.data.ResultConfiguration.OutputLocation}</code></p>}
+              </>
+            )}
+            {results?.error && <Flash type="error" text="Failed to load results" detail={results.error} dismissible={false} />}
+            {results?.data && (
+              <DataTable title="Results" bare filter="Filter results" refresh={false} id="results" pageSize={25} rows={results.data.rows.map((r, i) => ({ id: String(i), ...Object.fromEntries(r.map((c, j) => [`c${j}`, c])) }))}
+                columns={results.data.header.map((h, j) => ({ key: `c${j}`, label: h || `col${j + 1}` }))}
+                emptyTitle="No rows returned" emptyText="The query succeeded but returned no rows." />
+            )}
+          </div>
+        )}
+      </div>
+    )}
+
+    {tab === 'history' && (
+      <div class="space-y-4 p-5">
+        <form method="get" class="flex items-end gap-3">
+          <input type="hidden" name="tab" value="history" />
+          <FormField label="Workgroup" for="hwg" class="!mb-0 min-w-[240px]"><select id="hwg" name="wg" class="select" onchange="this.form.submit()">{wgNames.map((w) => <option value={w} selected={w === wgParam}>{w}</option>)}</select></FormField>
+        </form>
+        <DataTable title="Recent queries" bare select="multi" idKey="id" nameKey="id" id="history" pageSize={20} rows={history?.data ?? []} error={history?.error}
+          emptyTitle="No queries" emptyText="Queries you run in this workgroup appear here."
+          columns={[
+            { key: 'sql', label: 'Query', render: (r) => clip(r.sql, 70), href: (r) => `/athena?exec=${r.id}&wg=${encodeURIComponent(r.wg ?? wgParam)}` },
+            { key: 'state', label: 'Status', render: (r) => stateStatus(queryState(r.state), { queued: 'pending', running: 'progress', succeeded: 'success', failed: 'error', cancelled: 'stopped' }) },
+            { key: 'db', label: 'Database' },
+            { key: 'submitted', label: 'Submitted', nowrap: true, render: (r) => shortDateTime(r.submitted), sort: (r) => r.submitted?.getTime() ?? 0 },
+            { key: 'ms', label: 'Run time', render: (r) => (r.ms === undefined ? '-' : `${r.ms} ms`) },
+            { key: 'scanned', label: 'Data scanned', render: (r) => bytes(r.scanned ?? 0) },
+            { key: 'id', label: 'Query ID', render: (r) => mono(r.id) },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="stop" data-min="1" data-confirm="The selected queries will be cancelled if they are still running." data-confirm-title="Stop queries?" data-confirm-ok="Stop">Stop</button>
+        </DataTable>
+      </div>
+    )}
+
+    {tab === 'saved' && (
+      <div class="space-y-4 p-5">
+        <form method="get" class="flex items-end gap-3">
+          <input type="hidden" name="tab" value="saved" />
+          <FormField label="Workgroup" for="swg" class="!mb-0 min-w-[240px]"><select id="swg" name="wg" class="select" onchange="this.form.submit()">{wgNames.map((w) => <option value={w} selected={w === wgParam}>{w}</option>)}</select></FormField>
+        </form>
+        <DataTable title="Saved queries" bare select="multi" idKey="id" nameKey="name" id="saved" pageSize={20} rows={saved?.data ?? []} error={saved?.error}
+          emptyTitle="No saved queries" emptyText="Use “Save this query” in the editor to keep a query."
+          columns={[
+            { key: 'name', label: 'Name', href: (r) => `/athena?named=${r.id}&wg=${encodeURIComponent(r.wg ?? wgParam)}` },
+            { key: 'db', label: 'Database' },
+            { key: 'sql', label: 'Query', render: (r) => clip(r.sql, 90), mono: true },
+            { key: 'description', label: 'Description' },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteNamed" data-min="1" data-confirm="The selected saved queries will be deleted." data-confirm-title="Delete saved queries?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+      </div>
+    )}
+  </div>
+</Console>
