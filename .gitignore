@@ -56,6 +56,9 @@ node_modules/
 
 **/obj/**
 **/lib/**
+# ...but the web console's source modules live in ui/src/lib
+!/ui/src/lib/
+!/ui/src/lib/**
 
 !bin/docker-entrypoint.sh
 
