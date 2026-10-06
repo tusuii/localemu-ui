@@ -8,6 +8,7 @@ import { DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand, 
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
 import { handlePost, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
 import { UserError, load } from '../../../lib/errors';
 import { dateTime, plural } from '../../../lib/format';
 import { stateStatus } from '../../../lib/html';
@@ -17,10 +18,10 @@ const ctx = getCtx(Astro.cookies);
 const ec2 = aws.ec2(ctx);
 const ids = (f: FormData) => { const x = strs(f, 'id'); if (!x.length) throw new UserError('Select at least one instance.'); return x; };
 const post = await handlePost(Astro, {
-  start: async (f) => { const x = ids(f); await ec2.send(new StartInstancesCommand({ InstanceIds: x })); return `Starting ${plural(x.length, 'instance')}.`; },
-  stop: async (f) => { const x = ids(f); await ec2.send(new StopInstancesCommand({ InstanceIds: x })); return `Stopping ${plural(x.length, 'instance')}.`; },
-  reboot: async (f) => { const x = ids(f); await ec2.send(new RebootInstancesCommand({ InstanceIds: x })); return `Rebooting ${plural(x.length, 'instance')}.`; },
-  terminate: async (f) => { const x = ids(f); await ec2.send(new TerminateInstancesCommand({ InstanceIds: x })); return `Terminating ${plural(x.length, 'instance')}.`; },
+  start: async (f) => bulk(strs(f, 'id'), { verb: 'Started', noun: 'instance' }, (i) => ec2.send(new StartInstancesCommand({ InstanceIds: [i] }))),
+  stop: async (f) => bulk(strs(f, 'id'), { verb: 'Stopped', noun: 'instance' }, (i) => ec2.send(new StopInstancesCommand({ InstanceIds: [i] }))),
+  reboot: async (f) => bulk(strs(f, 'id'), { verb: 'Rebooted', noun: 'instance' }, (i) => ec2.send(new RebootInstancesCommand({ InstanceIds: [i] }))),
+  terminate: async (f) => bulk(strs(f, 'id'), { verb: 'Terminated', noun: 'instance' }, (i) => ec2.send(new TerminateInstancesCommand({ InstanceIds: [i] }))),
 });
 if (post.response) return post.response;
 

@@ -1,0 +1,93 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import {
+  DescribeDBInstancesCommand, DescribeDBClustersCommand, StartDBInstanceCommand, StopDBInstanceCommand, RebootDBInstanceCommand,
+  DeleteDBInstanceCommand, DeleteDBClusterCommand, type DBInstance, type DBCluster,
+} from '@aws-sdk/client-rds';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge, stateStatus } from '../../lib/html';
+import { engineLabel } from '../../lib/rds';
+
+const ctx = getCtx(Astro.cookies);
+const rds = aws.rds(ctx);
+
+const post = await handlePost(Astro, {
+  start: (f) => bulk(strs(f, 'id'), { verb: 'Started', noun: 'instance' }, (id) => rds.send(new StartDBInstanceCommand({ DBInstanceIdentifier: id }))),
+  stop: (f) => bulk(strs(f, 'id'), { verb: 'Stopped', noun: 'instance' }, (id) => rds.send(new StopDBInstanceCommand({ DBInstanceIdentifier: id }))),
+  reboot: (f) => bulk(strs(f, 'id'), { verb: 'Rebooted', noun: 'instance' }, (id) => rds.send(new RebootDBInstanceCommand({ DBInstanceIdentifier: id }))),
+  delete: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'instance' }, (id) => rds.send(new DeleteDBInstanceCommand({ DBInstanceIdentifier: id, SkipFinalSnapshot: true }))),
+  deleteCluster: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'cluster' }, (id) => rds.send(new DeleteDBClusterCommand({ DBClusterIdentifier: id, SkipFinalSnapshot: true }))),
+});
+if (post.response) return post.response;
+
+const [inst, clus] = await Promise.all([
+  load(async () => ((await rds.send(new DescribeDBInstancesCommand({ MaxRecords: 100 }))).DBInstances ?? []) as DBInstance[]),
+  load(async () => ((await rds.send(new DescribeDBClustersCommand({ MaxRecords: 100 }))).DBClusters ?? []) as DBCluster[]),
+]);
+const instances = (inst.data ?? []).map((d) => ({
+  id: d.DBInstanceIdentifier!, engine: engineLabel(d.Engine), version: d.EngineVersion, status: d.DBInstanceStatus, cls: d.DBInstanceClass,
+  az: d.AvailabilityZone, endpoint: d.Endpoint ? `${d.Endpoint.Address}:${d.Endpoint.Port}` : '', created: d.InstanceCreateTime, cluster: d.DBClusterIdentifier,
+})).sort((a, b) => a.id.localeCompare(b.id));
+const clusters = (clus.data ?? []).map((c) => ({
+  id: c.DBClusterIdentifier!, engine: engineLabel(c.Engine), version: c.EngineVersion, status: c.Status, endpoint: c.Endpoint ?? '', members: c.DBClusterMembers?.length ?? 0, created: c.ClusterCreateTime,
+})).sort((a, b) => a.id.localeCompare(b.id));
+const confirmDel = 'The selected database instances will be permanently deleted. No final snapshot will be taken.';
+---
+<Console title="Databases" crumbs={[{ label: 'Databases' }]} error={post.error}>
+  <PageHeader title="Databases" description="Amazon RDS makes it simple to set up, operate and scale relational databases.">
+    <a class="btn btn-primary" href="/rds/create"><Icon name="plus" size={16} /> Create database</a>
+  </PageHeader>
+  <div class="space-y-5">
+    <DataTable
+      title="DB instances" id="instances" rows={instances} error={inst.error} select="multi" nameKey="id" pageSize={20}
+      filter="Search DB instances" emptyTitle="No DB instances" emptyText="You don't have any DB instances in this region."
+      columns={[
+        { key: 'id', label: 'DB identifier', href: (r) => `/rds/${encodeURIComponent(r.id)}` },
+        { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
+        { key: 'engine', label: 'Engine', render: (r) => `${r.engine}${r.version ? ' ' + r.version : ''}` },
+        { key: 'cls', label: 'Size' },
+        { key: 'az', label: 'Region & AZ' },
+        { key: 'endpoint', label: 'Endpoint', mono: true },
+        { key: 'cluster', label: 'Cluster', render: (r) => (r.cluster ? badge(r.cluster) : '') },
+        { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+      ]}
+    >
+      <Fragment slot="actions">
+        <a class="btn btn-normal" data-href-template="/rds/{id}" data-min="1" data-max="1">View</a>
+        <button class="btn btn-normal" name="intent" value="start" data-min="1">Start</button>
+        <button class="btn btn-normal" name="intent" value="stop" data-min="1" data-confirm="The selected instances will be stopped." data-confirm-title="Stop DB instances?" data-confirm-ok="Stop">Stop</button>
+        <button class="btn btn-normal" name="intent" value="reboot" data-min="1" data-confirm="The selected instances will be rebooted." data-confirm-title="Reboot DB instances?" data-confirm-ok="Reboot">Reboot</button>
+        <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm={confirmDel} data-confirm-title="Delete DB instances?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+        <a class="btn btn-primary" href="/rds/create"><Icon name="plus" size={16} /> Create database</a>
+      </Fragment>
+      <a slot="empty" class="btn btn-primary" href="/rds/create">Create database</a>
+    </DataTable>
+
+    <DataTable
+      title="DB clusters" id="clusters" rows={clusters} error={clus.error} select="multi" nameKey="id" pageSize={20}
+      filter="Search DB clusters" emptyTitle="No DB clusters" emptyText="Aurora and Multi-AZ clusters appear here."
+      columns={[
+        { key: 'id', label: 'Cluster identifier', href: (r) => `/rds/${encodeURIComponent(r.id)}?type=cluster` },
+        { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
+        { key: 'engine', label: 'Engine', render: (r) => `${r.engine}${r.version ? ' ' + r.version : ''}` },
+        { key: 'members', label: 'Instances' },
+        { key: 'endpoint', label: 'Writer endpoint', mono: true },
+        { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+      ]}
+    >
+      <Fragment slot="actions">
+        <a class="btn btn-normal" data-href-template="/rds/{id}?type=cluster" data-min="1" data-max="1">View</a>
+        <button class="btn btn-normal" name="intent" value="deleteCluster" data-min="1" data-confirm="The selected clusters will be permanently deleted. No final snapshot will be taken." data-confirm-title="Delete DB clusters?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+        <a class="btn btn-primary" href="/rds/create?type=cluster"><Icon name="plus" size={16} /> Create cluster</a>
+      </Fragment>
+    </DataTable>
+  </div>
+</Console>

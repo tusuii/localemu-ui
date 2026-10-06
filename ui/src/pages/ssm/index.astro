@@ -3,10 +3,11 @@ import Console from '../../layouts/Console.astro';
 import PageHeader from '../../components/PageHeader.astro';
 import DataTable from '../../components/DataTable.astro';
 import Icon from '../../components/Icon.astro';
-import { DescribeParametersCommand, DeleteParametersCommand } from '@aws-sdk/client-ssm';
+import { DescribeParametersCommand, DeleteParameterCommand } from '@aws-sdk/client-ssm';
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { badge } from '../../lib/html';
@@ -15,10 +16,7 @@ const ctx = getCtx(Astro.cookies);
 const ssm = aws.ssm(ctx);
 const post = await handlePost(Astro, {
   delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one parameter.');
-    for (let i = 0; i < ids.length; i += 10) await ssm.send(new DeleteParametersCommand({ Names: ids.slice(i, i + 10) }));
-    return `Deleted ${plural(ids.length, 'parameter')}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'parameter' }, (n) => ssm.send(new DeleteParameterCommand({ Name: n })));
   },
 });
 if (post.response) return post.response;

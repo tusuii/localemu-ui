@@ -14,6 +14,7 @@ import {
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
 import { handlePost, jsonOf, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
 import { UserError, load } from '../../../lib/errors';
 import { plural, arnName } from '../../../lib/format';
 import { badge, copyable, mono } from '../../../lib/html';
@@ -48,10 +49,7 @@ const post = await handlePost(Astro, {
     return { message: 'Subscription created.', detail: r.SubscriptionArn, redirect: Astro.url.pathname };
   },
   unsubscribe: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one subscription.');
-    for (const s of ids) await sns.send(new UnsubscribeCommand({ SubscriptionArn: s }));
-    return { message: `Deleted ${plural(ids.length, 'subscription')}.`, redirect: Astro.url.pathname };
+    return { ...(await bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'subscription' }, (s) => sns.send(new UnsubscribeCommand({ SubscriptionArn: s })))), redirect: Astro.url.pathname };
   },
   display: async (f) => { await sns.send(new SetTopicAttributesCommand({ TopicArn: arn, AttributeName: 'DisplayName', AttributeValue: str(f, 'display') })); return 'Display name updated.'; },
   delete: async () => { await sns.send(new DeleteTopicCommand({ TopicArn: arn })); return { message: `Deleted topic "${name}".`, redirect: '/sns' }; },

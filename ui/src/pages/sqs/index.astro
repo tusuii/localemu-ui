@@ -7,6 +7,7 @@ import { ListQueuesCommand, GetQueueAttributesCommand, DeleteQueueCommand, Purge
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, num, plural } from '../../lib/format';
 import { badge } from '../../lib/html';
@@ -17,16 +18,10 @@ const sqs = aws.sqs(ctx);
 
 const post = await handlePost(Astro, {
   delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one queue.');
-    for (const url of ids) await sqs.send(new DeleteQueueCommand({ QueueUrl: url }));
-    return `Deleted ${plural(ids.length, 'queue')}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'queue' }, (url) => sqs.send(new DeleteQueueCommand({ QueueUrl: url })), queueName);
   },
   purge: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one queue.');
-    for (const url of ids) await sqs.send(new PurgeQueueCommand({ QueueUrl: url }));
-    return `Purged ${plural(ids.length, 'queue')}. It can take up to 60 seconds for messages to disappear.`;
+    return bulk(strs(f, 'id'), { verb: 'Purged', noun: 'queue', tail: 'It can take up to 60 seconds for messages to disappear.' }, (url) => sqs.send(new PurgeQueueCommand({ QueueUrl: url })), queueName);
   },
 });
 if (post.response) return post.response;

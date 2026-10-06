@@ -7,6 +7,7 @@ import { ListGroupsCommand, DeleteGroupCommand, CreateGroupCommand } from '@aws-
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
 import { handlePost, required, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
 import { UserError, load } from '../../../lib/errors';
 import { dateTime, plural } from '../../../lib/format';
 import { purgeIdentity } from '../../../lib/iam';
@@ -16,10 +17,7 @@ const iam = aws.iam(ctx);
 const post = await handlePost(Astro, {
   create: async (f) => { const n = required(f, 'name', 'Group name'); await iam.send(new CreateGroupCommand({ GroupName: n })); return { message: `Group ${n} created.`, redirect: `/iam/groups/${encodeURIComponent(n)}` }; },
   delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one group.');
-    for (const g of ids) { await purgeIdentity(iam, 'group', g); await iam.send(new DeleteGroupCommand({ GroupName: g })); }
-    return `Deleted ${plural(ids.length, 'group')}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'group' }, async (g) => { await purgeIdentity(iam, 'group', g); await iam.send(new DeleteGroupCommand({ GroupName: g })); });
   },
 });
 if (post.response) return post.response;

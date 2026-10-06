@@ -10,6 +10,7 @@ import { GetHostedZoneCommand, ListResourceRecordSetsCommand, ChangeResourceReco
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, intOf, required, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { badge } from '../../lib/html';
 
@@ -25,11 +26,13 @@ const post = await handlePost(Astro, {
     return 'Record saved.';
   },
   deleteRecords: async (f) => {
-    const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one record.');
     const all = await listAll();
-    const del = all.filter((r) => ids.includes(`${r.Name}|${r.Type}`));
-    await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: id, ChangeBatch: { Changes: del.map((ResourceRecordSet) => ({ Action: 'DELETE' as const, ResourceRecordSet })) } }));
-    return `Deleted ${del.length} record${del.length === 1 ? '' : 's'}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'record' }, async (rid) => {
+      const rs = all.find((r) => `${r.Name}|${r.Type}` === rid);
+      if (!rs) throw new UserError('Record not found.');
+      if (rs.Type === 'NS' || rs.Type === 'SOA') throw new UserError(`${rs.Type} records can't be deleted.`);
+      await r53.send(new ChangeResourceRecordSetsCommand({ HostedZoneId: id, ChangeBatch: { Changes: [{ Action: 'DELETE' as const, ResourceRecordSet: rs }] } }));
+    });
   },
   delete: async () => {
     const del = (await listAll()).filter((r) => r.Type !== 'NS' && r.Type !== 'SOA');

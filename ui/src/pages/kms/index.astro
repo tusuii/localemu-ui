@@ -7,6 +7,7 @@ import { ListKeysCommand, DescribeKeyCommand, ListAliasesCommand, ScheduleKeyDel
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, intOf, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { badge, mono, stateStatus } from '../../lib/html';
@@ -14,19 +15,14 @@ import { badge, mono, stateStatus } from '../../lib/html';
 const ctx = getCtx(Astro.cookies);
 const kms = aws.kms(ctx);
 
-const each = async (f: FormData, fn: (id: string) => Promise<unknown>) => {
-  const ids = strs(f, 'id');
-  if (!ids.length) throw new UserError('Select at least one key.');
-  for (const id of ids) await fn(id);
-  return ids.length;
-};
+const each = (f: FormData, verb: string, fn: (id: string) => Promise<unknown>, tail?: string) => bulk(strs(f, 'id'), { verb, noun: 'key', tail }, fn);
 const post = await handlePost(Astro, {
-  enable: async (f) => `Enabled ${plural(await each(f, (id) => kms.send(new EnableKeyCommand({ KeyId: id }))), 'key')}.`,
-  disable: async (f) => `Disabled ${plural(await each(f, (id) => kms.send(new DisableKeyCommand({ KeyId: id }))), 'key')}.`,
-  cancel: async (f) => `Cancelled deletion of ${plural(await each(f, (id) => kms.send(new CancelKeyDeletionCommand({ KeyId: id }))), 'key')}.`,
+  enable: (f) => each(f, 'Enabled', (id) => kms.send(new EnableKeyCommand({ KeyId: id }))),
+  disable: (f) => each(f, 'Disabled', (id) => kms.send(new DisableKeyCommand({ KeyId: id }))),
+  cancel: (f) => each(f, 'Cancelled deletion of', (id) => kms.send(new CancelKeyDeletionCommand({ KeyId: id }))),
   schedule: async (f) => {
     const days = Math.min(Math.max(intOf(f, 'days', 'Waiting period') ?? 7, 7), 30);
-    return `Scheduled ${plural(await each(f, (id) => kms.send(new ScheduleKeyDeletionCommand({ KeyId: id, PendingWindowInDays: days }))), 'key')} for deletion in ${days} days.`;
+    return each(f, 'Scheduled for deletion:', (id) => kms.send(new ScheduleKeyDeletionCommand({ KeyId: id, PendingWindowInDays: days })), `Deletion happens in ${days} days.`);
   },
 });
 if (post.response) return post.response;

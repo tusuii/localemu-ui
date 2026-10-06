@@ -7,6 +7,7 @@ import { ListTablesCommand, DescribeTableCommand, DeleteTableCommand } from '@aw
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { bytes, num, plural } from '../../lib/format';
 import { stateStatus } from '../../lib/html';
@@ -16,10 +17,7 @@ const ddb = aws.dynamodb(ctx);
 
 const post = await handlePost(Astro, {
   delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one table.');
-    for (const t of ids) await ddb.send(new DeleteTableCommand({ TableName: t }));
-    return `Deleted ${plural(ids.length, 'table')}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'table' }, (t) => ddb.send(new DeleteTableCommand({ TableName: t })));
   },
 });
 if (post.response) return post.response;

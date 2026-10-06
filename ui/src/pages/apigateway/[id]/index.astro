@@ -1,0 +1,381 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import DataTable from '../../../components/DataTable.astro';
+import FormField from '../../../components/FormField.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  GetRestApiCommand, GetResourcesCommand, CreateResourceCommand, DeleteResourceCommand, PutMethodCommand, DeleteMethodCommand,
+  PutIntegrationCommand, PutMethodResponseCommand, PutIntegrationResponseCommand, GetStagesCommand, GetDeploymentsCommand,
+  CreateDeploymentCommand, DeleteStageCommand, DeleteDeploymentCommand, DeleteRestApiCommand,
+  type Resource,
+} from '@aws-sdk/client-api-gateway';
+import {
+  GetApiCommand, GetRoutesCommand, GetIntegrationsCommand, GetStagesCommand as GetStagesV2Command, CreateRouteCommand, DeleteRouteCommand,
+  CreateIntegrationCommand, DeleteIntegrationCommand, CreateStageCommand, DeleteStageCommand as DeleteStageV2Command, DeleteApiCommand,
+} from '@aws-sdk/client-apigatewayv2';
+import { ListFunctionsCommand } from '@aws-sdk/client-lambda';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load, soft } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { badge, copyable, mono, raw, tagList } from '../../../lib/html';
+import { HTTP_METHODS, lambdaArn, lambdaIntegrationUri, restInvokeUrl, v2InvokeUrl } from '../../../lib/apigateway';
+
+const ctx = getCtx(Astro.cookies);
+const v1 = aws.apigw(ctx);
+const v2 = aws.apigwv2(ctx);
+
+// ---- which kind of API is this?
+let param = Astro.params.id!;
+let kind: 'rest' | 'v2' | null = null;
+if (param.startsWith('rest:')) { kind = 'rest'; param = param.slice(5); }
+else if (param.startsWith('v2:')) { kind = 'v2'; param = param.slice(3); }
+const id = param;
+
+let restApi: any = null;
+let httpApi: any = null;
+if (kind !== 'v2') {
+  const r = await soft(() => v1.send(new GetRestApiCommand({ restApiId: id })));
+  if (r.value) { restApi = r.value; kind = 'rest'; }
+}
+if (!restApi && kind !== 'rest') {
+  const r = await soft(() => v2.send(new GetApiCommand({ ApiId: id })));
+  if (r.value) { httpApi = r.value; kind = 'v2'; }
+}
+if (!restApi && !httpApi) return new Response(`API "${id}" does not exist`, { status: 404 });
+const isRest = kind === 'rest';
+const isWs = httpApi?.ProtocolType === 'WEBSOCKET';
+const apiName: string = (isRest ? restApi.name : httpApi.Name) ?? id;
+
+const tabIds = isRest ? ['resources', 'stages', 'details'] : ['routes', 'stages', 'details'];
+const reqTab = Astro.url.searchParams.get('tab') ?? '';
+const tab = tabIds.includes(reqTab) ? reqTab : tabIds[0];
+
+const post = await handlePost(Astro, {
+  deleteApi: async () => {
+    if (isRest) await v1.send(new DeleteRestApiCommand({ restApiId: id }));
+    else await v2.send(new DeleteApiCommand({ ApiId: id }));
+    return { message: `Deleted API "${apiName}".`, redirect: '/apigateway' };
+  },
+  // ----- REST
+  createResource: async (f) => {
+    const part = required(f, 'pathPart', 'Resource path part').replace(/^\/+|\/+$/g, '');
+    if (!/^(\{[A-Za-z0-9_.:-]+\+?\}|[A-Za-z0-9_.:-]+)$/.test(part)) throw new UserError('A path part is letters, numbers, - . _ or a {parameter}; it cannot contain a slash.');
+    const r = await v1.send(new CreateResourceCommand({ restApiId: id, parentId: required(f, 'parentId', 'Parent resource'), pathPart: part }));
+    return `Resource ${r.path} created.`;
+  },
+  deleteResource: async (f) =>
+    bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'resource' }, (rid) => v1.send(new DeleteResourceCommand({ restApiId: id, resourceId: rid }))),
+  putMethod: async (f) => {
+    const resourceId = required(f, 'resourceId', 'Resource');
+    const httpMethod = required(f, 'method', 'Method');
+    const integ = str(f, 'integration') || 'MOCK';
+    const authorizationType = str(f, 'auth') || 'NONE';
+    await v1.send(new PutMethodCommand({ restApiId: id, resourceId, httpMethod, authorizationType, apiKeyRequired: str(f, 'apiKey') === '1' }));
+    if (integ === 'MOCK') {
+      await v1.send(new PutIntegrationCommand({ restApiId: id, resourceId, httpMethod, type: 'MOCK', requestTemplates: { 'application/json': '{"statusCode": 200}' } }));
+    } else if (integ === 'AWS_PROXY') {
+      const fn = required(f, 'lambda', 'Lambda function');
+      await v1.send(new PutIntegrationCommand({ restApiId: id, resourceId, httpMethod, type: 'AWS_PROXY', integrationHttpMethod: 'POST', uri: lambdaIntegrationUri(ctx.region, lambdaArn(fn, ctx.region, ctx.account)) }));
+    } else if (integ === 'HTTP_PROXY') {
+      await v1.send(new PutIntegrationCommand({ restApiId: id, resourceId, httpMethod, type: 'HTTP_PROXY', integrationHttpMethod: httpMethod === 'ANY' ? 'GET' : httpMethod, uri: required(f, 'url', 'Endpoint URL') }));
+    } else throw new UserError('Unknown integration type.');
+    if (integ !== 'AWS_PROXY' && integ !== 'HTTP_PROXY') {
+      const status = str(f, 'status') || '200';
+      await v1.send(new PutMethodResponseCommand({ restApiId: id, resourceId, httpMethod, statusCode: status }));
+      await v1.send(new PutIntegrationResponseCommand({ restApiId: id, resourceId, httpMethod, statusCode: status, responseTemplates: { 'application/json': str(f, 'body') || '{"message": "ok"}' } }));
+    }
+    return `Method ${httpMethod} saved. Deploy the API to a stage to make the change live.`;
+  },
+  deleteMethod: async (f) =>
+    bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'method' }, (m) => {
+      const [resourceId, httpMethod] = m.split('|');
+      return v1.send(new DeleteMethodCommand({ restApiId: id, resourceId, httpMethod }));
+    }),
+  deploy: async (f) => {
+    const stage = required(f, 'stageName', 'Stage name');
+    if (!/^[A-Za-z0-9_-]+$/.test(stage)) throw new UserError('Stage names can contain letters, numbers, hyphens and underscores.');
+    await v1.send(new CreateDeploymentCommand({ restApiId: id, stageName: stage, description: str(f, 'description') || undefined }));
+    return { message: `Deployed ${apiName} to stage "${stage}".`, redirect: `${Astro.url.pathname}?tab=stages` };
+  },
+  deleteStage: async (f) =>
+    bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'stage' }, (s) => (isRest ? v1.send(new DeleteStageCommand({ restApiId: id, stageName: s })) : v2.send(new DeleteStageV2Command({ ApiId: id, StageName: s })))),
+  deleteDeployment: async (f) =>
+    bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'deployment' }, (d) => v1.send(new DeleteDeploymentCommand({ restApiId: id, deploymentId: d }))),
+  // ----- HTTP / WebSocket
+  createIntegration: async (f) => {
+    const type = str(f, 'type') || 'AWS_PROXY';
+    const uri = type === 'AWS_PROXY' ? lambdaArn(required(f, 'uri', 'Lambda function'), ctx.region, ctx.account) : required(f, 'uri', 'URL');
+    const r = await v2.send(new CreateIntegrationCommand({
+      ApiId: id, IntegrationType: type as 'AWS_PROXY', IntegrationUri: uri,
+      PayloadFormatVersion: isWs ? undefined : '2.0', IntegrationMethod: type === 'HTTP_PROXY' ? (str(f, 'method') || 'ANY') : undefined,
+    }));
+    return `Integration ${r.IntegrationId} created.`;
+  },
+  deleteIntegration: async (f) =>
+    bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'integration' }, (i) => v2.send(new DeleteIntegrationCommand({ ApiId: id, IntegrationId: i }))),
+  createRoute: async (f) => {
+    const routeKey = required(f, 'routeKey', 'Route key');
+    if (!isWs && routeKey !== '$default' && !/^(ANY|GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) \/\S*$/.test(routeKey)) throw new UserError('Route keys look like "GET /items" or "$default".');
+    let integrationId = str(f, 'integrationId');
+    const fn = str(f, 'lambda');
+    if (!integrationId && fn) {
+      integrationId = (await v2.send(new CreateIntegrationCommand({ ApiId: id, IntegrationType: 'AWS_PROXY', IntegrationUri: lambdaArn(fn, ctx.region, ctx.account), PayloadFormatVersion: isWs ? undefined : '2.0' }))).IntegrationId!;
+    }
+    await v2.send(new CreateRouteCommand({ ApiId: id, RouteKey: routeKey, Target: integrationId ? `integrations/${integrationId}` : undefined }));
+    return `Route ${routeKey} created.`;
+  },
+  deleteRoute: async (f) =>
+    bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'route' }, (r) => v2.send(new DeleteRouteCommand({ ApiId: id, RouteId: r }))),
+  createStage: async (f) => {
+    const name = required(f, 'stageName', 'Stage name');
+    await v2.send(new CreateStageCommand({ ApiId: id, StageName: name, AutoDeploy: str(f, 'autoDeploy') === '1' }));
+    return { message: `Stage "${name}" created.`, redirect: `${Astro.url.pathname}?tab=stages` };
+  },
+});
+if (post.response) return post.response;
+
+const v = post.values;
+
+// ---- data per tab
+const restRes = isRest && tab === 'resources' ? await load(async () => {
+  const items: Resource[] = [];
+  let pos: string | undefined;
+  do {
+    const r = await v1.send(new GetResourcesCommand({ restApiId: id, embed: ['methods'], limit: 500, position: pos }));
+    items.push(...(r.items ?? []));
+    pos = r.position;
+  } while (pos && items.length < 2000);
+  return items.sort((a, b) => (a.path ?? '').localeCompare(b.path ?? ''));
+}) : null;
+const resources = restRes?.data ?? [];
+const resourceRows = resources.map((r) => ({
+  id: r.id!, path: r.path ?? '/', root: !r.parentId,
+  methods: Object.keys(r.resourceMethods ?? {}).sort(),
+}));
+const methodRows = resources.flatMap((r) =>
+  Object.entries(r.resourceMethods ?? {}).map(([m, d]) => {
+    const i = d.methodIntegration;
+    const target = i?.type?.startsWith('AWS') && i.uri ? (i.uri.match(/function:([^/:]+)/)?.[1] ?? i.uri) : i?.uri ?? '';
+    return { id: `${r.id}|${m}`, path: r.path ?? '/', method: m, auth: d.authorizationType ?? 'NONE', apiKey: d.apiKeyRequired ? 'Required' : 'Not required', integration: i?.type ?? '-', target };
+  }),
+).sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+
+const stagesRes = tab === 'stages' ? await load(async () => {
+  if (isRest) {
+    const [s, d] = await Promise.all([v1.send(new GetStagesCommand({ restApiId: id })), v1.send(new GetDeploymentsCommand({ restApiId: id, limit: 100 }))]);
+    return {
+      stages: (s.item ?? []).map((x) => ({ id: x.stageName!, name: x.stageName!, deployment: x.deploymentId, updated: x.lastUpdatedDate ?? x.createdDate, url: restInvokeUrl(id, x.stageName!), auto: undefined as boolean | undefined })),
+      deployments: (d.items ?? []).map((x) => ({ id: x.id!, description: x.description, created: x.createdDate })).sort((a, b) => (b.created?.getTime() ?? 0) - (a.created?.getTime() ?? 0)),
+    };
+  }
+  const s = await v2.send(new GetStagesV2Command({ ApiId: id }));
+  return {
+    stages: (s.Items ?? []).map((x) => ({ id: x.StageName!, name: x.StageName!, deployment: x.DeploymentId, updated: x.LastUpdatedDate ?? x.CreatedDate, url: v2InvokeUrl(id, x.StageName!, httpApi.ProtocolType), auto: x.AutoDeploy })),
+    deployments: [] as { id: string; description?: string; created?: Date }[],
+  };
+}) : null;
+
+const routesRes = !isRest && tab === 'routes' ? await load(async () => {
+  const [r, i] = await Promise.all([v2.send(new GetRoutesCommand({ ApiId: id })), v2.send(new GetIntegrationsCommand({ ApiId: id }))]);
+  const ints = i.Items ?? [];
+  return {
+    routes: (r.Items ?? []).map((x) => {
+      const iid = x.Target?.replace('integrations/', '');
+      const it = ints.find((n) => n.IntegrationId === iid);
+      return { id: x.RouteId!, key: x.RouteKey ?? '', target: it ? `${it.IntegrationType}: ${it.IntegrationUri ?? ''}` : x.Target ?? '' };
+    }).sort((a, b) => a.key.localeCompare(b.key)),
+    integrations: ints.map((x) => ({ id: x.IntegrationId!, type: x.IntegrationType ?? '', uri: x.IntegrationUri ?? '', format: x.PayloadFormatVersion ?? '' })),
+  };
+}) : null;
+
+// Lambda functions help fill in integration targets; failures are irrelevant here.
+const fns = (isRest && tab === 'resources') || (!isRest && tab === 'routes')
+  ? ((await soft(() => aws.lambda(ctx).send(new ListFunctionsCommand({ MaxItems: 200 })))).value?.Functions ?? []).map((x) => x.FunctionArn!).filter(Boolean)
+  : [];
+
+const tabs = isRest
+  ? [{ id: 'resources', label: 'Resources and methods' }, { id: 'stages', label: 'Stages and deployments' }, { id: 'details', label: 'Details' }]
+  : [{ id: 'routes', label: 'Routes and integrations' }, { id: 'stages', label: 'Stages' }, { id: 'details', label: 'Details' }];
+const typeLabel = isRest ? 'REST' : isWs ? 'WebSocket' : 'HTTP';
+---
+<Console title={apiName} crumbs={[{ label: 'APIs', href: '/apigateway' }, { label: apiName }]} error={post.error}>
+  <PageHeader title={apiName} badge={typeLabel + ' API'}>
+    <form method="post"><button class="btn btn-danger" name="intent" value="deleteApi" data-confirm="The API and all of its resources, stages and deployments will be permanently deleted." data-confirm-title="Delete API?" data-confirm-name={apiName} data-confirm-type="delete" data-confirm-ok="Delete API">Delete</button></form>
+  </PageHeader>
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {isRest && tab === 'resources' && (
+      <div class="space-y-6 p-5">
+        <DataTable title="Resources" rows={resourceRows} error={restRes?.error} bare select="multi" id="resources" pageSize={15} filter="Search resources" nameKey="path"
+          emptyTitle="No resources" emptyText="This API has no resources yet."
+          columns={[
+            { key: 'path', label: 'Path', mono: true },
+            { key: 'id', label: 'Resource ID', mono: true },
+            { key: 'methods', label: 'Methods', render: (r) => r.methods.length ? raw(r.methods.map((m: string) => badge(m, 'blue').v).join(' ')) : '-' },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteResource" data-min="1" data-confirm="The selected resources, their child resources and methods will be deleted." data-confirm-title="Delete resources?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        <DataTable title="Methods" rows={methodRows} bare select="multi" id="methods" pageSize={15} filter={false} nameKey="method"
+          emptyTitle="No methods" emptyText="Add a method to a resource below."
+          columns={[
+            { key: 'path', label: 'Resource', mono: true },
+            { key: 'method', label: 'Method', render: (r) => badge(r.method, 'blue') },
+            { key: 'integration', label: 'Integration' },
+            { key: 'target', label: 'Target', mono: true },
+            { key: 'auth', label: 'Authorization' },
+            { key: 'apiKey', label: 'API key' },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteMethod" data-min="1" data-confirm="The selected methods and their integrations will be deleted." data-confirm-title="Delete methods?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        <div class="grid gap-6 border-t border-line pt-5 xl:grid-cols-2">
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="createResource" />
+            <h3 class="card-title mb-3">Create resource</h3>
+            <FormField label="Parent resource" for="parentId"><select id="parentId" name="parentId" class="select">{resourceRows.map((r) => <option value={r.id} selected={v.parentId === r.id}>{r.path}</option>)}</select></FormField>
+            <FormField label="Resource name (path part)" for="pathPart" hint="Use {name} for a path parameter."><input id="pathPart" name="pathPart" class="input" required autocomplete="off" placeholder="items" value={v.pathPart ?? ''} /></FormField>
+            <button class="btn btn-primary" type="submit">Create resource</button>
+          </form>
+
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="putMethod" />
+            <h3 class="card-title mb-3">Create method</h3>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <FormField label="Resource" for="resourceId"><select id="resourceId" name="resourceId" class="select">{resourceRows.map((r) => <option value={r.id} selected={v.resourceId === r.id}>{r.path}</option>)}</select></FormField>
+              <FormField label="Method" for="method"><select id="method" name="method" class="select">{HTTP_METHODS.map((m) => <option value={m} selected={v.method === m}>{m}</option>)}</select></FormField>
+              <FormField label="Authorization" for="auth"><select id="auth" name="auth" class="select"><option value="NONE">None</option><option value="AWS_IAM" selected={v.auth === 'AWS_IAM'}>AWS IAM</option></select></FormField>
+              <FormField label="Integration type" for="integration">
+                <select id="integration" name="integration" class="select">
+                  <option value="MOCK" selected={(v.integration ?? 'MOCK') === 'MOCK'}>Mock</option>
+                  <option value="AWS_PROXY" selected={v.integration === 'AWS_PROXY'}>Lambda function (proxy)</option>
+                  <option value="HTTP_PROXY" selected={v.integration === 'HTTP_PROXY'}>HTTP endpoint (proxy)</option>
+                </select>
+              </FormField>
+            </div>
+            <div data-show-when="integration:MOCK" class="grid gap-4 sm:grid-cols-2">
+              <FormField label="Response status" for="status"><input id="status" name="status" class="input" value={v.status ?? '200'} /></FormField>
+              <FormField label="Response body" for="body"><input id="body" name="body" class="input" placeholder='{"message": "ok"}' value={v.body ?? ''} /></FormField>
+            </div>
+            <div data-show-when="integration:AWS_PROXY" hidden>
+              <FormField label="Lambda function" for="lambda" hint="A function name or ARN.">
+                <input id="lambda" name="lambda" class="input" list="fn-list" autocomplete="off" value={v.lambda ?? ''} />
+                <datalist id="fn-list">{fns.map((a) => <option value={a} />)}</datalist>
+              </FormField>
+            </div>
+            <div data-show-when="integration:HTTP_PROXY" hidden>
+              <FormField label="Endpoint URL" for="url"><input id="url" name="url" class="input" placeholder="https://example.com/items" value={v.url ?? ''} /></FormField>
+            </div>
+            <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="apiKey" value="1" /> API key required</label>
+            <button class="btn btn-primary" type="submit">Create method</button>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {!isRest && tab === 'routes' && (
+      <div class="space-y-6 p-5">
+        {routesRes?.error && <Flash type="error" text="Couldn't load routes" detail={routesRes.error} dismissible={false} />}
+        <DataTable title="Routes" rows={routesRes?.data?.routes ?? []} bare select="multi" id="routes" pageSize={15} filter="Search routes" nameKey="key"
+          emptyTitle="No routes" emptyText="Create a route to start receiving requests."
+          columns={[{ key: 'key', label: 'Route key', mono: true }, { key: 'target', label: 'Integration', mono: true }, { key: 'id', label: 'Route ID', mono: true }]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteRoute" data-min="1" data-confirm="The selected routes will be deleted." data-confirm-title="Delete routes?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+        <DataTable title="Integrations" rows={routesRes?.data?.integrations ?? []} bare select="multi" id="integrations" pageSize={15} filter={false} nameKey="id"
+          emptyTitle="No integrations" emptyText="Integrations connect routes to Lambda functions or HTTP endpoints."
+          columns={[{ key: 'id', label: 'Integration ID', mono: true }, { key: 'type', label: 'Type', render: (r) => badge(r.type) }, { key: 'uri', label: 'Target', mono: true }, { key: 'format', label: 'Payload format' }]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteIntegration" data-min="1" data-confirm="The selected integrations will be deleted." data-confirm-title="Delete integrations?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+        <div class="grid gap-6 border-t border-line pt-5 xl:grid-cols-2">
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="createRoute" />
+            <h3 class="card-title mb-3">Create route</h3>
+            <FormField label="Route key" for="routeKey" hint={isWs ? 'e.g. $connect, $disconnect, $default or a custom action.' : 'e.g. GET /items, POST /items/{id} or $default.'}><input id="routeKey" name="routeKey" class="input" required autocomplete="off" placeholder={isWs ? '$default' : 'GET /items'} value={v.routeKey ?? ''} /></FormField>
+            <FormField label="Existing integration" for="integrationId" optional>
+              <select id="integrationId" name="integrationId" class="select"><option value="">None</option>{(routesRes?.data?.integrations ?? []).map((i) => <option value={i.id}>{i.id} - {i.uri}</option>)}</select>
+            </FormField>
+            <FormField label="Or new Lambda integration" for="lambda" optional hint="A function name or ARN.">
+              <input id="lambda" name="lambda" class="input" list="fn-list" autocomplete="off" value={v.lambda ?? ''} />
+              <datalist id="fn-list">{fns.map((a) => <option value={a} />)}</datalist>
+            </FormField>
+            <button class="btn btn-primary" type="submit">Create route</button>
+          </form>
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="createIntegration" />
+            <h3 class="card-title mb-3">Create integration</h3>
+            <FormField label="Integration type" for="itype"><select id="itype" name="type" class="select"><option value="AWS_PROXY">Lambda function</option><option value="HTTP_PROXY">HTTP URL</option></select></FormField>
+            <FormField label="Function or URL" for="iuri"><input id="iuri" name="uri" class="input" required autocomplete="off" placeholder="my-function or https://example.com" value={v.uri ?? ''} /></FormField>
+            <button class="btn btn-primary" type="submit">Create integration</button>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {tab === 'stages' && (
+      <div class="space-y-6 p-5">
+        <DataTable title="Stages" rows={stagesRes?.data?.stages ?? []} error={stagesRes?.error} bare select="multi" id="stages" pageSize={15} filter={false} nameKey="name"
+          emptyTitle="No stages" emptyText={isRest ? 'Deploy the API to create a stage.' : 'Create a stage to publish the API.'}
+          columns={[
+            { key: 'name', label: 'Stage', render: (r) => badge(r.name, 'green') },
+            { key: 'url', label: 'Invoke URL', render: (r) => copyable(r.url) },
+            { key: 'deployment', label: 'Deployment', mono: true },
+            ...(isRest ? [] : [{ key: 'auto', label: 'Auto-deploy', render: (r: any) => (r.auto ? 'Yes' : 'No') }]),
+            { key: 'updated', label: 'Last updated', nowrap: true, render: (r) => dateTime(r.updated) },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteStage" data-min="1" data-confirm="The selected stages will be deleted and their invoke URLs will stop working." data-confirm-title="Delete stages?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        {isRest && (
+          <DataTable title="Deployments" rows={stagesRes?.data?.deployments ?? []} bare select="multi" id="deployments" pageSize={10} filter={false} nameKey="id"
+            emptyTitle="No deployments" emptyText="Deployments are snapshots of the API that stages point to."
+            columns={[{ key: 'id', label: 'Deployment ID', mono: true }, { key: 'description', label: 'Description' }, { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created) }]}>
+            <button slot="actions" class="btn btn-normal" name="intent" value="deleteDeployment" data-min="1" data-confirm="The selected deployments will be deleted. Deployments in use by a stage cannot be deleted." data-confirm-title="Delete deployments?" data-confirm-ok="Delete">Delete</button>
+          </DataTable>
+        )}
+
+        <form method="post" class="border-t border-line pt-5">
+          <input type="hidden" name="intent" value={isRest ? 'deploy' : 'createStage'} />
+          <h3 class="card-title mb-3">{isRest ? 'Deploy API' : 'Create stage'}</h3>
+          <div class="grid gap-4 md:grid-cols-[220px_1fr_auto] md:items-end">
+            <FormField label="Stage name" for="stageName" class="!mb-0" hint={isRest ? 'A new name creates a stage; an existing one is updated.' : 'Use $default for the root URL.'}><input id="stageName" name="stageName" class="input" required autocomplete="off" placeholder={isRest ? 'dev' : '$default'} value={v.stageName ?? ''} /></FormField>
+            {isRest
+              ? <FormField label="Description" for="description" class="!mb-0" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+              : <label class="mb-[22px] flex items-center gap-2"><input type="checkbox" class="checkbox" name="autoDeploy" value="1" checked /> Automatic deployment</label>}
+            <button class="btn btn-primary mb-[22px]" type="submit"><Icon name="upload" size={16} /> {isRest ? 'Deploy' : 'Create stage'}</button>
+          </div>
+        </form>
+      </div>
+    )}
+
+    {tab === 'details' && (
+      <div class="space-y-5 p-5">
+        <Details items={[
+          { label: 'API name', value: apiName }, { label: 'API ID', value: copyable(id) }, { label: 'Type', value: `${typeLabel} API` },
+          { label: 'Description', value: isRest ? restApi.description : httpApi.Description },
+          { label: 'Created', value: dateTime(isRest ? restApi.createdDate : httpApi.CreatedDate) },
+          isRest
+            ? { label: 'Endpoint type', value: (restApi.endpointConfiguration?.types ?? []).join(', ') }
+            : { label: 'Route selection', value: mono(httpApi.RouteSelectionExpression ?? '') },
+          isRest ? { label: 'Root resource ID', value: restApi.rootResourceId } : { label: 'API endpoint', value: httpApi.ApiEndpoint },
+          { label: 'Tags', value: tagList(isRest ? restApi.tags : httpApi.Tags), wide: true },
+        ]} />
+        {isRest && (
+          <div class="border-t border-line pt-4">
+            <h3 class="card-title mb-2">Invoke from the terminal</h3>
+            <p class="mb-2 text-muted">After deploying to a stage, call the API through LocalEmu:</p>
+            <pre class="code-block">curl {restInvokeUrl(id, 'STAGE')}PATH</pre>
+          </div>
+        )}
+      </div>
+    )}
+  </div>
+</Console>

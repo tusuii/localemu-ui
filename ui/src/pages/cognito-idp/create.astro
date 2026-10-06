@@ -1,0 +1,80 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateUserPoolCommand } from '@aws-sdk/client-cognito-identity-provider';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+import { USERNAME_MODES } from '../../lib/cognito';
+
+const ctx = getCtx(Astro.cookies);
+const cognito = aws.cognito(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'User pool name');
+    const mode = str(f, 'mode');
+    const minLen = intOf(f, 'minlen', 'Minimum length') ?? 8;
+    if (minLen < 6 || minLen > 99) throw new UserError('Minimum password length must be between 6 and 99.');
+    const verified = strs(f, 'verify');
+    const r = await cognito.send(new CreateUserPoolCommand({
+      PoolName: name,
+      UsernameAttributes: mode === 'email' || mode === 'phone_number' ? [mode] : undefined,
+      AutoVerifiedAttributes: verified.length ? (verified as ('email' | 'phone_number')[]) : undefined,
+      MfaConfiguration: 'OFF',
+      Policies: {
+        PasswordPolicy: {
+          MinimumLength: minLen,
+          RequireUppercase: str(f, 'upper') === '1',
+          RequireLowercase: str(f, 'lower') === '1',
+          RequireNumbers: str(f, 'numbers') === '1',
+          RequireSymbols: str(f, 'symbols') === '1',
+          TemporaryPasswordValidityDays: intOf(f, 'tempdays', 'Temporary password validity') ?? 7,
+        },
+      },
+    }));
+    return { message: `User pool ${name} created successfully.`, detail: r.UserPool?.Id, redirect: `/cognito-idp/${encodeURIComponent(r.UserPool!.Id!)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+const on = (k: string, dflt: boolean) => (post.posted ? v[k] === '1' : dflt);
+---
+<Console title="Create user pool" crumbs={[{ label: 'User pools', href: '/cognito-idp' }, { label: 'Create user pool' }]} error={post.error}>
+  <PageHeader title="Create user pool" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Sign-in" description="How users identify themselves when they sign in.">
+      <FormField label="User pool name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="128" value={v.name ?? ''} /></FormField>
+      <div class="space-y-2">
+        {USERNAME_MODES.map(([val, label, desc]) => (
+          <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="mode" value={val} checked={(v.mode ?? 'username') === val} /><span><strong>{label}</strong><br /><span class="text-muted">{desc}</span></span></label>
+        ))}
+      </div>
+    </Card>
+    <Card title="Password policy">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Minimum length" for="minlen"><input id="minlen" name="minlen" type="number" min="6" max="99" class="input" value={v.minlen ?? '8'} /></FormField>
+        <FormField label="Temporary password validity (days)" for="tempdays"><input id="tempdays" name="tempdays" type="number" min="0" max="365" class="input" value={v.tempdays ?? '7'} /></FormField>
+      </div>
+      <div class="mt-3 grid gap-2 sm:grid-cols-2">
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="lower" value="1" checked={on('lower', true)} /> Require lowercase letters</label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="upper" value="1" checked={on('upper', true)} /> Require uppercase letters</label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="numbers" value="1" checked={on('numbers', true)} /> Require numbers</label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="symbols" value="1" checked={on('symbols', false)} /> Require special characters</label>
+      </div>
+    </Card>
+    <Card title="Verification and MFA">
+      <p class="mb-2 font-bold">Attributes to verify automatically</p>
+      <div class="flex flex-wrap gap-6">
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="verify" value="email" checked={!post.posted || v.verify === 'email'} /> Email address</label>
+        <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="verify" value="phone_number" /> Phone number</label>
+      </div>
+      <p class="field-hint mt-3">Multi-factor authentication is set to <strong>off</strong> for new pools.</p>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/cognito-idp">Cancel</a><button class="btn btn-primary" type="submit">Create user pool</button></div>
+  </form>
+</Console>

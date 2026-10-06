@@ -6,6 +6,7 @@ import { ListSubscriptionsCommand, UnsubscribeCommand } from '@aws-sdk/client-sn
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { arnName, plural } from '../../lib/format';
 import { badge } from '../../lib/html';
@@ -14,10 +15,7 @@ const ctx = getCtx(Astro.cookies);
 const sns = aws.sns(ctx);
 const post = await handlePost(Astro, {
   delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one subscription.');
-    for (const s of ids) await sns.send(new UnsubscribeCommand({ SubscriptionArn: s }));
-    return `Deleted ${plural(ids.length, 'subscription')}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'subscription' }, (s) => sns.send(new UnsubscribeCommand({ SubscriptionArn: s })));
   },
 });
 if (post.response) return post.response;

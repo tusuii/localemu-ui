@@ -1,0 +1,73 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import Tabs from '../../components/Tabs.astro';
+import {
+  DescribeDBParameterGroupsCommand, DescribeDBClusterParameterGroupsCommand, CreateDBParameterGroupCommand, CreateDBClusterParameterGroupCommand,
+  DeleteDBParameterGroupCommand, DeleteDBClusterParameterGroupCommand,
+} from '@aws-sdk/client-rds';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const rds = aws.rds(ctx);
+const tab = Astro.url.searchParams.get('tab') === 'cluster' ? 'cluster' : 'instance';
+
+const FAMILIES = ['mysql8.0', 'mysql5.7', 'postgres16', 'postgres15', 'postgres14', 'postgres13', 'mariadb10.11', 'mariadb10.6'];
+const CLUSTER_FAMILIES = ['aurora-mysql8.0', 'aurora-mysql5.7', 'aurora-postgresql16', 'aurora-postgresql15', 'aurora-postgresql14'];
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Name');
+    const input = { DBParameterGroupFamily: required(f, 'family', 'Parameter group family'), Description: required(f, 'description', 'Description') };
+    if (tab === 'cluster') await rds.send(new CreateDBClusterParameterGroupCommand({ DBClusterParameterGroupName: name, ...input }));
+    else await rds.send(new CreateDBParameterGroupCommand({ DBParameterGroupName: name, ...input }));
+    return `Parameter group ${name} created.`;
+  },
+  delete: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'parameter group' }, (id) =>
+    tab === 'cluster' ? rds.send(new DeleteDBClusterParameterGroupCommand({ DBClusterParameterGroupName: id })) : rds.send(new DeleteDBParameterGroupCommand({ DBParameterGroupName: id }))),
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  if (tab === 'cluster') return ((await rds.send(new DescribeDBClusterParameterGroupsCommand({}))).DBClusterParameterGroups ?? []).map((g) => ({ id: g.DBClusterParameterGroupName!, family: g.DBParameterGroupFamily, description: g.Description, arn: g.DBClusterParameterGroupArn }));
+  return ((await rds.send(new DescribeDBParameterGroupsCommand({}))).DBParameterGroups ?? []).map((g) => ({ id: g.DBParameterGroupName!, family: g.DBParameterGroupFamily, description: g.Description, arn: g.DBParameterGroupArn }));
+});
+const rows = (res.data ?? []).sort((a, b) => a.id.localeCompare(b.id));
+const v = post.values;
+const families = tab === 'cluster' ? CLUSTER_FAMILIES : FAMILIES;
+---
+<Console title="Parameter groups" crumbs={[{ label: 'Parameter groups' }]} error={post.error}>
+  <PageHeader title="Parameter groups" description="Parameter groups hold engine configuration values that you can apply to DB instances and clusters." />
+  <div class="card mb-5">
+    <Tabs tabs={[{ id: 'instance', label: 'DB parameter groups' }, { id: 'cluster', label: 'DB cluster parameter groups' }]} active={tab} />
+  </div>
+  <div class="space-y-5">
+    <DataTable
+      title={tab === 'cluster' ? 'DB cluster parameter groups' : 'DB parameter groups'} rows={rows} error={res.error} select="multi" nameKey="id" pageSize={20}
+      filter="Search parameter groups" emptyTitle="No parameter groups" emptyText="Create a parameter group to customize engine settings."
+      columns={[
+        { key: 'id', label: 'Name' }, { key: 'family', label: 'Family' }, { key: 'description', label: 'Description' }, { key: 'arn', label: 'ARN', mono: true },
+      ]}
+    >
+      <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected parameter groups will be deleted. Default groups cannot be deleted." data-confirm-title="Delete parameter groups?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+    </DataTable>
+    <Card title="Create parameter group">
+      <form method="post" class="max-w-3xl">
+        <input type="hidden" name="intent" value="create" />
+        <div class="grid gap-4 sm:grid-cols-2">
+          <FormField label="Name" for="name"><input id="name" name="name" class="input" required value={v.name ?? ''} /></FormField>
+          <FormField label="Parameter group family" for="family"><select id="family" name="family" class="select">{families.map((x) => <option value={x} selected={v.family === x}>{x}</option>)}</select></FormField>
+        </div>
+        <FormField label="Description" for="description"><input id="description" name="description" class="input" required value={v.description ?? ''} /></FormField>
+        <button class="btn btn-primary" type="submit">Create parameter group</button>
+      </form>
+    </Card>
+  </div>
+</Console>

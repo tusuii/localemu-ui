@@ -7,6 +7,7 @@ import { ListUsersCommand, DeleteUserCommand } from '@aws-sdk/client-iam';
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
 import { handlePost, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
 import { UserError, load } from '../../../lib/errors';
 import { dateTime, plural } from '../../../lib/format';
 import { purgeIdentity } from '../../../lib/iam';
@@ -15,10 +16,7 @@ const ctx = getCtx(Astro.cookies);
 const iam = aws.iam(ctx);
 const post = await handlePost(Astro, {
   delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one user.');
-    for (const u of ids) { await purgeIdentity(iam, 'user', u); await iam.send(new DeleteUserCommand({ UserName: u })); }
-    return `Deleted ${plural(ids.length, 'user')}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'user' }, async (u) => { await purgeIdentity(iam, 'user', u); await iam.send(new DeleteUserCommand({ UserName: u })); });
   },
 });
 if (post.response) return post.response;

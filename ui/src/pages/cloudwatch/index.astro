@@ -8,6 +8,7 @@ import { DescribeAlarmsCommand, PutMetricAlarmCommand, DeleteAlarmsCommand, SetA
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, intOf, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { stateStatus } from '../../lib/html';
@@ -20,9 +21,9 @@ const post = await handlePost(Astro, {
     await cw.send(new PutMetricAlarmCommand({ AlarmName: required(f, 'name', 'Alarm name'), Namespace: required(f, 'namespace', 'Namespace'), MetricName: required(f, 'metric', 'Metric name'), Statistic: (str(f, 'stat') || 'Average') as never, Period: intOf(f, 'period', 'Period') ?? 60, EvaluationPeriods: intOf(f, 'evals', 'Evaluation periods') ?? 1, Threshold: thr, ComparisonOperator: (str(f, 'op') || 'GreaterThanThreshold') as never, AlarmDescription: str(f, 'description') || undefined }));
     return `Alarm ${str(f, 'name')} created.`;
   },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one alarm.'); await cw.send(new DeleteAlarmsCommand({ AlarmNames: ids })); return `Deleted ${plural(ids.length, 'alarm')}.`; },
-  setOk: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one alarm.'); for (const a of ids) await cw.send(new SetAlarmStateCommand({ AlarmName: a, StateValue: 'OK', StateReason: 'Set from the LocalEmu console' })); return 'Alarm state set to OK.'; },
-  setAlarm: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one alarm.'); for (const a of ids) await cw.send(new SetAlarmStateCommand({ AlarmName: a, StateValue: 'ALARM', StateReason: 'Set from the LocalEmu console' })); return 'Alarm state set to ALARM.'; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'alarm' }, (a) => cw.send(new DeleteAlarmsCommand({ AlarmNames: [a] }))),
+  setOk: async (f) => bulk(strs(f, 'id'), { verb: 'Set to OK:', noun: 'alarm' }, (a) => cw.send(new SetAlarmStateCommand({ AlarmName: a, StateValue: 'OK', StateReason: 'Set from the LocalEmu console' }))),
+  setAlarm: async (f) => bulk(strs(f, 'id'), { verb: 'Set to ALARM:', noun: 'alarm' }, (a) => cw.send(new SetAlarmStateCommand({ AlarmName: a, StateValue: 'ALARM', StateReason: 'Set from the LocalEmu console' }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => ((await cw.send(new DescribeAlarmsCommand({ MaxRecords: 100 }))).MetricAlarms ?? []).map((a) => ({ id: a.AlarmName, name: a.AlarmName, state: a.StateValue, metric: `${a.Namespace}/${a.MetricName}`, cond: `${a.MetricName} ${a.ComparisonOperator?.replace('Threshold', '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()} ${a.Threshold}`, updated: a.StateUpdatedTimestamp })));

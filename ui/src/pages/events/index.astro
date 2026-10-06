@@ -7,6 +7,7 @@ import { ListEventBusesCommand, CreateEventBusCommand, DeleteEventBusCommand } f
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { plural } from '../../lib/format';
 import { badge } from '../../lib/html';
@@ -15,7 +16,7 @@ const ctx = getCtx(Astro.cookies);
 const eb = aws.events(ctx);
 const post = await handlePost(Astro, {
   create: async (f) => { const n = required(f, 'name', 'Event bus name'); await eb.send(new CreateEventBusCommand({ Name: n })); return `Event bus ${n} created.`; },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one event bus.'); for (const b of ids) { if (b === 'default') throw new UserError('The default event bus can\'t be deleted.'); await eb.send(new DeleteEventBusCommand({ Name: b })); } return `Deleted ${plural(ids.length, 'event bus', 'event buses')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'event bus', nouns: 'event buses' }, async (b) => { if (b === 'default') throw new UserError('The default event bus can\'t be deleted.'); await eb.send(new DeleteEventBusCommand({ Name: b })); }),
 });
 if (post.response) return post.response;
 const res = await load(async () => ((await eb.send(new ListEventBusesCommand({}))).EventBuses ?? []).map((b) => ({ id: b.Name, name: b.Name, arn: b.Arn, isDefault: b.Name === 'default' })));

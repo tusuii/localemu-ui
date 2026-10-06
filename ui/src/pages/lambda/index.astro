@@ -7,6 +7,7 @@ import { ListFunctionsCommand, DeleteFunctionCommand } from '@aws-sdk/client-lam
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { bytes, dateTime, plural } from '../../lib/format';
 import { badge, stateStatus } from '../../lib/html';
@@ -16,10 +17,7 @@ const lambda = aws.lambda(ctx);
 
 const post = await handlePost(Astro, {
   delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one function.');
-    for (const n of ids) await lambda.send(new DeleteFunctionCommand({ FunctionName: n }));
-    return `Deleted ${plural(ids.length, 'function')}.`;
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'function' }, (n) => lambda.send(new DeleteFunctionCommand({ FunctionName: n })));
   },
 });
 if (post.response) return post.response;

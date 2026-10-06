@@ -8,6 +8,7 @@ import { ListRulesCommand, ListEventBusesCommand, PutRuleCommand, DeleteRuleComm
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, jsonOf, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { plural } from '../../lib/format';
 import { badge, stateStatus } from '../../lib/html';
@@ -26,16 +27,14 @@ const post = await handlePost(Astro, {
     await eb.send(new PutRuleCommand({ Name: name, EventBusName: bus, State: 'ENABLED', Description: str(f, 'description') || undefined, ...(kind === 'schedule' ? { ScheduleExpression: schedule } : { EventPattern: str(f, 'pattern') }) }));
     return { message: `Rule ${name} created.`, redirect: `/events/rule?bus=${encodeURIComponent(bus)}&name=${encodeURIComponent(name)}` };
   },
-  enable: async (f) => { for (const r of sel(f)) await eb.send(new EnableRuleCommand({ Name: r, EventBusName: bus })); return 'Rules enabled.'; },
-  disable: async (f) => { for (const r of sel(f)) await eb.send(new DisableRuleCommand({ Name: r, EventBusName: bus })); return 'Rules disabled.'; },
+  enable: async (f) => bulk(sel(f), { verb: 'Enabled', noun: 'rule' }, (r) => eb.send(new EnableRuleCommand({ Name: r, EventBusName: bus }))),
+  disable: async (f) => bulk(sel(f), { verb: 'Disabled', noun: 'rule' }, (r) => eb.send(new DisableRuleCommand({ Name: r, EventBusName: bus }))),
   delete: async (f) => {
-    const ids = sel(f);
-    for (const r of ids) {
+    return bulk(sel(f), { verb: 'Deleted', noun: 'rule' }, async (r) => {
       const t = (await eb.send(new ListTargetsByRuleCommand({ Rule: r, EventBusName: bus }))).Targets ?? [];
       if (t.length) await eb.send(new RemoveTargetsCommand({ Rule: r, EventBusName: bus, Ids: t.map((x) => x.Id!), Force: true }));
       await eb.send(new DeleteRuleCommand({ Name: r, EventBusName: bus, Force: true }));
-    }
-    return `Deleted ${plural(ids.length, 'rule')}.`;
+    });
   },
 });
 if (post.response) return post.response;

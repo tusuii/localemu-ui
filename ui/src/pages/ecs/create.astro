@@ -1,0 +1,45 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateClusterCommand } from '@aws-sdk/client-ecs';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Cluster name');
+    if (!/^[A-Za-z0-9_-]{1,255}$/.test(name)) throw new UserError('Cluster names use letters, numbers, hyphens and underscores (up to 255 characters).');
+    await aws.ecs(ctx).send(new CreateClusterCommand({
+      clusterName: name,
+      settings: str(f, 'insights') === '1' ? [{ name: 'containerInsights', value: 'enabled' }] : undefined,
+      tags: str(f, 'tagKey') ? [{ key: str(f, 'tagKey'), value: str(f, 'tagValue') }] : undefined,
+    }));
+    return { message: `Cluster ${name} created successfully.`, redirect: `/ecs/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create cluster" crumbs={[{ label: 'Clusters', href: '/ecs' }, { label: 'Create cluster' }]} error={post.error}>
+  <PageHeader title="Create cluster" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Cluster configuration">
+      <FormField label="Cluster name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="255" value={v.name ?? ''} /></FormField>
+      <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="insights" value="1" checked={v.insights === '1'} /> Use Container Insights</label>
+    </Card>
+    <Card title="Tags" description="Optional.">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Key" for="tagKey" optional><input id="tagKey" name="tagKey" class="input" value={v.tagKey ?? ''} /></FormField>
+        <FormField label="Value" for="tagValue" optional><input id="tagValue" name="tagValue" class="input" value={v.tagValue ?? ''} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/ecs">Cancel</a><button class="btn btn-primary" type="submit">Create cluster</button></div>
+  </form>
+</Console>

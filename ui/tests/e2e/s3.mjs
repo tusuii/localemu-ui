@@ -16,7 +16,7 @@ ok((await flash()).includes('Successfully created bucket'), 'create bucket flash
 // upload a file
 const upFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lemu-')), 'up.txt');
 fs.writeFileSync(upFile, 'uploaded from the console\nline2');
-await p.setInputFiles('input[type=file]', upFile);
+await p.setInputFiles('#up-files', upFile);
 await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('#upload button[type=submit]')]);
 await p.waitForSelector('text=up.txt');
 ok(await p.locator('tr[data-row]:has-text("up.txt")').count() === 1, 'uploaded object listed');

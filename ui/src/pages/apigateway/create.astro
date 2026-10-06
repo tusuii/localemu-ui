@@ -1,0 +1,72 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateRestApiCommand } from '@aws-sdk/client-api-gateway';
+import { CreateApiCommand } from '@aws-sdk/client-apigatewayv2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+import { lambdaArn } from '../../lib/apigateway';
+
+const ctx = getCtx(Astro.cookies);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const type = str(f, 'type') || 'rest';
+    const name = required(f, 'name', 'API name');
+    const description = str(f, 'description') || undefined;
+    if (type === 'rest') {
+      const r = await aws.apigw(ctx).send(new CreateRestApiCommand({
+        name, description, endpointConfiguration: { types: [(str(f, 'endpoint') || 'REGIONAL') as 'REGIONAL'] },
+      }));
+      return { message: `REST API ${name} created successfully.`, redirect: `/apigateway/${r.id}` };
+    }
+    if (type !== 'http' && type !== 'websocket') throw new UserError('Choose an API type.');
+    const target = str(f, 'target');
+    if (type === 'websocket' && target) throw new UserError('Quick create is only available for HTTP APIs.');
+    const r = await aws.apigwv2(ctx).send(new CreateApiCommand({
+      Name: name, Description: description, ProtocolType: type === 'http' ? 'HTTP' : 'WEBSOCKET',
+      RouteSelectionExpression: type === 'websocket' ? (str(f, 'selection') || '$request.body.action') : undefined,
+      Target: target ? lambdaArn(target, ctx.region, ctx.account) : undefined,
+    }));
+    return { message: `${type === 'http' ? 'HTTP' : 'WebSocket'} API ${name} created successfully.`, redirect: `/apigateway/${r.ApiId}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+const type = v.type ?? 'rest';
+---
+<Console title="Create API" crumbs={[{ label: 'APIs', href: '/apigateway' }, { label: 'Create API' }]} error={post.error}>
+  <PageHeader title="Create API" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="API type">
+      <div class="space-y-2">
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="rest" checked={type === 'rest'} /><span><strong>REST API</strong><br /><span class="text-muted">Full-featured API with resources, methods, stages and deployments.</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="http" checked={type === 'http'} /><span><strong>HTTP API</strong><br /><span class="text-muted">Low-latency, lower-cost API with routes and integrations.</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="websocket" checked={type === 'websocket'} /><span><strong>WebSocket API</strong><br /><span class="text-muted">Two-way communication with routes selected from the message body.</span></span></label>
+      </div>
+    </Card>
+    <Card title="Details">
+      <FormField label="API name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+      <div data-show-when="type:rest" hidden>
+        <FormField label="API endpoint type" for="endpoint">
+          <select id="endpoint" name="endpoint" class="select !w-60">{['REGIONAL', 'EDGE', 'PRIVATE'].map((t) => <option value={t} selected={v.endpoint === t}>{t[0] + t.slice(1).toLowerCase()}</option>)}</select>
+        </FormField>
+      </div>
+      <div data-show-when="type:http" hidden>
+        <FormField label="Quick-create Lambda target" for="target" optional hint="A function name or ARN. Creates a default route, an AWS_PROXY integration and the $default stage.">
+          <input id="target" name="target" class="input" autocomplete="off" placeholder="my-function" value={v.target ?? ''} />
+        </FormField>
+      </div>
+      <div data-show-when="type:websocket" hidden>
+        <FormField label="Route selection expression" for="selection"><input id="selection" name="selection" class="input" value={v.selection ?? '$request.body.action'} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/apigateway">Cancel</a><button class="btn btn-primary" type="submit">Create API</button></div>
+  </form>
+</Console>

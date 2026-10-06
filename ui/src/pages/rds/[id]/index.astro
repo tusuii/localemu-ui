@@ -1,0 +1,205 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import DataTable from '../../../components/DataTable.astro';
+import FormField from '../../../components/FormField.astro';
+import {
+  DescribeDBInstancesCommand, DescribeDBClustersCommand, StartDBInstanceCommand, StopDBInstanceCommand, RebootDBInstanceCommand,
+  DeleteDBInstanceCommand, DeleteDBClusterCommand, ModifyDBInstanceCommand, CreateDBSnapshotCommand, ListTagsForResourceCommand,
+  AddTagsToResourceCommand, RemoveTagsFromResourceCommand,
+} from '@aws-sdk/client-rds';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { copyable, mono, stateStatus } from '../../../lib/html';
+import { INSTANCE_CLASSES, dbTags, engineLabel } from '../../../lib/rds';
+
+const id = Astro.params.id!;
+const isCluster = Astro.url.searchParams.get('type') === 'cluster';
+const ctx = getCtx(Astro.cookies);
+const rds = aws.rds(ctx);
+const tabId = Astro.url.searchParams.get('tab') ?? '';
+const tab = ['connectivity', 'configuration', 'tags'].includes(tabId) ? tabId : 'connectivity';
+const here = (t: string) => `${Astro.url.pathname}?${isCluster ? 'type=cluster&' : ''}tab=${t}`;
+
+const found = await load(async () => {
+  if (isCluster) return (await rds.send(new DescribeDBClustersCommand({ DBClusterIdentifier: id }))).DBClusters?.[0];
+  return (await rds.send(new DescribeDBInstancesCommand({ DBInstanceIdentifier: id }))).DBInstances?.[0];
+});
+if (found.error && /NotFound/i.test(found.error)) return new Response(`${isCluster ? 'DB cluster' : 'DB instance'} "${id}" does not exist`, { status: 404 });
+if (!found.data && !found.error) return new Response(`"${id}" does not exist`, { status: 404 });
+const d = (found.data ?? {}) as any;
+const arn: string = (isCluster ? d.DBClusterArn : d.DBInstanceArn) ?? `arn:aws:rds:${ctx.region}:${ctx.account}:${isCluster ? 'cluster' : 'db'}:${id}`;
+
+const post = await handlePost(Astro, {
+  start: async () => { await rds.send(new StartDBInstanceCommand({ DBInstanceIdentifier: id })); return 'Starting the DB instance.'; },
+  stop: async () => { await rds.send(new StopDBInstanceCommand({ DBInstanceIdentifier: id })); return 'Stopping the DB instance.'; },
+  reboot: async () => { await rds.send(new RebootDBInstanceCommand({ DBInstanceIdentifier: id })); return 'Rebooting the DB instance.'; },
+  delete: async (f) => {
+    const skip = str(f, 'skipSnapshot') === '1';
+    const snap = str(f, 'finalSnapshot');
+    if (!skip && !snap) throw new UserError('Enter a final snapshot name or choose to skip the final snapshot.');
+    if (isCluster) await rds.send(new DeleteDBClusterCommand({ DBClusterIdentifier: id, SkipFinalSnapshot: skip, FinalDBSnapshotIdentifier: skip ? undefined : snap }));
+    else await rds.send(new DeleteDBInstanceCommand({ DBInstanceIdentifier: id, SkipFinalSnapshot: skip, FinalDBSnapshotIdentifier: skip ? undefined : snap }));
+    return { message: `Deleted ${isCluster ? 'cluster' : 'DB instance'} "${id}".`, redirect: '/rds' };
+  },
+  modify: async (f) => {
+    await rds.send(new ModifyDBInstanceCommand({
+      DBInstanceIdentifier: id, ApplyImmediately: true, DBInstanceClass: str(f, 'class') || undefined,
+      AllocatedStorage: intOf(f, 'storage', 'Allocated storage'), BackupRetentionPeriod: intOf(f, 'retention', 'Backup retention'),
+      MultiAZ: str(f, 'multiAz') === '1', MasterUserPassword: str(f, 'password') || undefined,
+    }));
+    return { message: 'DB instance modified.', redirect: here('configuration') };
+  },
+  snapshot: async (f) => {
+    const name = required(f, 'snapshotId', 'Snapshot name');
+    await rds.send(new CreateDBSnapshotCommand({ DBInstanceIdentifier: id, DBSnapshotIdentifier: name }));
+    return { message: `Snapshot ${name} created.`, redirect: '/rds/snapshots' };
+  },
+  addTag: async (f) => {
+    await rds.send(new AddTagsToResourceCommand({ ResourceName: arn, Tags: [{ Key: required(f, 'key', 'Tag key'), Value: str(f, 'value') }] }));
+    return { message: 'Tag added.', redirect: here('tags') };
+  },
+  removeTag: async (f) => {
+    const r = await bulk(strs(f, 'id'), { verb: 'Removed', noun: 'tag' }, (k) => rds.send(new RemoveTagsFromResourceCommand({ ResourceName: arn, TagKeys: [k] })));
+    return { ...r, redirect: here('tags') };
+  },
+});
+if (post.response) return post.response;
+
+const tags = tab === 'tags' ? await load(async () => dbTags((await rds.send(new ListTagsForResourceCommand({ ResourceName: arn }))).TagList)) : null;
+const endpoint = isCluster ? d.Endpoint : d.Endpoint?.Address;
+const port = isCluster ? d.Port : d.Endpoint?.Port;
+const tabs = [{ id: 'connectivity', label: 'Connectivity' }, { id: 'configuration', label: 'Configuration' }, { id: 'tags', label: 'Tags' }];
+const status: string | undefined = isCluster ? d.Status : d.DBInstanceStatus;
+const stopped = status === 'stopped';
+---
+<Console title={id} crumbs={[{ label: 'Databases', href: '/rds' }, { label: id }]} error={post.error ?? found.error}>
+  <PageHeader title={id} badge={isCluster ? 'DB cluster' : 'DB instance'}>
+    {!isCluster && (
+      <form method="post" class="flex flex-wrap gap-2">
+        <button class="btn btn-normal" name="intent" value="start" disabled={!stopped}>Start</button>
+        <button class="btn btn-normal" name="intent" value="stop" disabled={stopped} data-confirm="The DB instance will be stopped." data-confirm-title="Stop DB instance?" data-confirm-ok="Stop">Stop</button>
+        <button class="btn btn-normal" name="intent" value="reboot" data-confirm="The DB instance will be rebooted." data-confirm-title="Reboot DB instance?" data-confirm-ok="Reboot">Reboot</button>
+      </form>
+    )}
+  </PageHeader>
+
+  <div class="mb-4 grid gap-3 sm:grid-cols-3">
+    <div class="card p-4"><div class="kv-label">Status</div><div class="text-[20px] font-bold leading-9">{stateStatus(status)}</div></div>
+    <div class="card p-4"><div class="kv-label">Engine</div><div class="text-[20px] font-bold leading-9">{engineLabel(d.Engine)} {d.EngineVersion}</div></div>
+    <div class="card p-4"><div class="kv-label">{isCluster ? 'Instances' : 'Class'}</div><div class="text-[20px] font-bold leading-9">{isCluster ? (d.DBClusterMembers?.length ?? 0) : d.DBInstanceClass}</div></div>
+  </div>
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'connectivity' && (
+      <div class="space-y-5 p-5">
+        <Details items={[
+          { label: isCluster ? 'Writer endpoint' : 'Endpoint', value: endpoint ? copyable(endpoint) : undefined, wide: true },
+          ...(isCluster ? [{ label: 'Reader endpoint', value: d.ReaderEndpoint ? copyable(d.ReaderEndpoint) : undefined, wide: true }] : []),
+          { label: 'Port', value: port },
+          { label: 'Availability zone', value: isCluster ? (d.AvailabilityZones ?? []).join(', ') : d.AvailabilityZone },
+          { label: 'Publicly accessible', value: isCluster ? undefined : d.PubliclyAccessible ? 'Yes' : 'No' },
+          { label: 'Subnet group', value: isCluster ? d.DBSubnetGroup : d.DBSubnetGroup?.DBSubnetGroupName },
+          { label: 'VPC security groups', value: (d.VpcSecurityGroups ?? []).map((g: any) => g.VpcSecurityGroupId).join(', ') },
+        ]} />
+        {endpoint && (
+          <div class="border-t border-line pt-4">
+            <h3 class="card-title mb-2">Connect</h3>
+            <p class="mb-2 text-muted">LocalEmu exposes the endpoint above as metadata. Use it with your database client:</p>
+            <pre class="code-block">{
+              /postgres/.test(d.Engine ?? '')
+                ? `psql -h ${endpoint} -p ${port} -U ${d.MasterUsername} ${d.DBName ?? d.DatabaseName ?? 'postgres'}`
+                : `mysql -h ${endpoint} -P ${port} -u ${d.MasterUsername} -p ${d.DBName ?? d.DatabaseName ?? ''}`
+            }</pre>
+          </div>
+        )}
+        {isCluster && (
+          <div class="border-t border-line pt-4">
+            <DataTable title="Cluster members" bare filter={false} rows={(d.DBClusterMembers ?? []).map((m: any) => ({ id: m.DBInstanceIdentifier, role: m.IsClusterWriter ? 'Writer' : 'Reader' }))} id="members"
+              emptyTitle="No instances" emptyText="This cluster has no DB instances."
+              columns={[{ key: 'id', label: 'DB identifier', href: (r) => `/rds/${encodeURIComponent(r.id)}` }, { key: 'role', label: 'Role' }]} />
+          </div>
+        )}
+      </div>
+    )}
+
+    {tab === 'configuration' && (
+      <div class="space-y-6 p-5">
+        <Details items={[
+          { label: isCluster ? 'Cluster identifier' : 'DB identifier', value: id },
+          { label: 'ARN', value: copyable(arn), wide: true },
+          { label: 'Engine', value: `${engineLabel(d.Engine)} ${d.EngineVersion ?? ''}` },
+          { label: 'Master username', value: d.MasterUsername },
+          { label: 'Database name', value: d.DBName ?? d.DatabaseName },
+          ...(isCluster ? [] : [
+            { label: 'Instance class', value: d.DBInstanceClass },
+            { label: 'Storage', value: d.AllocatedStorage ? `${d.AllocatedStorage} GiB (${d.StorageType ?? 'gp2'})` : undefined },
+            { label: 'Multi-AZ', value: d.MultiAZ ? 'Yes' : 'No' },
+          ]),
+          { label: 'Storage encrypted', value: d.StorageEncrypted ? 'Yes' : 'No' },
+          { label: 'Backup retention', value: d.BackupRetentionPeriod !== undefined ? `${d.BackupRetentionPeriod} days` : undefined },
+          { label: 'Backup window', value: d.PreferredBackupWindow },
+          { label: 'Maintenance window', value: d.PreferredMaintenanceWindow },
+          { label: 'Parameter group', value: isCluster ? d.DBClusterParameterGroup : (d.DBParameterGroups ?? []).map((g: any) => g.DBParameterGroupName).join(', ') },
+          { label: 'Created', value: dateTime(isCluster ? d.ClusterCreateTime : d.InstanceCreateTime) },
+          { label: 'Resource ID', value: mono(isCluster ? d.DbClusterResourceId : d.DbiResourceId) },
+        ]} />
+
+        {!isCluster && (
+          <>
+            <form method="post" class="grid max-w-3xl gap-4 border-t border-line pt-5 sm:grid-cols-2">
+              <input type="hidden" name="intent" value="modify" />
+              <h3 class="card-title sm:col-span-2">Modify</h3>
+              <FormField label="DB instance class" for="m-class"><select id="m-class" name="class" class="select">{[...new Set([d.DBInstanceClass, ...INSTANCE_CLASSES])].filter(Boolean).map((c) => <option value={c} selected={c === d.DBInstanceClass}>{c}</option>)}</select></FormField>
+              <FormField label="Allocated storage (GiB)" for="m-storage"><input id="m-storage" name="storage" type="number" min={d.AllocatedStorage ?? 5} class="input" value={d.AllocatedStorage ?? ''} /></FormField>
+              <FormField label="Backup retention (days)" for="m-ret"><input id="m-ret" name="retention" type="number" min="0" max="35" class="input" value={d.BackupRetentionPeriod ?? ''} /></FormField>
+              <FormField label="New master password" for="m-pass" optional><input id="m-pass" name="password" type="password" minlength="8" class="input" autocomplete="new-password" /></FormField>
+              <label class="flex items-center gap-2 sm:col-span-2"><input type="checkbox" class="checkbox" name="multiAz" value="1" checked={!!d.MultiAZ} /> Multi-AZ deployment</label>
+              <div class="sm:col-span-2"><button class="btn btn-primary" type="submit">Apply changes</button></div>
+            </form>
+            <form method="post" class="flex max-w-3xl flex-wrap items-end gap-3 border-t border-line pt-5">
+              <input type="hidden" name="intent" value="snapshot" />
+              <FormField label="Take snapshot" for="snapshotId" class="!mb-0 min-w-[16rem] flex-1"><input id="snapshotId" name="snapshotId" class="input" placeholder={`${id}-snapshot`} required /></FormField>
+              <button class="btn btn-normal" type="submit">Take snapshot</button>
+            </form>
+          </>
+        )}
+
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-1 text-danger">Danger zone</h3>
+          <form method="post" class="mt-3 max-w-xl space-y-3">
+            <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="skipSnapshot" value="1" checked /> Skip the final snapshot</label>
+            <div data-show-when="skipSnapshot:false"><FormField label="Final snapshot name" for="finalSnapshot"><input id="finalSnapshot" name="finalSnapshot" class="input" placeholder={`${id}-final`} /></FormField></div>
+            <button class="btn btn-danger" name="intent" value="delete" data-confirm="The database will be permanently deleted." data-confirm-title={isCluster ? 'Delete DB cluster?' : 'Delete DB instance?'} data-confirm-name={id} data-confirm-type="delete" data-confirm-ok="Delete">Delete {isCluster ? 'cluster' : 'DB instance'}</button>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {tab === 'tags' && (
+      <div class="space-y-5 p-5">
+        <DataTable title="Tags" bare select="multi" id="tags" idKey="Key" nameKey="Key" rows={tags?.data ?? []} error={tags?.error} filter={false}
+          emptyTitle="No tags" emptyText="Tags help you organize and find resources."
+          columns={[{ key: 'Key', label: 'Key' }, { key: 'Value', label: 'Value' }]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="removeTag" data-min="1" data-confirm="The selected tags will be removed." data-confirm-title="Remove tags?" data-confirm-ok="Remove">Remove</button>
+        </DataTable>
+        <form method="post" class="border-t border-line pt-5">
+          <input type="hidden" name="intent" value="addTag" />
+          <div class="grid gap-4 md:grid-cols-[1fr_1fr_auto] md:items-end">
+            <FormField label="Key" for="key" class="!mb-0"><input id="key" name="key" class="input" required /></FormField>
+            <FormField label="Value" for="value" class="!mb-0" optional><input id="value" name="value" class="input" /></FormField>
+            <button class="btn btn-primary mb-[22px]" type="submit">Add tag</button>
+          </div>
+        </form>
+      </div>
+    )}
+  </div>
+</Console>

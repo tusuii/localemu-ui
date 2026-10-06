@@ -6,17 +6,20 @@ import Tabs from '../../../components/Tabs.astro';
 import Details from '../../../components/Details.astro';
 import FormField from '../../../components/FormField.astro';
 import Icon from '../../../components/Icon.astro';
+import Pager from '../../../components/Pager.astro';
 import {
   DescribeTableCommand, DeleteTableCommand, ScanCommand, QueryCommand, DeleteItemCommand,
-  DescribeTimeToLiveCommand, ListTagsOfResourceCommand, type AttributeValue,
+  DescribeTimeToLiveCommand, ListTagsOfResourceCommand,
 } from '@aws-sdk/client-dynamodb';
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
 import { handlePost, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { pageLinks, pageState } from '../../../lib/paging';
 import { UserError, load, soft } from '../../../lib/errors';
 import { bytes, dateTime, num, plural } from '../../../lib/format';
 import { copyable, stateStatus, tagList, badge, raw } from '../../../lib/html';
-import { attrType, cell, decodeKey, encodeKey, keyOf, plain, typedValue, type Item } from '../../../lib/ddb';
+import { FILTER_OPS, PAGE_SIZES, attrType, batchWrite, buildRead, cell, decodeKey, encodeKey, keyOf, pageSizeOf, parseImport, plain, type Item } from '../../../lib/ddb';
 
 const table = Astro.params.table!;
 const ctx = getCtx(Astro.cookies);
@@ -25,11 +28,20 @@ const sp = Astro.url.searchParams;
 const tab = ['items', 'overview', 'indexes', 'settings'].includes(sp.get('tab') ?? '') ? sp.get('tab')! : 'items';
 
 const post = await handlePost(Astro, {
-  delete: async (f) => {
-    const ids = strs(f, 'id');
-    if (!ids.length) throw new UserError('Select at least one item.');
-    for (const id of ids) await ddb.send(new DeleteItemCommand({ TableName: table, Key: decodeKey(id) }));
-    return `Deleted ${plural(ids.length, 'item')}.`;
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'item' }, (id) => ddb.send(new DeleteItemCommand({ TableName: table, Key: decodeKey(id) }))),
+  import: async (f) => {
+    const file = f.get('file');
+    if (!(file instanceof File) || file.size === 0) throw new UserError('Choose a .json or .csv file to import.');
+    if (file.size > 25 * 1024 * 1024) throw new UserError('The file is larger than 25 MB; split it into smaller files.');
+    const d = (await ddb.send(new DescribeTableCommand({ TableName: table }))).Table!;
+    const parsed = parseImport(await file.text(), file.name, d, { format: String(f.get('format') ?? ''), infer: f.get('infer') === '1' });
+    if (!parsed.items.length) throw new UserError(`No importable items found${parsed.invalid.length ? ` (${parsed.invalid.length} invalid: row ${parsed.invalid[0].row} ${parsed.invalid[0].reason})` : ''}.`);
+    const r = await batchWrite(ddb, table, d, parsed.items);
+    const total = parsed.items.length + parsed.invalid.length;
+    const failed = total - r.written;
+    const extra = [r.duplicates ? `${plural(r.duplicates, 'duplicate key', 'duplicate keys')} collapsed` : '', parsed.invalid.length ? `${parsed.invalid.length} invalid rows skipped${parsed.invalid[0] ? ` (e.g. row ${parsed.invalid[0].row}: ${parsed.invalid[0].reason})` : ''}` : '', ...r.errors].filter(Boolean).join('; ');
+    if (!r.written) throw new UserError(`Imported 0 of ${total} items (${failed} failed: ${extra}).`);
+    return { message: failed ? `Imported ${r.written} of ${total} items (${failed} failed: ${extra})` : `Imported ${plural(r.written, 'item')} from ${file.name}.`, detail: !failed && extra ? extra : undefined };
   },
   deleteTable: async () => {
     await ddb.send(new DeleteTableCommand({ TableName: table }));
@@ -43,14 +55,14 @@ if (desc.error && /ResourceNotFound/i.test(desc.error)) return new Response(`Tab
 const t = desc.data?.Table;
 
 // ---- explore items ----
+const state = pageState(Astro.url);
 const mode = sp.get('mode') === 'query' ? 'query' : 'scan';
 const indexName = sp.get('index') ?? '';
-const limit = Math.min(Math.max(Number(sp.get('limit')) || 50, 1), 500);
+const limit = pageSizeOf(sp);
 const indexes = [...(t?.GlobalSecondaryIndexes ?? []), ...(t?.LocalSecondaryIndexes ?? [])];
 const schema = indexName ? indexes.find((i) => i.IndexName === indexName)?.KeySchema : t?.KeySchema;
 const pkName = schema?.find((k) => k.KeyType === 'HASH')?.AttributeName;
 const skName = schema?.find((k) => k.KeyType === 'RANGE')?.AttributeName;
-const next = sp.get('next');
 let rows: { id: string; item: Record<string, unknown> }[] = [];
 let lastKey: Item | undefined;
 let queryError: string | undefined;
@@ -58,28 +70,24 @@ let columns: { key: string; label: string; render: (r: any) => unknown; sort?: (
 
 if (tab === 'items' && t) {
   const run = await load(async () => {
-    const common = { TableName: table, IndexName: indexName || undefined, Limit: limit, ExclusiveStartKey: next ? decodeKey(next) : undefined };
-    if (mode === 'scan') return ddb.send(new ScanCommand(common));
-    const pk = sp.get('pk') ?? '';
-    if (!pkName || pk === '') throw new UserError('Enter a partition key value to run a query.');
-    const names: Record<string, string> = { '#pk': pkName };
-    const values: Record<string, AttributeValue> = { ':pk': typedValue(attrType(t, pkName), pk) };
-    let kce = '#pk = :pk';
-    const skop = sp.get('skop') ?? '';
-    const sk = sp.get('sk') ?? '';
-    if (skName && skop && sk !== '') {
-      const st = attrType(t, skName);
-      names['#sk'] = skName;
-      values[':sk'] = typedValue(st, sk);
-      if (skop === 'between') { values[':sk2'] = typedValue(st, sp.get('sk2') ?? ''); kce += ' AND #sk BETWEEN :sk AND :sk2'; }
-      else if (skop === 'begins_with') kce += ' AND begins_with(#sk, :sk)';
-      else if (['=', '<', '<=', '>', '>='].includes(skop)) kce += ` AND #sk ${skop} :sk`;
+    const { mode: m, input } = buildRead(table, t, sp);
+    const out: Item[] = [];
+    let start = state.token as Item | undefined;
+    let last: Item | undefined;
+    // With a filter expression a page of N evaluated items can hold fewer than N matches: keep reading until the page is full.
+    for (let i = 0; i < (input.FilterExpression ? 30 : 1); i++) {
+      const common = { ...input, Limit: limit - out.length, ExclusiveStartKey: start };
+      const r = m === 'scan' ? await ddb.send(new ScanCommand(common)) : await ddb.send(new QueryCommand(common as never));
+      out.push(...(r.Items ?? []));
+      last = r.LastEvaluatedKey as Item | undefined;
+      if (!last || out.length >= limit) break;
+      start = last;
     }
-    return ddb.send(new QueryCommand({ ...common, KeyConditionExpression: kce, ExpressionAttributeNames: names, ExpressionAttributeValues: values, ScanIndexForward: sp.get('order') !== 'desc' }));
+    return { Items: out, LastEvaluatedKey: last };
   });
   if (run.error) queryError = run.error;
   else {
-    const r = run.data as { Items?: Item[]; LastEvaluatedKey?: Item };
+    const r = run.data!;
     lastKey = r.LastEvaluatedKey;
     rows = (r.Items ?? []).map((it) => ({ id: encodeKey(keyOf(it, t)), item: plain(it) }));
     const keys = (t.KeySchema ?? []).map((k) => k.AttributeName!);
@@ -93,6 +101,12 @@ if (tab === 'items' && t) {
     }));
   }
 }
+const links = pageLinks(Astro.url, state, lastKey);
+const exportBase = (() => {
+  const u = new URLSearchParams(sp);
+  for (const k of ['pt', 'ph', 'tab', 'limit']) u.delete(k);
+  return (extra: string) => `/dynamodb/${encodeURIComponent(table)}/export?${u}${u.size ? '&' : ''}${extra}`;
+})();
 
 const ttl = tab === 'overview' ? await soft(() => ddb.send(new DescribeTimeToLiveCommand({ TableName: table }))) : undefined;
 const tags = tab === 'overview' && t?.TableArn ? await soft(() => ddb.send(new ListTagsOfResourceCommand({ ResourceArn: t.TableArn }))) : undefined;
@@ -138,17 +152,32 @@ const skTypeLabel = skName && t ? attrType(t, skName) : '';
             )}
             <FormField label="Sort order" for="order"><select id="order" name="order" class="select"><option value="asc">Ascending</option><option value="desc" selected={sp.get('order') === 'desc'}>Descending</option></select></FormField>
           </div>
+          <details class="rounded-lg border border-line px-4 py-3" open={!!sp.get('fa')}>
+            <summary class="cursor-pointer font-bold">Filters <span class="font-normal text-muted">(optional, applied after reading)</span></summary>
+            <div class="mt-3 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <FormField label="Attribute name" for="fa"><input id="fa" name="fa" class="input" value={sp.get('fa') ?? ''} placeholder="e.g. status" /></FormField>
+              <FormField label="Condition" for="fop"><select id="fop" name="fop" class="select">{FILTER_OPS.map((o) => <option value={o} selected={(sp.get('fop') ?? '=') === o}>{o}</option>)}</select></FormField>
+              <FormField label="Value" for="fv"><input id="fv" name="fv" class="input" value={sp.get('fv') ?? ''} /></FormField>
+              <FormField label="Type" for="ft"><select id="ft" name="ft" class="select">{[['auto', 'Auto (number / boolean / string)'], ['S', 'String'], ['N', 'Number'], ['BOOL', 'Boolean']].map(([v, l]) => <option value={v} selected={(sp.get('ft') ?? 'auto') === v}>{l}</option>)}</select></FormField>
+            </div>
+          </details>
           <div class="flex flex-wrap items-end gap-4">
-            <FormField label="Page size" for="limit" class="!mb-0"><input id="limit" name="limit" type="number" min="1" max="500" class="input !w-28" value={limit} /></FormField>
+            <FormField label="Page size" for="limit" class="!mb-0"><select id="limit" name="limit" class="select !w-28">{PAGE_SIZES.map((n) => <option value={n} selected={n === limit}>{n} items</option>)}{!(PAGE_SIZES as readonly number[]).includes(limit) && <option value={limit} selected>{limit} items</option>}</select></FormField>
             <button class="btn btn-primary" type="submit"><Icon name="play" size={14} /> Run</button>
             <a class="btn btn-normal" href={`/dynamodb/${encodeURIComponent(table)}`}>Reset</a>
+            <span class="ml-auto flex flex-wrap items-center gap-2 text-[13px]" data-export-links>
+              <span class="text-muted">Export {mode === 'query' || sp.get('fa') ? 'matching' : 'all'} items:</span>
+              <a class="btn btn-normal btn-sm" href={exportBase('format=json')} data-export="json" download>JSON</a>
+              <a class="btn btn-normal btn-sm" href={exportBase('format=json&typed=1')} data-export="ddb-json" download>DynamoDB JSON</a>
+              <a class="btn btn-normal btn-sm" href={exportBase('format=csv')} data-export="csv" download>CSV</a>
+            </span>
           </div>
         </form>
 
         {queryError && <div class="px-5 pt-4"><div class="flash flash-error"><Icon name="circle-x" size={20} /><div><div class="font-bold">Couldn't run the {mode}</div><div class="text-muted">{queryError}</div></div></div></div>}
 
         <DataTable
-          title={mode === 'query' ? 'Items returned' : 'Items scanned'} rows={rows} bare select="multi" idKey="id" pageSize={25} id="items"
+          title={mode === 'query' ? 'Items returned' : 'Items scanned'} rows={rows} bare select="multi" idKey="id" pageSize={Math.max(limit, 25)} id="items"
           columns={columns.length ? columns : [{ key: 'id', label: 'Item', render: () => '' }]}
           filter="Filter returned items" refresh={false}
           emptyTitle="No items" emptyText={queryError ? 'Fix the query above and run it again.' : mode === 'scan' ? 'This table has no items yet.' : 'The query returned no items.'}
@@ -159,8 +188,18 @@ const skTypeLabel = skName && t ? attrType(t, skName) : '';
             <a class="btn btn-normal" href={`/dynamodb/${encodeURIComponent(table)}/item`}>Create item</a>
           </Fragment>
         </DataTable>
-        {lastKey && <div class="flex items-center justify-between border-t border-line px-5 py-3"><span class="text-muted">More items are available.</span><a class="btn btn-normal btn-sm" href={qs({ next: encodeKey(lastKey) })}>Next page →</a></div>}
-        {next && <div class="px-5 pb-3"><a class="text-[13px]" href={qs({ next: undefined })}>← Back to first page</a></div>}
+        {!queryError && <Pager links={links} count={rows.length} />}
+
+        <details class="border-t border-line px-5 py-3" open={post.intent === 'import' && !!post.error} data-import>
+          <summary class="cursor-pointer font-bold"><Icon name="upload" size={14} /> Import items</summary>
+          <form method="post" enctype="multipart/form-data" class="mt-3 flex flex-wrap items-end gap-4">
+            <input type="hidden" name="intent" value="import" />
+            <FormField label="File" for="import-file" hint="JSON array (plain or DynamoDB JSON items, or JSON Lines) or CSV with a header row of attribute names. Key attributes are required." class="min-w-[280px] flex-1 !mb-0"><input id="import-file" type="file" name="file" accept=".json,.jsonl,.csv,.txt,application/json,text/csv" class="input !py-1.5" required /></FormField>
+            <FormField label="Format" for="import-format" class="!mb-0"><select id="import-format" name="format" class="select !w-40"><option value="">Auto-detect</option><option value="json">JSON</option><option value="csv">CSV</option></select></FormField>
+            <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="infer" value="1" checked /> Infer number / boolean types in CSV</label>
+            <button class="btn btn-normal" type="submit"><Icon name="upload" size={16} /> Import</button>
+          </form>
+        </details>
       </div>
     )}
 

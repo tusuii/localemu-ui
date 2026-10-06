@@ -12,6 +12,7 @@ import {
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, intOf, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { load } from '../../lib/errors';
 import { bytes, dateTime, plural, shortDateTime } from '../../lib/format';
 
@@ -35,7 +36,7 @@ const post = await handlePost(Astro, {
     if (d) await logs.send(new PutRetentionPolicyCommand({ logGroupName: group, retentionInDays: d })); else await logs.send(new DeleteRetentionPolicyCommand({ logGroupName: group }));
     return 'Retention updated.';
   },
-  deleteStreams: async (f) => { const ids = strs(f, 'id'); for (const s of ids) await logs.send(new DeleteLogStreamCommand({ logGroupName: group, logStreamName: s })); return { message: `Deleted ${plural(ids.length, 'log stream')}.`, redirect: here('streams') }; },
+  deleteStreams: async (f) => ({ ...(await bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'log stream' }, (s) => logs.send(new DeleteLogStreamCommand({ logGroupName: group, logStreamName: s })))), redirect: here('streams') }),
   delete: async () => { await logs.send(new DeleteLogGroupCommand({ logGroupName: group })); return { message: `Deleted log group ${group}.`, redirect: '/logs' }; },
 });
 if (post.response) return post.response;
