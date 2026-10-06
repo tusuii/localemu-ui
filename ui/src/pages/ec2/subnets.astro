@@ -8,6 +8,7 @@ import { DescribeSubnetsCommand, DescribeVpcsCommand, CreateSubnetCommand, Delet
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { plural } from '../../lib/format';
 import { nameOf } from '../../lib/ec2';
@@ -20,7 +21,7 @@ const post = await handlePost(Astro, {
     const r = await ec2.send(new CreateSubnetCommand({ VpcId: required(f, 'vpc', 'VPC'), CidrBlock: required(f, 'cidr', 'IPv4 CIDR'), AvailabilityZone: str(f, 'az') || undefined, TagSpecifications: str(f, 'name') ? [{ ResourceType: 'subnet', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined }));
     return `Created subnet ${r.Subnet?.SubnetId}.`;
   },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one subnet.'); for (const s of ids) await ec2.send(new DeleteSubnetCommand({ SubnetId: s })); return `Deleted ${plural(ids.length, 'subnet')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'subnet' }, (s) => ec2.send(new DeleteSubnetCommand({ SubnetId: s }))),
 });
 if (post.response) return post.response;
 const [res, vpcs] = await Promise.all([

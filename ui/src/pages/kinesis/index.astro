@@ -7,6 +7,7 @@ import { ListStreamsCommand, DescribeStreamSummaryCommand, CreateStreamCommand, 
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, intOf, required, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { stateStatus } from '../../lib/html';
@@ -15,7 +16,7 @@ const ctx = getCtx(Astro.cookies);
 const k = aws.kinesis(ctx);
 const post = await handlePost(Astro, {
   create: async (f) => { const n = required(f, 'name', 'Stream name'); await k.send(new CreateStreamCommand({ StreamName: n, ShardCount: intOf(f, 'shards', 'Shard count') ?? 1 })); return { message: `Stream ${n} created.`, redirect: `/kinesis/${encodeURIComponent(n)}` }; },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one stream.'); for (const s of ids) await k.send(new DeleteStreamCommand({ StreamName: s, EnforceConsumerDeletion: true })); return `Deleted ${plural(ids.length, 'stream')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'stream' }, (s) => k.send(new DeleteStreamCommand({ StreamName: s, EnforceConsumerDeletion: true }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => {

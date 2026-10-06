@@ -7,6 +7,7 @@ import { DescribeStacksCommand, DeleteStackCommand } from '@aws-sdk/client-cloud
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { stateStatus } from '../../lib/html';
@@ -14,7 +15,7 @@ import { stateStatus } from '../../lib/html';
 const ctx = getCtx(Astro.cookies);
 const cfn = aws.cfn(ctx);
 const post = await handlePost(Astro, {
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one stack.'); for (const s of ids) await cfn.send(new DeleteStackCommand({ StackName: s })); return `Deleting ${plural(ids.length, 'stack')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleting', noun: 'stack' }, (s) => cfn.send(new DeleteStackCommand({ StackName: s }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => {

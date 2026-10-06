@@ -6,6 +6,7 @@ import { DescribeSnapshotsCommand, DeleteSnapshotCommand } from '@aws-sdk/client
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { stateStatus } from '../../lib/html';
@@ -13,7 +14,7 @@ import { stateStatus } from '../../lib/html';
 const ctx = getCtx(Astro.cookies);
 const ec2 = aws.ec2(ctx);
 const post = await handlePost(Astro, {
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one snapshot.'); for (const s of ids) await ec2.send(new DeleteSnapshotCommand({ SnapshotId: s })); return `Deleted ${plural(ids.length, 'snapshot')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'snapshot' }, (s) => ec2.send(new DeleteSnapshotCommand({ SnapshotId: s }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => ((await ec2.send(new DescribeSnapshotsCommand({ OwnerIds: [ctx.account] }))).Snapshots ?? []).map((s) => ({ id: s.SnapshotId, volume: s.VolumeId, size: s.VolumeSize, state: s.State, started: s.StartTime, description: s.Description })));

@@ -7,6 +7,7 @@ import { DescribeInternetGatewaysCommand, DescribeVpcsCommand, CreateInternetGat
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { plural } from '../../lib/format';
 import { nameOf } from '../../lib/ec2';
@@ -19,7 +20,7 @@ const post = await handlePost(Astro, {
   create: async (f) => { const r = await ec2.send(new CreateInternetGatewayCommand({ TagSpecifications: str(f, 'name') ? [{ ResourceType: 'internet-gateway', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined })); return `Created internet gateway ${r.InternetGateway?.InternetGatewayId}.`; },
   attach: async (f) => { await ec2.send(new AttachInternetGatewayCommand({ InternetGatewayId: one(f), VpcId: required(f, 'vpc', 'VPC') })); return 'Internet gateway attached.'; },
   detach: async (f) => { const id = one(f); const d = (await ec2.send(new DescribeInternetGatewaysCommand({ InternetGatewayIds: [id] }))).InternetGateways?.[0]; const vpc = d?.Attachments?.[0]?.VpcId; if (!vpc) throw new UserError('That gateway is not attached.'); await ec2.send(new DetachInternetGatewayCommand({ InternetGatewayId: id, VpcId: vpc })); return 'Internet gateway detached.'; },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one internet gateway.'); for (const g of ids) await ec2.send(new DeleteInternetGatewayCommand({ InternetGatewayId: g })); return `Deleted ${plural(ids.length, 'internet gateway')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'internet gateway' }, (g) => ec2.send(new DeleteInternetGatewayCommand({ InternetGatewayId: g }))),
 });
 if (post.response) return post.response;
 const [res, vpcs] = await Promise.all([

@@ -7,6 +7,7 @@ import { DescribeAddressesCommand, AllocateAddressCommand, ReleaseAddressCommand
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { plural } from '../../lib/format';
 import { nameOf } from '../../lib/ec2';
@@ -15,7 +16,7 @@ const ctx = getCtx(Astro.cookies);
 const ec2 = aws.ec2(ctx);
 const post = await handlePost(Astro, {
   allocate: async () => { const r = await ec2.send(new AllocateAddressCommand({ Domain: 'vpc' })); return `Allocated Elastic IP ${r.PublicIp}.`; },
-  release: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one address.'); for (const a of ids) await ec2.send(new ReleaseAddressCommand({ AllocationId: a })); return `Released ${plural(ids.length, 'address', 'addresses')}.`; },
+  release: async (f) => bulk(strs(f, 'id'), { verb: 'Released', noun: 'address', nouns: 'addresses' }, (a) => ec2.send(new ReleaseAddressCommand({ AllocationId: a }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => ((await ec2.send(new DescribeAddressesCommand({}))).Addresses ?? []).map((a) => ({ id: a.AllocationId, name: nameOf(a.Tags) || '-', ip: a.PublicIp, instance: a.InstanceId ?? '-', private: a.PrivateIpAddress ?? '-', assoc: a.AssociationId ?? '-' })));

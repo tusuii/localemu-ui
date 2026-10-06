@@ -7,6 +7,7 @@ import { ListStateMachinesCommand, DeleteStateMachineCommand } from '@aws-sdk/cl
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { badge } from '../../lib/html';
@@ -14,7 +15,7 @@ import { badge } from '../../lib/html';
 const ctx = getCtx(Astro.cookies);
 const sfn = aws.sfn(ctx);
 const post = await handlePost(Astro, {
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one state machine.'); for (const a of ids) await sfn.send(new DeleteStateMachineCommand({ stateMachineArn: a })); return `Deleted ${plural(ids.length, 'state machine')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'state machine' }, (a) => sfn.send(new DeleteStateMachineCommand({ stateMachineArn: a }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => {

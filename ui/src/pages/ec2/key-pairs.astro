@@ -10,6 +10,7 @@ import { DescribeKeyPairsCommand, CreateKeyPairCommand, DeleteKeyPairCommand, Im
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { mono } from '../../lib/html';
@@ -23,7 +24,7 @@ const post = await handlePost(Astro, {
     return { stay: true, message: `Key pair "${name}" created.`, data: { name, material: r.KeyMaterial, fingerprint: r.KeyFingerprint } };
   },
   import: async (f) => { await ec2.send(new ImportKeyPairCommand({ KeyName: required(f, 'name', 'Key pair name'), PublicKeyMaterial: Buffer.from(required(f, 'pub', 'Public key')) })); return `Imported key pair "${str(f, 'name')}".`; },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one key pair.'); for (const k of ids) await ec2.send(new DeleteKeyPairCommand({ KeyName: k })); return `Deleted ${plural(ids.length, 'key pair')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'key pair' }, (k) => ec2.send(new DeleteKeyPairCommand({ KeyName: k }))),
 });
 if (post.response) return post.response;
 const made = post.result?.data as { name: string; material?: string; fingerprint?: string } | undefined;

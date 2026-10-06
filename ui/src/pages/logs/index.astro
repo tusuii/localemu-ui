@@ -7,6 +7,7 @@ import { DescribeLogGroupsCommand, CreateLogGroupCommand, DeleteLogGroupCommand 
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { bytes, dateTime, plural } from '../../lib/format';
 
@@ -14,7 +15,7 @@ const ctx = getCtx(Astro.cookies);
 const logs = aws.logs(ctx);
 const post = await handlePost(Astro, {
   create: async (f) => { const n = required(f, 'name', 'Log group name'); await logs.send(new CreateLogGroupCommand({ logGroupName: n })); return { message: `Log group ${n} created.`, redirect: `/logs/group?group=${encodeURIComponent(n)}` }; },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one log group.'); for (const g of ids) await logs.send(new DeleteLogGroupCommand({ logGroupName: g })); return `Deleted ${plural(ids.length, 'log group')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'log group' }, (g) => logs.send(new DeleteLogGroupCommand({ logGroupName: g }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => {

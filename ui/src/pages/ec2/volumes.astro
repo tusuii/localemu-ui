@@ -8,6 +8,7 @@ import { DescribeVolumesCommand, CreateVolumeCommand, DeleteVolumeCommand, Creat
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, intOf, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { dateTime, plural } from '../../lib/format';
 import { nameOf } from '../../lib/ec2';
@@ -21,8 +22,8 @@ const post = await handlePost(Astro, {
       TagSpecifications: str(f, 'name') ? [{ ResourceType: 'volume', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined }));
     return `Created volume ${r.VolumeId}.`;
   },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one volume.'); for (const v of ids) await ec2.send(new DeleteVolumeCommand({ VolumeId: v })); return `Deleted ${plural(ids.length, 'volume')}.`; },
-  snapshot: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one volume.'); for (const v of ids) await ec2.send(new CreateSnapshotCommand({ VolumeId: v })); return `Created ${plural(ids.length, 'snapshot')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'volume' }, (v) => ec2.send(new DeleteVolumeCommand({ VolumeId: v }))),
+  snapshot: async (f) => bulk(strs(f, 'id'), { verb: 'Created', noun: 'volume' }, (v) => ec2.send(new CreateSnapshotCommand({ VolumeId: v }))),
 });
 if (post.response) return post.response;
 const [res, azs] = await Promise.all([

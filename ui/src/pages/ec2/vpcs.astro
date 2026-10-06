@@ -8,6 +8,7 @@ import { DescribeVpcsCommand, CreateVpcCommand, DeleteVpcCommand } from '@aws-sd
 import { aws } from '../../lib/aws';
 import { getCtx } from '../../lib/context';
 import { handlePost, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
 import { UserError, load } from '../../lib/errors';
 import { plural } from '../../lib/format';
 import { nameOf } from '../../lib/ec2';
@@ -20,7 +21,7 @@ const post = await handlePost(Astro, {
     const r = await ec2.send(new CreateVpcCommand({ CidrBlock: required(f, 'cidr', 'IPv4 CIDR'), TagSpecifications: str(f, 'name') ? [{ ResourceType: 'vpc', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined }));
     return `Created VPC ${r.Vpc?.VpcId}.`;
   },
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one VPC.'); for (const v of ids) await ec2.send(new DeleteVpcCommand({ VpcId: v })); return `Deleted ${plural(ids.length, 'VPC')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'VPC' }, (v) => ec2.send(new DeleteVpcCommand({ VpcId: v }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => ((await ec2.send(new DescribeVpcsCommand({}))).Vpcs ?? []).map((v) => ({ id: v.VpcId, name: nameOf(v.Tags) || '-', state: v.State, cidr: v.CidrBlock, dhcp: v.DhcpOptionsId, isDefault: v.IsDefault, tenancy: v.InstanceTenancy })));

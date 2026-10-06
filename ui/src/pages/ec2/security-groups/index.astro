@@ -7,13 +7,14 @@ import { DescribeSecurityGroupsCommand, DeleteSecurityGroupCommand } from '@aws-
 import { aws } from '../../../lib/aws';
 import { getCtx } from '../../../lib/context';
 import { handlePost, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
 import { UserError, load } from '../../../lib/errors';
 import { plural } from '../../../lib/format';
 
 const ctx = getCtx(Astro.cookies);
 const ec2 = aws.ec2(ctx);
 const post = await handlePost(Astro, {
-  delete: async (f) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError('Select at least one security group.'); for (const g of ids) await ec2.send(new DeleteSecurityGroupCommand({ GroupId: g })); return `Deleted ${plural(ids.length, 'security group')}.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'security group' }, (g) => ec2.send(new DeleteSecurityGroupCommand({ GroupId: g }))),
 });
 if (post.response) return post.response;
 const res = await load(async () => ((await ec2.send(new DescribeSecurityGroupsCommand({}))).SecurityGroups ?? []).map((g) => ({ id: g.GroupId, name: g.GroupName, vpc: g.VpcId, description: g.Description, inbound: g.IpPermissions?.length ?? 0, outbound: g.IpPermissionsEgress?.length ?? 0 })));
