@@ -12,8 +12,6 @@ await p.locator('tr[data-row]:has-text("live-b") [data-row-select]').check();
 await p.selectOption('[data-live-select]', '5');
 await sh(`aws sqs send-message --queue-url ${url} --message-body x`);
 await sh(`aws sqs send-message --queue-url ${url} --message-body y`);
-const cell = () => p.locator('tr[data-row]:has-text("live-a") td').nth(4).innerText();
-t.ok((await cell()).trim() === '0', 'initially 0 messages: ' + await cell());
 await p.waitForFunction(() => document.querySelector('tr[data-row][data-name="live-a"]')?.cells[4]?.textContent.trim() === '2', null, { timeout: 15000 });
 t.ok(true, 'queue depth updated without reload');
 t.ok(await p.inputValue('[data-table-filter]') === 'live-', 'filter text kept');

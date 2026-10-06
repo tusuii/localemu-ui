@@ -11,7 +11,7 @@ const dark = { id: 'dark', viewport: 'desktop', theme: 'dark' };
 const mobile = { id: 'mobile', viewport: 'mobile', theme: 'light' };
 
 export const SHOTS = [
-  { name: 'home', path: '/', variants: [light, dark], // home-mobile disabled: content overflows the 390px viewport (renders nondeterministically)
+  { name: 'home', path: '/', variants: [light, dark, mobile],
     async before(page) { await maskVolatileHome(page); } },
   { name: 'services-menu', path: '/', variants: [light, dark],
     async before(page) { await page.click('[data-menu-toggle="menu-services"]'); await page.waitForSelector('#menu-services', { state: 'visible' }); await maskVolatileHome(page); } },
