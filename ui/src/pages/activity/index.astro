@@ -35,7 +35,6 @@ const rows = all.filter((e) =>
     <label class="flex items-center gap-2 pb-1.5"><input type="checkbox" class="checkbox" name="writes" value="1" checked={hideReads} /> Hide read-only</label>
     <label class="flex items-center gap-2 pb-1.5" title="Reads issued by this console while rendering pages"><input type="checkbox" class="checkbox" name="console" value="1" checked={showConsole} /> Include console reads</label>
     <button class="btn btn-primary" type="submit">Apply</button>
-    <label class="ml-auto flex items-center gap-2 pb-1.5 text-muted" data-autorefresh data-interval="5000"><input type="checkbox" class="checkbox" /> Auto refresh</label>
   </form>
 
   <DataTable

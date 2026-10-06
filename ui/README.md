@@ -66,9 +66,48 @@ If LocalEmu is not on `http://localhost:4566`, set `LOCALEMU_ENDPOINT` (see belo
 | **CloudTrail** | Event history of every API call LocalEmu served, with request details |
 | **Everything else** | All 130+ services get a tile in the Services menu; those without a purpose-built console open a generic read-only resource browser with their emulation tier (live / metadata / stub) and a getting-started command |
 
-Handy details: **Alt+S** searches services, **/** focuses the table filter, the top bar switches
+Handy details: **Alt+S** searches services and resources, **Alt+C** opens CloudShell, **?** shows all shortcuts, **/** focuses the table filter, the top bar switches
 **region** and **account** (LocalEmu keeps separate state per account and region, so any 12-digit
 number is a fresh account), and the moon icon toggles dark mode.
+
+## Console features
+
+* **Auto-refresh.** Every list page gets an *Auto-refresh* selector (Off / 5s / 15s / 30s, remembered per page in
+  `localStorage`). The page is re-fetched in the background and only the table rows, the count and `[data-live]`
+  regions are swapped, so selection, filter text, sort, page and scroll survive. It pauses while the tab is hidden or a
+  dialog is open. Opt a table out with `<DataTable live={false}>` (or `data-no-live` on the `<form data-table>`);
+  mark other stat values with `data-live="key"`. Implemented generically in `src/scripts/live.ts`.
+* **CloudShell** (terminal icon in the top bar, **Alt+C**). A bottom-docked, resizable, collapsible panel whose open
+  state and height persist. Type `aws s3 ls`, `aws sqs list-queues`, `aws sqs send-message --queue-url X --message-body hi`,
+  `aws dynamodb list-tables --region us-east-1`, `aws <service> help`, `aws <service> <op> help`; Tab completes services,
+  operations and flags, Up/Down recalls history, `clear` clears. `POST /api/shell` maps `aws <service> <operation>` onto
+  the `<Operation>Command` of the matching `@aws-sdk/client-*` package (registry in `src/lib/shell.ts`), converts
+  `--kebab-flags` to input members (JSON, `Key=Value` shorthand, repeated list values, `--cli-input-json`), and prints
+  JSON (`--output text`, a JMESPath subset in `--query`). `aws s3 ls/mb/rb/rm/cp/mv` are built in (`cp` between buckets,
+  `cp s3://b/k -` prints an object, `cp - s3://b/k --body "text"` uploads inline text).
+  *Security:* SDK calls only, always to the configured LocalEmu endpoint (a different `--endpoint-url` is rejected), with the
+  account and region chosen in the top bar; no shell, no process spawning, no filesystem (`file://` values are refused);
+  the endpoint requires a same-origin JSON request with the `X-LEMU-Console` header. Limits: first page of results (no
+  auto-pagination), no streaming bodies from/to disk. Add new SDK packages to the registry in `src/lib/shell.ts`
+  (`tests/e2e/shell.mjs` fails when a `client-*` dependency is missing).
+* **Global search** (**Alt+S**). Typing 2+ characters searches services and resources across ~30 resource types (S3, DynamoDB,
+  SQS, SNS, Lambda, Secrets, SSM, KMS aliases, IAM, EC2/VPC/SG, log groups, EventBridge, Step Functions, Kinesis,
+  CloudFormation, Route 53, RDS, ECS, ECR, Cognito, ACM, ELB, Glue) via `GET /api/search?q=`, grouped in the dropdown, with
+  a full `/search?q=` page. Listings are fetched in parallel with timeouts and cached for a few seconds per account and
+  region; a slow or failing service is reported without blocking the rest.
+* **Show CLI.** Put `data-cli="aws sqs create-queue --queue-name {name}"` on a `<form>` (or a button inside one) and a
+  *Show CLI* popover with *Copy as CLI* appears next to the submit button, filled live from the form fields. `{field}` is
+  the value (or `<field>` while empty); `{field|--flag}` adds `--flag value` only when non-empty (a flag ending in `=` is
+  glued to the value). `--endpoint-url` (from `<meta name="lemu-endpoint">`) and `--region` are appended. The main create
+  forms (S3, DynamoDB, SQS, SNS, Secrets Manager, SSM, KMS, IAM users and roles, EventBridge bus and rule, Kinesis,
+  CloudFormation, Lambda) are annotated.
+* **Keyboard and accessibility.** `?` lists the shortcuts: **Alt+S** search, **/** table filter, **Alt+C** CloudShell,
+  `g` then `h` / `s` / `a` / `3` / `q` / `d` / `l` / `e` / `i` to jump around, **Esc** closes menus and dialogs. Dialogs are
+  modal with labels and return focus to the opener; menus have `aria-expanded`/`aria-controls`, `menu`/`menuitem` roles,
+  arrow-key navigation and return focus on Esc; tables have captions, keyboard-sortable headers with `aria-sort` and an
+  announced filter-result count; there is a skip link, landmarks and visible focus rings. `node scripts/contrast.mjs`
+  checks the design tokens of both themes against WCAG AA, and `tests/e2e/a11y.mjs` runs axe-core (devDependency) on
+  representative pages in light and dark.
 
 ## Configuration
 

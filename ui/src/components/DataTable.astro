@@ -32,6 +32,8 @@ interface Props {
   error?: string | null;
   action?: string;
   refresh?: boolean;
+  /** Set false to opt this table out of the generic Auto-refresh control. */
+  live?: boolean;
   id?: string;
   /** Render without the card chrome (for use inside another card). */
   bare?: boolean;
@@ -40,13 +42,13 @@ interface Props {
 const {
   title, columns, rows, count, description, idKey = 'id', nameKey, select = false, pageSize = 20,
   filter = 'Find', emptyTitle = 'No resources', emptyText = 'There is nothing to display.', error = null,
-  action = '', refresh = true, id = 'table', bare = false,
+  action = '', refresh = true, live = true, id = 'table', bare = false,
 } = Astro.props;
 
 const cell = (v: unknown) => (v === undefined || v === null || v === '' ? '-' : text(v));
 const hasEmptySlot = Astro.slots.has('empty');
 ---
-<form method="post" action={action || undefined} data-table={id} data-page-size={pageSize} class:list={[!bare && 'card']} autocomplete="off">
+<form method="post" action={action || undefined} data-table={id} data-no-live={live === false ? '' : undefined} data-page-size={pageSize} class:list={[!bare && 'card']} autocomplete="off">
   <header class="card-header">
     <div class="min-w-0">
       <h2 class="card-title">{title} <span class="count">({count ?? rows.length})</span></h2>
