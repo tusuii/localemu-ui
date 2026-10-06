@@ -38,7 +38,7 @@ const types = [['S', 'String'], ['N', 'Number'], ['B', 'Binary']];
 ---
 <Console title="Create table" crumbs={[{ label: 'Tables', href: '/dynamodb' }, { label: 'Create table' }]} error={post.error}>
   <PageHeader title="Create table" />
-  <form method="post" class="max-w-3xl space-y-4">
+  <form data-cli="aws dynamodb create-table --table-name {name} --attribute-definitions AttributeName={pk},AttributeType={pkType} --key-schema AttributeName={pk},KeyType=HASH --billing-mode {billing}" method="post" class="max-w-3xl space-y-4">
     <input type="hidden" name="intent" value="create" />
     <Card title="Table details" description="DynamoDB is schemaless: only the primary key is defined up front.">
       <FormField label="Table name" for="name" hint="3-255 characters. Letters, numbers, underscores, hyphens and dots."><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>

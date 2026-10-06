@@ -62,7 +62,7 @@ const v = post.values;
     </Fragment>
   </DataTable>
   <Card class="mt-4" title="Create rule" description={`On event bus "${bus}".`}>
-    <form method="post" class="space-y-1"><input type="hidden" name="intent" value="create" />
+    <form data-cli="aws events put-rule --name {name} {pattern|--event-pattern} {schedule|--schedule-expression}" method="post" class="space-y-1"><input type="hidden" name="intent" value="create" />
       <div class="grid gap-4 sm:grid-cols-2"><FormField label="Name" for="name"><input id="name" name="name" class="input" required autocomplete="off" value={v.name ?? ''} /></FormField><FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField></div>
       <div class="mb-3 flex gap-6"><label class="flex items-center gap-2"><input type="radio" class="radio" name="kind" value="pattern" checked={(v.kind ?? 'pattern') === 'pattern'} /> Event pattern</label><label class="flex items-center gap-2"><input type="radio" class="radio" name="kind" value="schedule" checked={v.kind === 'schedule'} /> Schedule</label></div>
       <div data-show-when="kind:pattern"><textarea name="pattern" class="textarea code-area" rows="7" data-code data-json spellcheck="false">{v.pattern ?? '{\n  "source": ["my.app"],\n  "detail-type": ["order.created"]\n}'}</textarea></div>

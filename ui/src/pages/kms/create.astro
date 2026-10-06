@@ -33,7 +33,7 @@ const specs = [
 ---
 <Console title="Create key" crumbs={[{ label: 'Customer managed keys', href: '/kms' }, { label: 'Create key' }]} error={post.error}>
   <PageHeader title="Create key" />
-  <form method="post" class="max-w-3xl space-y-4">
+  <form data-cli="aws kms create-key --key-spec {spec} --key-usage {usage} {description|--description}" method="post" class="max-w-3xl space-y-4">
     <input type="hidden" name="intent" value="create" />
     <Card title="Configure key">
       <div class="grid gap-4 sm:grid-cols-2">

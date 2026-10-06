@@ -48,7 +48,7 @@ const rt0 = runtimeDef(v.runtime ?? 'python3.13')!;
 ---
 <Console title="Create function" crumbs={[{ label: 'Functions', href: '/lambda' }, { label: 'Create function' }]} error={post.error}>
   <PageHeader title="Create function" description="Author a function with inline code, or upload a deployment package." />
-  <form method="post" enctype="multipart/form-data" class="max-w-4xl space-y-4">
+  <form data-cli="aws lambda create-function --function-name {name} --runtime {runtime} --handler {handler} --role {role} --zip-file fileb://function.zip --memory-size {memory} --timeout {timeout}" method="post" enctype="multipart/form-data" class="max-w-4xl space-y-4">
     <input type="hidden" name="intent" value="create" />
     <Card title="Basic information">
       <FormField label="Function name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="64" placeholder="my-function" value={v.name ?? ''} /></FormField>

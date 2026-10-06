@@ -26,7 +26,7 @@ const v = post.values;
 ---
 <Console title="Store a new secret" crumbs={[{ label: 'Secrets', href: '/secretsmanager' }, { label: 'Store a new secret' }]} error={post.error}>
   <PageHeader title="Store a new secret" />
-  <form method="post" class="max-w-3xl space-y-4">
+  <form data-cli="aws secretsmanager create-secret --name {name} --secret-string {value} {description|--description}" method="post" class="max-w-3xl space-y-4">
     <input type="hidden" name="intent" value="create" />
     <Card title="Secret">
       <FormField label="Secret name" for="name" hint="Use / to organise, e.g. prod/db/password."><input id="name" name="name" class="input font-mono" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>

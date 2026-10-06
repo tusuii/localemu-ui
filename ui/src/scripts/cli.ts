@@ -3,6 +3,7 @@
  *   data-cli="aws sqs create-queue --queue-name {queueName}"
  *   {field}            value of the form control named/ided `field` (or <field> while empty)
  *   {field|--flag}     `--flag value`, only when the field is non-empty / checked
+ *                      (a flag ending in `=`, like `--attributes DelaySeconds=`, is glued to the value)
  * The LocalEmu endpoint (from <meta name="lemu-endpoint">) and region are appended.
  */
 import { $, $$, copyText } from './util';
@@ -23,7 +24,7 @@ function fieldValue(form: HTMLFormElement | null, name: string): string {
 export function fillTemplate(tpl: string, form: HTMLFormElement | null): string {
   const body = tpl.replace(/\{([\w.-]+)(?:\|([^}]*))?\}/g, (_m, name: string, flag?: string) => {
     const v = fieldValue(form, name);
-    if (flag !== undefined) return v ? `${flag} ${quote(v)}`.trim() : '';
+    if (flag !== undefined) return v ? (flag.endsWith('=') ? flag + quote(v) : `${flag} ${quote(v)}`.trim()) : '';
     return v ? quote(v) : `<${name}>`;
   }).replace(/[ \t]+/g, ' ').replace(/ ?\n ?/g, '\n').trim();
   const endpoint = document.querySelector<HTMLMetaElement>('meta[name="lemu-endpoint"]')?.content ?? 'http://localhost:4566';
@@ -50,8 +51,9 @@ export function initCli() {
     const upd = () => { pre.textContent = fillTemplate(tpl, form); };
     btn.addEventListener('click', () => { upd(); const o = box.hidden; box.hidden = !o; btn.setAttribute('aria-expanded', String(o)); });
     $('[data-cli-copy]', wrap)!.addEventListener('click', async (e) => {
+      const b = e.currentTarget as HTMLElement;
       upd(); await copyText(pre.textContent ?? '');
-      const b = e.currentTarget as HTMLElement; const t = b.textContent; b.textContent = 'Copied'; setTimeout(() => { b.textContent = t; }, 1200);
+      const t = b.textContent; b.textContent = 'Copied'; setTimeout(() => { b.textContent = t; }, 1200);
     });
     form?.addEventListener('input', () => { if (!box.hidden) upd(); });
     form?.addEventListener('change', () => { if (!box.hidden) upd(); });

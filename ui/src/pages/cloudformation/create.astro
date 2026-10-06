@@ -31,7 +31,7 @@ const validated = post.result?.data ? (post.result.data as { description?: strin
 ---
 <Console title="Create stack" crumbs={[{ label: 'Stacks', href: '/cloudformation' }, { label: 'Create stack' }]} error={post.error}>
   <PageHeader title="Create stack" description="Paste, upload or link a JSON or YAML template." />
-  <form method="post" enctype="multipart/form-data" class="max-w-4xl space-y-4"><input type="hidden" name="intent" value="create" />
+  <form data-cli="aws cloudformation create-stack --stack-name {name} --template-body file://template.yaml" method="post" enctype="multipart/form-data" class="max-w-4xl space-y-4"><input type="hidden" name="intent" value="create" />
     <Card title="Stack"><FormField label="Stack name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" pattern="[A-Za-z][A-Za-z0-9-]*" value={v.name ?? ''} /></FormField>
       <FormField label="Parameters" for="params" optional hint="One Key=Value per line."><textarea id="params" name="params" class="textarea code-area" rows="3" data-code>{v.params ?? ''}</textarea></FormField>
       <div class="flex flex-wrap gap-5">{CAPABILITIES.map((c) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="caps" value={c} /> {c}</label>)}</div></Card>

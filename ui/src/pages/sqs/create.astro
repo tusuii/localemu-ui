@@ -46,7 +46,7 @@ const v = post.values;
 ---
 <Console title="Create queue" crumbs={[{ label: 'Queues', href: '/sqs' }, { label: 'Create queue' }]} error={post.error}>
   <PageHeader title="Create queue" />
-  <form method="post" class="max-w-3xl space-y-4">
+  <form data-cli="aws sqs create-queue --queue-name {name} {visibility|--attributes VisibilityTimeout=} {delay|--attributes DelaySeconds=}" method="post" class="max-w-3xl space-y-4">
     <input type="hidden" name="intent" value="create" />
     <Card title="Details">
       <div class="mb-4 space-y-2">

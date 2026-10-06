@@ -31,6 +31,6 @@ const res = await load(async () => {
     columns={[{ key: 'name', label: 'Name', href: (r) => `/kinesis/${encodeURIComponent(r.name)}` }, { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) }, { key: 'shards', label: 'Open shards' }, { key: 'retention', label: 'Retention', render: (r) => (r.retention ? `${r.retention} h` : '-') }, { key: 'created', label: 'Created', render: (r) => dateTime(r.created) }]}>
     <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected streams and their data will be deleted." data-confirm-title="Delete streams?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
   </DataTable>
-  <Card class="mt-4" title="Create data stream"><form method="post" class="flex max-w-2xl items-end gap-2"><input type="hidden" name="intent" value="create" />
+  <Card class="mt-4" title="Create data stream"><form data-cli="aws kinesis create-stream --stream-name {name} --shard-count {shards}" method="post" class="flex max-w-2xl items-end gap-2"><input type="hidden" name="intent" value="create" />
     <div class="flex-1"><label class="field-label" for="n">Stream name</label><input id="n" name="name" class="input" required autocomplete="off" /></div><div class="w-32"><label class="field-label" for="s">Shards</label><input id="s" name="shards" type="number" min="1" value="1" class="input" /></div><button class="btn btn-primary" type="submit">Create</button></form></Card>
 </Console>

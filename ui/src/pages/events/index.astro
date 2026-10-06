@@ -31,5 +31,5 @@ const res = await load(async () => ((await eb.send(new ListEventBusesCommand({})
       <a class="btn btn-primary" href="/events/put">Send events</a>
     </Fragment>
   </DataTable>
-  <Card class="mt-4" title="Create event bus"><form method="post" class="flex max-w-xl items-end gap-2"><input type="hidden" name="intent" value="create" /><div class="flex-1"><label class="field-label" for="n">Name</label><input id="n" name="name" class="input" required autocomplete="off" /></div><button class="btn btn-primary" type="submit">Create</button></form></Card>
+  <Card class="mt-4" title="Create event bus"><form data-cli="aws events create-event-bus --name {name}" method="post" class="flex max-w-xl items-end gap-2"><input type="hidden" name="intent" value="create" /><div class="flex-1"><label class="field-label" for="n">Name</label><input id="n" name="name" class="input" required autocomplete="off" /></div><button class="btn btn-primary" type="submit">Create</button></form></Card>
 </Console>

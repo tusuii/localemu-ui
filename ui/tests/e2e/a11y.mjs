@@ -32,7 +32,7 @@ for (const theme of ['light', 'dark']) {
   t.ok(bad.length === 0, `${theme}: shell panel + services menu clean`);
   await p.keyboard.press('Escape'); await p.keyboard.press('Escape');
   await p.evaluate(() => document.activeElement.blur());
-  await p.keyboard.press('Shift+/');
+  await p.keyboard.press('?');
   await p.waitForSelector('#shortcuts-dialog[open]');
   res = await p.evaluate(() => axe.run(document));
   bad = res.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
@@ -42,7 +42,7 @@ for (const theme of ['light', 'dark']) {
 }
 // Keyboard behaviour
 await t.go('/sqs');
-await p.keyboard.press('Shift+/'); await p.waitForSelector('#shortcuts-dialog[open]'); await p.keyboard.press('Escape');
+await p.keyboard.press('?'); await p.waitForSelector('#shortcuts-dialog[open]'); await p.keyboard.press('Escape');
 t.ok(await p.evaluate(() => !document.querySelector('#shortcuts-dialog').open), 'Esc closes shortcuts');
 await p.keyboard.press('g'); await Promise.all([p.waitForNavigation(), p.keyboard.press('h')]);
 t.ok(new URL(p.url()).pathname === '/', 'g then h goes home');
@@ -55,10 +55,10 @@ await p.keyboard.press('Escape');
 t.ok(await p.getAttribute('[data-menu-toggle=menu-region]', 'aria-expanded') === 'false', 'Esc closes menu');
 t.ok(await p.evaluate(() => document.activeElement?.getAttribute('data-menu-toggle') === 'menu-region'), 'focus returns to the toggle');
 // skip link
-await p.keyboard.press('Control+Home'); await p.evaluate(() => document.activeElement.blur()); await p.keyboard.press('Tab');
+await t.go('/'); await p.keyboard.press('Tab');
 t.ok(await p.evaluate(() => document.activeElement?.className === 'skip-link'), 'skip link is first tab stop');
 // confirm dialog semantics and focus restore
-await t.go('/sqs/create'); 
+t.ok(await p.getAttribute('#confirm-dialog', 'aria-labelledby') === 'cd-title', 'confirm dialog is labelled');
 // table semantics
 await t.go('/s3');
 t.ok(await p.locator('table caption').count() >= 0, 'table caption ok');

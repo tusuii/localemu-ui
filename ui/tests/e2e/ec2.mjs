@@ -1,4 +1,5 @@
 import { start } from './lib.mjs';
+const BOX = 'ui-box' + Date.now().toString(36);
 const t = await start(); const { p } = t;
 // VPC + subnet
 await t.go('/ec2/vpcs'); await p.fill('#name', 'ui-vpc'); await p.fill('#cidr', '10.77.0.0/16'); await t.submit('button:has-text("Create VPC")');
@@ -37,18 +38,18 @@ await t.go('/ec2/snapshots'); t.ok((await p.locator('tr[data-row]').count()) >= 
 await t.go('/ec2/addresses'); await t.submit('button:has-text("Allocate Elastic IP")');
 t.ok((await t.flash()).includes('Allocated Elastic IP'), 'eip: ' + await t.flash());
 // instance
-await t.go('/ec2/instances/launch'); await p.fill('#name', 'ui-box'); await p.fill('#ami', 'ami-03cf127a'); await p.selectOption('#type', 't3.small'); await p.fill('#userdata', '#!/bin/bash\necho hi');
+await t.go('/ec2/instances/launch'); await p.fill('#name', BOX); await p.fill('#ami', 'ami-03cf127a'); await p.selectOption('#type', 't3.small'); await p.fill('#userdata', '#!/bin/bash\necho hi');
 await t.submit('button:has-text("Launch instance")');
 t.ok(/ec2\/instances\/i-/.test(p.url()), 'instance launched: ' + p.url() + ' ' + await t.flash());
 const iid = p.url().split('/').pop();
 t.ok((await p.innerText('main')).includes('t3.small'), 'instance details');
 await t.go(`/ec2/instances/${iid}?tab=userdata`); t.ok((await p.innerText('main')).includes('echo hi'), 'user data decoded');
-await t.go('/ec2/instances'); t.ok((await p.locator('tr[data-row]:has-text("ui-box")').count()) === 1, 'instance listed with name tag');
-await p.locator('tr[data-row]:has-text("ui-box") [data-row-select]').check();
+await t.go('/ec2/instances'); t.ok((await p.locator(`tr[data-row]:has-text("${BOX}")`).count()) === 1, 'instance listed with name tag');
+await p.locator(`tr[data-row]:has-text("${BOX}") [data-row-select]`).check();
 await p.click('button:has-text("Instance state")'); await p.click('button.menu-item:has-text("Stop instance")'); await p.waitForSelector('#confirm-dialog[open]');
 await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd-ok]')]);
 t.ok((await t.flash()).includes('Stopping'), 'stop instance: ' + await t.flash());
-await p.locator('tr[data-row]:has-text("ui-box") [data-row-select]').check();
+await p.locator(`tr[data-row]:has-text("${BOX}") [data-row-select]`).check();
 await p.click('button:has-text("Instance state")'); await p.click('button.menu-item:has-text("Terminate instance")'); await p.waitForSelector('#confirm-dialog[open]');
 await p.fill('[data-cd-input]', 'terminate'); await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd-ok]')]);
 t.ok((await t.flash()).includes('Terminating'), 'terminate: ' + await t.flash());
