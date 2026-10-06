@@ -1,0 +1,33 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeAddressesCommand, AllocateAddressCommand, ReleaseAddressCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { plural } from '../../lib/format';
+import { nameOf } from '../../lib/ec2';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  allocate: async () => { const r = await ec2.send(new AllocateAddressCommand({ Domain: 'vpc' })); return `Allocated Elastic IP ${r.PublicIp}.`; },
+  release: async (f) => bulk(strs(f, 'id'), { verb: 'Released', noun: 'address', nouns: 'addresses' }, (a) => ec2.send(new ReleaseAddressCommand({ AllocationId: a }))),
+});
+if (post.response) return post.response;
+const res = await load(async () => ((await ec2.send(new DescribeAddressesCommand({}))).Addresses ?? []).map((a) => ({ id: a.AllocationId, name: nameOf(a.Tags) || '-', ip: a.PublicIp, instance: a.InstanceId ?? '-', private: a.PrivateIpAddress ?? '-', assoc: a.AssociationId ?? '-' })));
+---
+<Console title="Elastic IP addresses" crumbs={[{ label: 'Elastic IPs' }]} error={post.error}>
+  <PageHeader title="Elastic IP addresses" />
+  <DataTable title="Elastic IP addresses" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="ip" pageSize={25} emptyTitle="No Elastic IPs" emptyText="Allocate an address to get a static public IPv4."
+    columns={[{ key: 'name', label: 'Name' }, { key: 'ip', label: 'Allocated IPv4 address', mono: true }, { key: 'id', label: 'Allocation ID', mono: true }, { key: 'instance', label: 'Instance', mono: true }, { key: 'private', label: 'Private IP', mono: true }, { key: 'assoc', label: 'Association ID', mono: true }]}>
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="release" data-min="1" data-confirm="The selected addresses will be released." data-confirm-title="Release addresses?" data-confirm-ok="Release">Release</button>
+      <button class="btn btn-primary" name="intent" value="allocate"><Icon name="plus" size={16} /> Allocate Elastic IP address</button>
+    </Fragment>
+  </DataTable>
+</Console>

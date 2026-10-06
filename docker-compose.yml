@@ -1,3 +1,8 @@
+# One command:  docker compose up -d
+#   LocalEmu gateway  -> http://localhost:4566
+#   LocalEmu Console  -> http://localhost:4321   (the console image is built on first run)
+name: localemu
+
 services:
   localemu:
     container_name: "${LOCALEMU_DOCKER_NAME:-localemu-main}"
@@ -9,6 +14,10 @@ services:
     environment:
       # LocalEmu configuration: https://localemu.cloud/docs/configuration
       - DEBUG=${DEBUG:-0}
+      # Lets the web console (a separate container) read the dashboard API
+      # (activity feed, service registry). The host port above is bound to
+      # 127.0.0.1, so this does not expose it beyond your machine.
+      - DASHBOARD_API_OPEN=${DASHBOARD_API_OPEN:-1}
     volumes:
       - "${LOCALEMU_VOLUME_DIR:-./volume}:/var/lib/localemu"
       - "/var/run/docker.sock:/var/run/docker.sock"
@@ -17,3 +26,23 @@ services:
         limits:
           memory: ${LOCALEMU_MEM_LIMIT:-4g}
           cpus: "${LOCALEMU_CPU_LIMIT:-2.0}"
+
+  # AWS-console style web UI for LocalEmu (Astro + Tailwind). See ui/README.md.
+  console:
+    container_name: "${LOCALEMU_CONSOLE_DOCKER_NAME:-localemu-console}"
+    # Built automatically the first time you run `docker compose up -d`.
+    # LOCALEMU_CONSOLE_CONTEXT lets you build straight from GitHub without cloning, see README.
+    build:
+      context: "${LOCALEMU_CONSOLE_CONTEXT:-./ui}"
+    # Or skip the build and pull the prebuilt multi-arch image instead:
+    # image: ghcr.io/tusuii/localemu-console:latest
+    restart: unless-stopped
+    depends_on:
+      - localemu
+    ports:
+      - "127.0.0.1:4321:4321"            # LocalEmu Console
+    environment:
+      # How the console server reaches LocalEmu (container-to-container)...
+      - LOCALEMU_ENDPOINT=http://localemu:4566
+      # ...and how your browser reaches it (used for pre-signed URLs).
+      - LOCALEMU_PUBLIC_ENDPOINT=http://localhost:4566

@@ -1,0 +1,63 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Icon from '../../../components/Icon.astro';
+import { GetJobsCommand, StartJobRunCommand, DeleteJobCommand } from '@aws-sdk/client-glue';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, strs } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { dateTime, plural } from '../../../lib/format';
+import { badge } from '../../../lib/html';
+import { roleName } from '../../../lib/glue';
+
+const ctx = getCtx(Astro.cookies);
+const glue = aws.glue(ctx);
+
+const post = await handlePost(Astro, {
+  run: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one job.');
+    for (const n of ids) await glue.send(new StartJobRunCommand({ JobName: n }));
+    return `Started a run for ${plural(ids.length, 'job')}.`;
+  },
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one job.');
+    for (const n of ids) await glue.send(new DeleteJobCommand({ JobName: n }));
+    return `Deleted ${plural(ids.length, 'job')}.`;
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const out: any[] = []; let token: string | undefined;
+  do { const r = await glue.send(new GetJobsCommand({ NextToken: token })); out.push(...(r.Jobs ?? [])); token = r.NextToken; } while (token);
+  return out.map((j) => ({ id: j.Name, name: j.Name, type: j.Command?.Name, script: j.Command?.ScriptLocation, version: j.GlueVersion, role: roleName(j.Role), workers: j.NumberOfWorkers, worker: j.WorkerType, modified: j.LastModifiedOn ?? j.CreatedOn }));
+});
+const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
+---
+<Console title="Jobs" crumbs={[{ label: 'Jobs' }]} error={post.error}>
+  <PageHeader title="ETL jobs" description="Glue jobs run the scripts that extract, transform and load your data." />
+  <DataTable
+    title="Jobs" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Filter jobs" emptyTitle="No jobs" emptyText="You don't have any jobs in this region."
+    columns={[
+      { key: 'name', label: 'Job name', href: (r) => `/glue/jobs/${encodeURIComponent(r.name)}` },
+      { key: 'type', label: 'Type', render: (r) => (r.type ? badge(r.type) : '-') },
+      { key: 'script', label: 'Script location', mono: true },
+      { key: 'version', label: 'Glue version' },
+      { key: 'worker', label: 'Workers', render: (r) => (r.worker ? `${r.workers ?? '-'} × ${r.worker}` : '-') },
+      { key: 'role', label: 'IAM role' },
+      { key: 'modified', label: 'Last modified', nowrap: true, render: (r) => dateTime(r.modified), sort: (r) => r.modified?.getTime() ?? 0 },
+    ]}
+  >
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="run" data-min="1"><Icon name="play" size={16} /> Run job</button>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected jobs will be permanently deleted." data-confirm-title="Delete jobs?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/glue/jobs/create"><Icon name="plus" size={16} /> Create job</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/glue/jobs/create">Create job</a>
+  </DataTable>
+</Console>

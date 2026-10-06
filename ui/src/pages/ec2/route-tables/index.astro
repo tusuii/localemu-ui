@@ -1,0 +1,65 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { DescribeRouteTablesCommand, DescribeVpcsCommand, CreateRouteTableCommand, DeleteRouteTableCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load } from '../../../lib/errors';
+import { nameOf, routeTarget } from '../../../lib/ec2';
+import { badge, esc, raw } from '../../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = str(f, 'name');
+    const r = await ec2.send(new CreateRouteTableCommand({ VpcId: required(f, 'vpc', 'VPC'), TagSpecifications: name ? [{ ResourceType: 'route-table', Tags: [{ Key: 'Name', Value: name }] }] : undefined }));
+    const id = r.RouteTable?.RouteTableId;
+    return { message: `Created route table ${id}.`, redirect: `/ec2/route-tables/${id}` };
+  },
+  delete: async (f) => {
+    const all = (await ec2.send(new DescribeRouteTablesCommand({}))).RouteTables ?? [];
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'route table' }, async (id) => {
+      const t = all.find((x) => x.RouteTableId === id);
+      if (t?.Associations?.some((a) => a.Main)) throw new UserError('the main route table of a VPC can\'t be deleted');
+      if (t?.Associations?.some((a) => a.SubnetId)) throw new UserError('it still has subnet associations');
+      await ec2.send(new DeleteRouteTableCommand({ RouteTableId: id }));
+    });
+  },
+});
+if (post.response) return post.response;
+const [res, vpcs] = await Promise.all([
+  load(async () => ((await ec2.send(new DescribeRouteTablesCommand({}))).RouteTables ?? []).map((t) => ({
+    id: t.RouteTableId, name: nameOf(t.Tags) || '-', vpc: t.VpcId, main: t.Associations?.some((a) => a.Main), subnets: t.Associations?.filter((a) => a.SubnetId).length ?? 0,
+    routes: (t.Routes ?? []).map((r) => `${r.DestinationCidrBlock ?? r.DestinationIpv6CidrBlock ?? r.DestinationPrefixListId} → ${routeTarget(r)}`),
+  }))),
+  load(async () => ((await ec2.send(new DescribeVpcsCommand({}))).Vpcs ?? []).map((v) => ({ id: v.VpcId!, label: `${v.VpcId} (${v.CidrBlock}${nameOf(v.Tags) ? ', ' + nameOf(v.Tags) : ''})` }))),
+]);
+const v = post.values;
+---
+<Console title="Route tables" crumbs={[{ label: 'Route tables' }]} error={post.error}>
+  <PageHeader title="Route tables" description="Control where network traffic from your subnets is directed." />
+  <DataTable title="Route tables" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="id" pageSize={25} filter="Filter route tables" emptyTitle="No route tables" emptyText="Create one below."
+    columns={[
+      { key: 'name', label: 'Name' }, { key: 'id', label: 'Route table ID', mono: true, href: (r) => `/ec2/route-tables/${r.id}` }, { key: 'vpc', label: 'VPC', mono: true }, { key: 'main', label: 'Main', render: (r) => (r.main ? badge('Yes', 'blue') : 'No') },
+      { key: 'subnets', label: 'Explicit subnet associations' },
+      { key: 'routes', label: 'Routes', render: (r) => raw(r.routes.map((x: string) => `<div class="font-mono text-[12.5px]">${esc(x)}</div>`).join('')), sort: (r) => r.routes.length },
+    ]}>
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/ec2/route-tables/{id}" data-min="1" data-max="1">Edit routes</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected route tables will be deleted. Main route tables and tables with subnet associations can't be deleted." data-confirm-title="Delete route tables?" data-confirm-ok="Delete">Delete</button>
+    </Fragment>
+  </DataTable>
+  <Card class="mt-4" title="Create route table">
+    <form method="post" class="grid items-end gap-4 sm:grid-cols-3"><input type="hidden" name="intent" value="create" />
+      <FormField label="Name" for="name" optional class="!mb-0"><input id="name" name="name" class="input" value={v.name ?? ''} /></FormField>
+      <FormField label="VPC" for="vpc" class="!mb-0"><select id="vpc" name="vpc" class="select" required>{(vpcs.data ?? []).map((x) => <option value={x.id} selected={v.vpc === x.id}>{x.label}</option>)}</select></FormField>
+      <button class="btn btn-primary" type="submit">Create route table</button>
+    </form>
+  </Card>
+</Console>

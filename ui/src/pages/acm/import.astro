@@ -1,0 +1,51 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { ImportCertificateCommand } from '@aws-sdk/client-acm';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+import { certId } from '../../lib/acm';
+
+const ctx = getCtx(Astro.cookies);
+const acm = aws.acm(ctx);
+
+const post = await handlePost(Astro, {
+  import: async (f) => {
+    const cert = required(f, 'cert', 'Certificate body');
+    const key = required(f, 'key', 'Certificate private key');
+    if (!cert.includes('BEGIN CERTIFICATE')) throw new UserError('The certificate body must be PEM encoded (-----BEGIN CERTIFICATE-----).');
+    if (!/BEGIN [A-Z ]*PRIVATE KEY/.test(key)) throw new UserError('The private key must be PEM encoded (-----BEGIN PRIVATE KEY-----).');
+    const chain = str(f, 'chain');
+    const tagKey = str(f, 'tagKey');
+    const r = await acm.send(new ImportCertificateCommand({
+      Certificate: Buffer.from(cert + '\n'), PrivateKey: Buffer.from(key + '\n'), CertificateChain: chain ? Buffer.from(chain + '\n') : undefined,
+      Tags: tagKey ? [{ Key: tagKey, Value: str(f, 'tagValue') }] : undefined,
+    }));
+    return { message: 'Certificate imported.', detail: r.CertificateArn, redirect: `/acm/${certId(r.CertificateArn!)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Import certificate" crumbs={[{ label: 'Certificates', href: '/acm' }, { label: 'Import certificate' }]} error={post.error}>
+  <PageHeader title="Import certificate" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="import" />
+    <Card title="Certificate details">
+      <FormField label="Certificate body" for="cert" description="PEM-encoded certificate."><textarea id="cert" name="cert" class="textarea code-area" rows="8" required placeholder="-----BEGIN CERTIFICATE-----">{v.cert ?? ''}</textarea></FormField>
+      <FormField label="Certificate private key" for="key" description="PEM-encoded, unencrypted private key."><textarea id="key" name="key" class="textarea code-area" rows="8" required placeholder="-----BEGIN PRIVATE KEY-----">{v.key ?? ''}</textarea></FormField>
+      <FormField label="Certificate chain" for="chain" optional description="PEM-encoded intermediate and root certificates."><textarea id="chain" name="chain" class="textarea code-area" rows="5">{v.chain ?? ''}</textarea></FormField>
+    </Card>
+    <Card title="Tags">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Tag key" for="tagKey" optional><input id="tagKey" name="tagKey" class="input" value={v.tagKey ?? ''} /></FormField>
+        <FormField label="Tag value" for="tagValue" optional><input id="tagValue" name="tagValue" class="input" value={v.tagValue ?? ''} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/acm">Cancel</a><button class="btn btn-primary" type="submit">Import certificate</button></div>
+  </form>
+</Console>

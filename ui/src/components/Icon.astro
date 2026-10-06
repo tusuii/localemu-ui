@@ -1,0 +1,6 @@
+---
+import { iconSvg } from '../lib/icons';
+interface Props { name: string; size?: number; class?: string }
+const { name, size = 16, class: cls = '' } = Astro.props;
+---
+<span class:list={['icon', cls]} style={`width:${size}px;height:${size}px`} aria-hidden="true" set:html={iconSvg(name)} />

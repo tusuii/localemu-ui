@@ -1,0 +1,65 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { CreateTargetGroupCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import { DescribeVpcsCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { nameOf } from '../../../lib/ec2';
+import { TG_PROTOCOLS } from '../../../lib/elbv2';
+
+const ctx = getCtx(Astro.cookies);
+const elb = aws.elbv2(ctx);
+const ec2 = aws.ec2(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Target group name');
+    if (!/^[A-Za-z0-9-]{1,32}$/.test(name)) throw new UserError('Names are up to 32 characters: letters, numbers and hyphens.');
+    const type = str(f, 'type') || 'instance';
+    const lambda = type === 'lambda';
+    const protocol = str(f, 'protocol') || 'HTTP';
+    const web = protocol === 'HTTP' || protocol === 'HTTPS';
+    const r = await elb.send(new CreateTargetGroupCommand({
+      Name: name, TargetType: type as never,
+      Protocol: lambda ? undefined : (protocol as never), Port: lambda ? undefined : (intOf(f, 'port', 'Port') ?? 80), VpcId: lambda ? undefined : required(f, 'vpc', 'VPC'),
+      HealthCheckPath: web && str(f, 'path') ? str(f, 'path') : undefined,
+      HealthCheckIntervalSeconds: intOf(f, 'interval', 'Health check interval'),
+      HealthyThresholdCount: intOf(f, 'healthy', 'Healthy threshold'),
+      UnhealthyThresholdCount: intOf(f, 'unhealthy', 'Unhealthy threshold'),
+    }));
+    return { message: `Target group ${name} created successfully.`, detail: r.TargetGroups?.[0]?.TargetGroupArn, redirect: `/elbv2/target-groups/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const vpcs = await load(async () => (await ec2.send(new DescribeVpcsCommand({}))).Vpcs ?? []);
+const v = post.values;
+---
+<Console title="Create target group" crumbs={[{ label: 'Target groups', href: '/elbv2/target-groups' }, { label: 'Create target group' }]} error={post.error ?? vpcs.error}>
+  <PageHeader title="Create target group" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Basic configuration">
+      <FormField label="Target group name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="32" value={v.name ?? ''} /></FormField>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Target type" for="type"><select id="type" name="type" class="select">{['instance', 'ip', 'lambda', 'alb'].map((x) => <option value={x} selected={v.type === x}>{x}</option>)}</select></FormField>
+        <FormField label="Protocol" for="protocol"><select id="protocol" name="protocol" class="select">{TG_PROTOCOLS.map((x) => <option value={x} selected={v.protocol === x}>{x}</option>)}</select></FormField>
+        <FormField label="Port" for="port"><input id="port" name="port" type="number" min="1" max="65535" class="input" value={v.port ?? '80'} /></FormField>
+        <FormField label="VPC" for="vpc"><select id="vpc" name="vpc" class="select">{(vpcs.data ?? []).map((x) => <option value={x.VpcId} selected={v.vpc === x.VpcId}>{x.VpcId} {nameOf(x.Tags) || x.CidrBlock}</option>)}</select></FormField>
+      </div>
+    </Card>
+    <Card title="Health checks" description="Leave blank to use the defaults.">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Health check path" for="path" hint="HTTP and HTTPS only."><input id="path" name="path" class="input" placeholder="/" value={v.path ?? ''} /></FormField>
+        <FormField label="Interval (seconds)" for="interval"><input id="interval" name="interval" type="number" min="5" max="300" class="input" placeholder="30" value={v.interval ?? ''} /></FormField>
+        <FormField label="Healthy threshold" for="healthy"><input id="healthy" name="healthy" type="number" min="2" max="10" class="input" placeholder="5" value={v.healthy ?? ''} /></FormField>
+        <FormField label="Unhealthy threshold" for="unhealthy"><input id="unhealthy" name="unhealthy" type="number" min="2" max="10" class="input" placeholder="2" value={v.unhealthy ?? ''} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/elbv2/target-groups">Cancel</a><button class="btn btn-primary" type="submit">Create target group</button></div>
+  </form>
+</Console>

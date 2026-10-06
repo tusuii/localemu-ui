@@ -1,0 +1,107 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import PermissionsPanel from '../../../components/PermissionsPanel.astro';
+import {
+  GetUserCommand, DeleteUserCommand, ListGroupsForUserCommand, ListGroupsCommand, AddUserToGroupCommand, RemoveUserFromGroupCommand,
+  ListAccessKeysCommand, CreateAccessKeyCommand, DeleteAccessKeyCommand, UpdateAccessKeyCommand, ListPoliciesCommand,
+} from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required } from '../../../lib/action';
+import { load } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { badge, copyable } from '../../../lib/html';
+import { getInline, listPerms, permissionHandlers, purgeIdentity } from '../../../lib/iam';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const iam = aws.iam(ctx);
+const tab = ['permissions', 'groups', 'credentials'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'permissions';
+const here = (t: string) => `${Astro.url.pathname}?tab=${t}`;
+const ph = permissionHandlers(iam, 'user', name);
+
+const post = await handlePost(Astro, {
+  ...ph,
+  addGroup: async (f) => { await iam.send(new AddUserToGroupCommand({ UserName: name, GroupName: required(f, 'group', 'Group') })); return { message: 'Added to group.', redirect: here('groups') }; },
+  removeGroup: async (f) => { await iam.send(new RemoveUserFromGroupCommand({ UserName: name, GroupName: required(f, 'group', 'Group') })); return { message: 'Removed from group.', redirect: here('groups') }; },
+  createKey: async () => {
+    const r = await iam.send(new CreateAccessKeyCommand({ UserName: name }));
+    return { stay: true, message: 'Access key created. This is the only time the secret is shown.', data: { id: r.AccessKey?.AccessKeyId, secret: r.AccessKey?.SecretAccessKey } };
+  },
+  deleteKey: async (f) => { await iam.send(new DeleteAccessKeyCommand({ UserName: name, AccessKeyId: required(f, 'key', 'Access key') })); return { message: 'Access key deleted.', redirect: here('credentials') }; },
+  activateKey: async (f) => { await iam.send(new UpdateAccessKeyCommand({ UserName: name, AccessKeyId: required(f, 'key', 'Access key'), Status: 'Active' })); return { message: 'Access key activated.', redirect: here('credentials') }; },
+  deactivateKey: async (f) => { await iam.send(new UpdateAccessKeyCommand({ UserName: name, AccessKeyId: required(f, 'key', 'Access key'), Status: 'Inactive' })); return { message: 'Access key deactivated.', redirect: here('credentials') }; },
+  delete: async () => { await purgeIdentity(iam, 'user', name); await iam.send(new DeleteUserCommand({ UserName: name })); return { message: `Deleted user ${name}.`, redirect: '/iam/users' }; },
+});
+if (post.response) return post.response;
+
+const u = await load(async () => (await iam.send(new GetUserCommand({ UserName: name }))).User!);
+if (u.error && /NoSuchEntity|cannot be found/i.test(u.error)) return new Response(`User "${name}" does not exist`, { status: 404 });
+const perms = tab === 'permissions' ? await load(async () => {
+  const p = await listPerms(iam, 'user', name);
+  const docs = Object.fromEntries(await Promise.all(p.inline.map(async (n) => [n, await getInline(iam, 'user', name, n)])));
+  const sug = (await iam.send(new ListPoliciesCommand({ Scope: 'All', MaxItems: 1000 }))).Policies ?? [];
+  return { p, docs, sug: sug.map((s) => ({ name: s.PolicyName!, arn: s.Arn! })) };
+}) : undefined;
+const groups = tab === 'groups' ? await load(async () => ({ mine: (await iam.send(new ListGroupsForUserCommand({ UserName: name }))).Groups ?? [], all: (await iam.send(new ListGroupsCommand({}))).Groups ?? [] })) : undefined;
+const keys = tab === 'credentials' ? await load(async () => (await iam.send(new ListAccessKeysCommand({ UserName: name }))).AccessKeyMetadata ?? []) : undefined;
+const created = post.result?.data as { id: string; secret: string } | undefined;
+const tabs = [{ id: 'permissions', label: 'Permissions' }, { id: 'groups', label: 'Groups' }, { id: 'credentials', label: 'Security credentials' }];
+---
+<Console title={name} crumbs={[{ label: 'Users', href: '/iam/users' }, { label: name }]} error={post.error} notice={post.result?.message ? { text: post.result.message } : null}>
+  <PageHeader title={name}>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The user, its access keys, group memberships and attached policies will be deleted." data-confirm-title="Delete user?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete user"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {u.error && <Flash type="error" text="Couldn't load the user" detail={u.error} dismissible={false} />}
+  {u.data && <Card class="mb-4" title="Summary"><Details items={[{ label: 'ARN', value: copyable(u.data.Arn ?? '') }, { label: 'Created', value: dateTime(u.data.CreateDate) }, { label: 'Path', value: u.data.Path }]} /></Card>}
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    <div class="p-5">
+      {tab === 'permissions' && (perms?.error ? <Flash type="error" text="Couldn't load permissions" detail={perms.error} dismissible={false} /> : <PermissionsPanel perms={perms!.data!.p} inlineDocs={perms!.data!.docs} suggestions={perms!.data!.sug} />)}
+
+      {tab === 'groups' && (groups?.error ? <Flash type="error" text="Couldn't load groups" detail={groups.error} dismissible={false} /> : (
+        <div class="space-y-5">
+          <h3 class="card-title">User groups ({groups!.data!.mine.length})</h3>
+          {groups!.data!.mine.length === 0 ? <p class="text-muted">This user isn't in any group.</p> : (
+            <ul class="space-y-2">{groups!.data!.mine.map((g) => (
+              <li class="flex items-center gap-3"><a href={`/iam/groups/${encodeURIComponent(g.GroupName!)}`}>{g.GroupName}</a>
+                <form method="post"><input type="hidden" name="intent" value="removeGroup" /><input type="hidden" name="group" value={g.GroupName} /><button class="btn btn-danger btn-sm">Remove</button></form></li>
+            ))}</ul>
+          )}
+          <form method="post" class="flex max-w-lg gap-2 border-t border-line pt-5"><input type="hidden" name="intent" value="addGroup" />
+            <select name="group" class="select" required><option value="">Select a group…</option>{groups!.data!.all.filter((g) => !groups!.data!.mine.some((m) => m.GroupName === g.GroupName)).map((g) => <option value={g.GroupName}>{g.GroupName}</option>)}</select>
+            <button class="btn btn-normal" type="submit">Add to group</button></form>
+        </div>
+      ))}
+
+      {tab === 'credentials' && (keys?.error ? <Flash type="error" text="Couldn't load access keys" detail={keys.error} dismissible={false} /> : (
+        <div class="space-y-5">
+          {created && (
+            <Flash type="warning" dismissible={false} text="Save your new access key now" detail="The secret access key can't be retrieved again.">
+              <div class="mt-3 space-y-2 text-[13px]"><div>Access key ID: {copyable(created.id)}</div><div>Secret access key: {copyable(created.secret)}</div></div>
+            </Flash>
+          )}
+          <div class="flex items-center justify-between"><h3 class="card-title">Access keys ({keys!.data!.length}/2)</h3>
+            <form method="post"><input type="hidden" name="intent" value="createKey" /><button class="btn btn-normal" disabled={keys!.data!.length >= 2}><Icon name="plus" size={14} /> Create access key</button></form></div>
+          {keys!.data!.length === 0 ? <p class="text-muted">No access keys.</p> : (
+            <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Access key ID</th><th>Status</th><th>Created</th><th class="w-56"></th></tr></thead><tbody>
+              {keys!.data!.map((k) => (
+                <tr><td class="font-mono text-[13px]">{k.AccessKeyId}</td><td>{badge(k.Status, k.Status === 'Active' ? 'green' : 'grey')}</td><td class="nowrap">{dateTime(k.CreateDate)}</td>
+                  <td><form method="post" class="flex gap-2"><input type="hidden" name="key" value={k.AccessKeyId} />
+                    <button class="btn btn-normal btn-sm" name="intent" value={k.Status === 'Active' ? 'deactivateKey' : 'activateKey'}>{k.Status === 'Active' ? 'Deactivate' : 'Activate'}</button>
+                    <button class="btn btn-danger btn-sm" name="intent" value="deleteKey" data-confirm="This access key will be permanently deleted." data-confirm-title="Delete access key?" data-confirm-name={k.AccessKeyId} data-confirm-ok="Delete">Delete</button></form></td></tr>
+              ))}
+            </tbody></table></div>
+          )}
+        </div>
+      ))}
+    </div>
+  </div>
+</Console>

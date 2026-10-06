@@ -1,0 +1,375 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import DataTable from '../../../components/DataTable.astro';
+import FormField from '../../../components/FormField.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  DescribeLoadBalancersCommand, DeleteLoadBalancerCommand, DescribeListenersCommand, CreateListenerCommand, DeleteListenerCommand,
+  DescribeRulesCommand, CreateRuleCommand, DeleteRuleCommand, DescribeTargetGroupsCommand, DescribeLoadBalancerAttributesCommand, DescribeTagsCommand,
+  ModifyListenerCommand, ModifyRuleCommand, SetRulePrioritiesCommand, ModifyLoadBalancerAttributesCommand, SetSecurityGroupsCommand, SetSubnetsCommand,
+} from '@aws-sdk/client-elastic-load-balancing-v2';
+import { DescribeSubnetsCommand, DescribeSecurityGroupsCommand } from '@aws-sdk/client-ec2';
+import { nameOf } from '../../../lib/ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../../lib/action';
+import { UserError, load, soft } from '../../../lib/errors';
+import { capitalize, dateTime, plural } from '../../../lib/format';
+import { badge, copyable, mono, stateStatus, tagList } from '../../../lib/html';
+import { LB_PROTOCOLS, actionFromForm, actionText, actionToForm, buildAction, conditionText, conditionValues, supported, uniq } from '../../../lib/elbv2';
+
+const name = Astro.params.lb!;
+const ctx = getCtx(Astro.cookies);
+const elb = aws.elbv2(ctx);
+const ec2 = aws.ec2(ctx);
+const TABS = ['listeners', 'rules', 'details'];
+const tab = TABS.includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'listeners';
+const editListenerArn = Astro.url.searchParams.get('editListener') ?? '';
+const editRuleArn = Astro.url.searchParams.get('editRule') ?? '';
+const here = (t = tab, extra = '') => `${Astro.url.pathname}?tab=${t}${extra}`;
+
+const lbRes = await load(async () => (await elb.send(new DescribeLoadBalancersCommand({ Names: [name] }))).LoadBalancers![0]);
+if (lbRes.error && /NotFound|not found|does not exist/i.test(lbRes.error)) return new Response(`Load balancer "${name}" does not exist`, { status: 404 });
+const lb = lbRes.data;
+const lbArn = lb?.LoadBalancerArn ?? '';
+const isNlb = lb?.Type === 'network';
+
+const tgsRes = await load(async () => (await elb.send(new DescribeTargetGroupsCommand({}))).TargetGroups ?? []);
+const listenersRes = await load(async () => (await elb.send(new DescribeListenersCommand({ LoadBalancerArn: lbArn }))).Listeners ?? []);
+const listeners = listenersRes.data ?? [];
+const rulesPort = Astro.url.searchParams.get('port') ?? String(listeners[0]?.Port ?? '');
+const ruleListener = listeners.find((l) => String(l.Port) === rulesPort);
+
+const post = await handlePost(Astro, {
+  createListener: async (f) => {
+    const port = intOf(f, 'port', 'Port');
+    if (!port) throw new UserError('Port is required.');
+    const kind = str(f, 'action');
+    if (kind !== 'fixed-response' && !str(f, 'tg')) throw new UserError('Select a target group to forward to.');
+    await elb.send(new CreateListenerCommand({
+      LoadBalancerArn: lbArn, Protocol: required(f, 'protocol', 'Protocol') as never, Port: port,
+      DefaultActions: [buildAction(kind, { tg: str(f, 'tg'), status: str(f, 'status'), ctype: str(f, 'ctype'), body: str(f, 'body') })],
+    }));
+    return { message: `Listener ${str(f, 'protocol')}:${port} created.`, redirect: here('listeners') };
+  },
+  deleteListener: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one listener.');
+    for (const a of ids) await elb.send(new DeleteListenerCommand({ ListenerArn: a }));
+    return { message: `Deleted ${plural(ids.length, 'listener')}.`, redirect: here('listeners') };
+  },
+  createRule: async (f) => {
+    const listener = required(f, 'listener', 'Listener');
+    const prio = intOf(f, 'priority', 'Priority');
+    if (!prio) throw new UserError('Priority is required (1 - 50000).');
+    const values = required(f, 'values', 'Condition values').split(/[\s,]+/).filter(Boolean);
+    const field = str(f, 'field') === 'host-header' ? 'host-header' : 'path-pattern';
+    const kind = str(f, 'action');
+    if (kind !== 'fixed-response' && !str(f, 'tg')) throw new UserError('Select a target group to forward to.');
+    await elb.send(new CreateRuleCommand({
+      ListenerArn: listener, Priority: prio, Conditions: [{ Field: field, Values: values }],
+      Actions: [buildAction(kind, { tg: str(f, 'tg'), status: str(f, 'status'), ctype: str(f, 'ctype'), body: str(f, 'body') })],
+    }));
+    return { message: `Rule with priority ${prio} created.`, redirect: here('rules', `&port=${encodeURIComponent(str(f, 'port'))}`) };
+  },
+  deleteRule: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one rule.');
+    for (const a of ids) await elb.send(new DeleteRuleCommand({ RuleArn: a }));
+    return { message: `Deleted ${plural(ids.length, 'rule')}.`, redirect: here('rules', `&port=${encodeURIComponent(str(f, 'port'))}`) };
+  },
+  modifyListener: async (f) => {
+    const arn = required(f, 'listener', 'Listener');
+    const port = intOf(f, 'port', 'Port');
+    if (!port || port < 1 || port > 65535) throw new UserError('Port must be between 1 and 65535.');
+    const kind = str(f, 'action');
+    if (isNlb && kind !== 'forward') throw new UserError('Network load balancer listeners can only forward to a target group.');
+    await supported('modifying listeners', () => elb.send(new ModifyListenerCommand({
+      ListenerArn: arn, Port: port, Protocol: required(f, 'protocol', 'Protocol') as never, DefaultActions: [actionFromForm(f)],
+    })));
+    return { message: `Listener ${str(f, 'protocol')}:${port} updated.`, redirect: here('listeners') };
+  },
+  modifyRule: async (f) => {
+    const arn = required(f, 'rule', 'Rule');
+    const paths = str(f, 'pathValues').split(/[\s,]+/).filter(Boolean);
+    const hosts = str(f, 'hostValues').split(/[\s,]+/).filter(Boolean);
+    if (!paths.length && !hosts.length) throw new UserError('Enter at least one path or host header value.');
+    const cur = (await elb.send(new DescribeRulesCommand({ RuleArns: [arn] }))).Rules?.[0];
+    if (!cur) throw new UserError('Rule not found.');
+    if (cur.IsDefault) throw new UserError('The default rule is edited through the listener (Listeners tab).');
+    const others = (cur.Conditions ?? []).filter((c) => c.Field !== 'path-pattern' && c.Field !== 'host-header');
+    const conditions = [
+      ...(paths.length ? [{ Field: 'path-pattern', Values: paths }] : []),
+      ...(hosts.length ? [{ Field: 'host-header', Values: hosts }] : []),
+      ...others.map((c) => ({ Field: c.Field, Values: c.Values, ...(c.HttpHeaderConfig ? { HttpHeaderConfig: c.HttpHeaderConfig } : {}), ...(c.QueryStringConfig ? { QueryStringConfig: c.QueryStringConfig } : {}), ...(c.HttpRequestMethodConfig ? { HttpRequestMethodConfig: c.HttpRequestMethodConfig } : {}), ...(c.SourceIpConfig ? { SourceIpConfig: c.SourceIpConfig } : {}) })),
+    ];
+    await supported('modifying rules', () => elb.send(new ModifyRuleCommand({ RuleArn: arn, Conditions: conditions as never, Actions: [actionFromForm(f)] })));
+    const prio = intOf(f, 'priority', 'Priority');
+    if (prio && String(prio) !== String(cur.Priority)) {
+      if (prio < 1 || prio > 50000) throw new UserError('Priority must be between 1 and 50000.');
+      await supported('changing rule priorities', () => elb.send(new SetRulePrioritiesCommand({ RulePriorities: [{ RuleArn: arn, Priority: prio }] })));
+    }
+    return { message: 'Rule updated.', redirect: here('rules', `&port=${encodeURIComponent(str(f, 'port'))}`) };
+  },
+  modifyAttributes: async (f) => {
+    const changed: { Key: string; Value: string }[] = [];
+    for (const [k, val] of f.entries()) {
+      if (typeof val !== 'string' || !k.startsWith('attr:')) continue;
+      const key = k.slice(5);
+      if (val.trim() !== String(f.get(`orig:${key}`) ?? '')) changed.push({ Key: key, Value: val.trim() });
+    }
+    if (!changed.length) throw new UserError('No attribute was changed.');
+    await supported('modifying load balancer attributes', () => elb.send(new ModifyLoadBalancerAttributesCommand({ LoadBalancerArn: lbArn, Attributes: changed })));
+    return { message: `Updated ${plural(changed.length, 'attribute')}.`, redirect: here('details') };
+  },
+  setSecurityGroups: async (f) => {
+    const ids = strs(f, 'sg');
+    if (!ids.length) throw new UserError('Select at least one security group.');
+    if (isNlb) throw new UserError('Security groups can only be changed on application load balancers.');
+    await supported('changing security groups', () => elb.send(new SetSecurityGroupsCommand({ LoadBalancerArn: lbArn, SecurityGroups: ids })));
+    return { message: 'Security groups updated.', redirect: here('details') };
+  },
+  setSubnets: async (f) => {
+    const ids = strs(f, 'subnet');
+    if (!ids.length) throw new UserError('Select at least one subnet.');
+    await supported('changing subnets', () => elb.send(new SetSubnetsCommand({ LoadBalancerArn: lbArn, Subnets: ids })));
+    return { message: 'Subnets updated.', redirect: here('details') };
+  },
+  deleteLb: async () => { await elb.send(new DeleteLoadBalancerCommand({ LoadBalancerArn: lbArn })); return { message: `Deleted load balancer "${name}".`, redirect: '/elbv2' }; },
+});
+if (post.response) return post.response;
+
+const rulesRes = tab === 'rules' && ruleListener ? await load(async () => (await elb.send(new DescribeRulesCommand({ ListenerArn: ruleListener.ListenerArn }))).Rules ?? []) : undefined;
+const attrs = tab === 'details' ? await soft(async () => (await elb.send(new DescribeLoadBalancerAttributesCommand({ LoadBalancerArn: lbArn }))).Attributes ?? []) : undefined;
+const tags = tab === 'details' ? await soft(async () => (await elb.send(new DescribeTagsCommand({ ResourceArns: [lbArn] }))).TagDescriptions?.[0]?.Tags ?? []) : undefined;
+const ec2Lists = tab === 'details' ? await soft(async () => ({
+  subnets: (await ec2.send(new DescribeSubnetsCommand({ Filters: lb?.VpcId ? [{ Name: 'vpc-id', Values: [lb.VpcId] }] : undefined }))).Subnets ?? [],
+  sgs: (await ec2.send(new DescribeSecurityGroupsCommand({ Filters: lb?.VpcId ? [{ Name: 'vpc-id', Values: [lb.VpcId] }] : undefined }))).SecurityGroups ?? [],
+})) : undefined;
+const curSgs = new Set(lb?.SecurityGroups ?? []);
+const curSubnets = new Set((lb?.AvailabilityZones ?? []).map((z) => z.SubnetId));
+const tgs = tgsRes.data ?? [];
+const editingListener = listeners.find((l) => l.ListenerArn === editListenerArn);
+const lf: Record<string, string> = post.intent === 'modifyListener' ? post.values : { port: String(editingListener?.Port ?? ''), protocol: editingListener?.Protocol ?? '', ...actionToForm(editingListener?.DefaultActions?.[0]) };
+const editingRule = (rulesRes?.data ?? []).find((r) => r.RuleArn === editRuleArn && !r.IsDefault);
+const rf: Record<string, string> = post.intent === 'modifyRule' ? post.values : editingRule ? {
+  priority: String(editingRule.Priority ?? ''),
+  pathValues: (editingRule.Conditions ?? []).filter((c) => c.Field === 'path-pattern').flatMap(conditionValues).join(', '),
+  hostValues: (editingRule.Conditions ?? []).filter((c) => c.Field === 'host-header').flatMap(conditionValues).join(', '),
+  ...actionToForm(editingRule.Actions?.[0]),
+} : {};
+const v = post.values;
+const protocols = LB_PROTOCOLS[isNlb ? 'network' : 'application'];
+const tabs = [{ id: 'listeners', label: 'Listeners', count: listeners.length }, { id: 'rules', label: 'Rules' }, { id: 'details', label: 'Details' }];
+
+---
+<Console title={name} crumbs={[{ label: 'Load balancers', href: '/elbv2' }, { label: name }]} error={post.error ?? lbRes.error}>
+  <PageHeader title={name} badge={capitalize(lb?.Type ?? '')} description={lb?.DNSName} />
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'listeners' && (
+      <div class="space-y-5 p-5">
+        <DataTable title="Listeners" rows={listeners.map((l) => ({ id: l.ListenerArn, port: l.Port, protocol: l.Protocol, action: (l.DefaultActions ?? []).map(actionText).join('; ') }))} error={listenersRes.error} bare select="multi" idKey="id" nameKey="port" id="listeners" pageSize={15}
+          emptyTitle="No listeners" emptyText="Add a listener so the load balancer can accept connections."
+          columns={[
+            { key: 'port', label: 'Port', render: (r) => mono(r.port), href: (r) => here('listeners', `&editListener=${encodeURIComponent(r.id!)}`) + '#listener-edit' },
+            { key: 'protocol', label: 'Protocol', render: (r) => badge(r.protocol) },
+            { key: 'action', label: 'Default action' },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteListener" data-min="1" data-confirm="The selected listeners and their rules will be deleted." data-confirm-title="Delete listeners?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        {editListenerArn && (editingListener ? (
+          <form method="post" id="listener-edit" class="border-t border-line pt-5" data-listener-edit>
+            <input type="hidden" name="intent" value="modifyListener" />
+            <input type="hidden" name="listener" value={editListenerArn} />
+            <h3 class="card-title mb-3">Edit listener {editingListener.Protocol}:{editingListener.Port}</h3>
+            <div class="grid max-w-3xl gap-4 sm:grid-cols-2">
+              <FormField label="Protocol" for="elprotocol"><select id="elprotocol" name="protocol" class="select">{protocols.map((p) => <option value={p} selected={lf.protocol === p}>{p}</option>)}</select></FormField>
+              <FormField label="Port" for="elport"><input id="elport" name="port" type="number" min="1" max="65535" class="input" required value={lf.port ?? ''} /></FormField>
+            </div>
+            <div class="grid max-w-3xl gap-4 sm:grid-cols-2">
+              <FormField label="Action" for="elaction"><select id="elaction" name="action" class="select"><option value="forward" selected={lf.action !== 'fixed-response' && lf.action !== 'redirect'}>Forward to target group</option>{!isNlb && <option value="fixed-response" selected={lf.action === 'fixed-response'}>Return fixed response</option>}{!isNlb && <option value="redirect" selected={lf.action === 'redirect'}>Redirect</option>}</select></FormField>
+              <div data-show-when="action:forward"><FormField label="Target group" for="eltg"><select id="eltg" name="tg" class="select">{tgs.map((t) => <option value={t.TargetGroupArn} selected={lf.tg === t.TargetGroupArn}>{t.TargetGroupName}</option>)}</select></FormField></div>
+            </div>
+            <div class="grid max-w-3xl gap-4 sm:grid-cols-3" data-show-when="action:fixed-response" hidden>
+              <FormField label="Response code" for="elstatus"><input id="elstatus" name="status" class="input" value={lf.status ?? '200'} /></FormField>
+              <FormField label="Content type" for="elctype"><select id="elctype" name="ctype" class="select">{['text/plain', 'text/html', 'application/json'].map((c) => <option selected={lf.ctype === c}>{c}</option>)}</select></FormField>
+              <FormField label="Response body" for="elbody" optional><input id="elbody" name="body" class="input" value={lf.body ?? ''} /></FormField>
+            </div>
+            <div class="grid max-w-3xl gap-4 sm:grid-cols-3" data-show-when="action:redirect" hidden>
+              <FormField label="Protocol" for="elrproto"><select id="elrproto" name="rProtocol" class="select">{['#{protocol}', 'HTTP', 'HTTPS'].map((c) => <option selected={(lf.rProtocol ?? '#{protocol}') === c}>{c}</option>)}</select></FormField>
+              <FormField label="Port" for="elrport"><input id="elrport" name="rPort" class="input" value={lf.rPort ?? '#{port}'} /></FormField>
+              <FormField label="Status code" for="elrcode"><select id="elrcode" name="rCode" class="select"><option value="HTTP_301" selected={lf.rCode !== 'HTTP_302'}>301 (permanent)</option><option value="HTTP_302" selected={lf.rCode === 'HTTP_302'}>302 (found)</option></select></FormField>
+              <FormField label="Host" for="elrhost"><input id="elrhost" name="rHost" class="input" value={lf.rHost ?? '#{host}'} /></FormField>
+              <FormField label="Path" for="elrpath"><input id="elrpath" name="rPath" class="input" value={lf.rPath ?? '/#{path}'} /></FormField>
+              <FormField label="Query" for="elrquery"><input id="elrquery" name="rQuery" class="input" value={lf.rQuery ?? '#{query}'} /></FormField>
+            </div>
+            <div class="flex gap-2"><button class="btn btn-primary" type="submit">Save listener</button><a class="btn btn-normal" href={here('listeners')}>Cancel</a></div>
+          </form>
+        ) : <p class="border-t border-line pt-5 text-muted">Listener not found.</p>)}
+
+        <form method="post" class="border-t border-line pt-5">
+          <input type="hidden" name="intent" value="createListener" />
+          <h3 class="card-title mb-3">Add listener</h3>
+          <div class="grid max-w-3xl gap-4 sm:grid-cols-3">
+            <FormField label="Protocol" for="lprotocol"><select id="lprotocol" name="protocol" class="select">{protocols.map((p) => <option value={p} selected={v.protocol === p}>{p}</option>)}</select></FormField>
+            <FormField label="Port" for="lport"><input id="lport" name="port" type="number" min="1" max="65535" class="input" required value={v.port ?? ''} /></FormField>
+            <FormField label="Default action" for="laction"><select id="laction" name="action" class="select"><option value="forward" selected={v.action !== 'fixed-response'}>Forward to target group</option>{!isNlb && <option value="fixed-response" selected={v.action === 'fixed-response'}>Return fixed response</option>}</select></FormField>
+          </div>
+          <div class="max-w-3xl" data-show-when="action:forward">
+            <FormField label="Target group" for="ltg"><select id="ltg" name="tg" class="select">{tgs.map((t) => <option value={t.TargetGroupArn}>{t.TargetGroupName}</option>)}</select></FormField>
+          </div>
+          <div class="grid max-w-3xl gap-4 sm:grid-cols-3" data-show-when="action:fixed-response" hidden>
+            <FormField label="Response code" for="lstatus"><input id="lstatus" name="status" class="input" value="200" /></FormField>
+            <FormField label="Content type" for="lctype"><select id="lctype" name="ctype" class="select"><option>text/plain</option><option>text/html</option><option>application/json</option></select></FormField>
+            <FormField label="Response body" for="lbody" optional><input id="lbody" name="body" class="input" /></FormField>
+          </div>
+          <button class="btn btn-primary" type="submit">Add listener</button>
+        </form>
+      </div>
+    )}
+
+    {tab === 'rules' && (
+      <div class="space-y-5 p-5">
+        {!listeners.length ? <p class="text-muted">Create a listener first; rules belong to listeners.</p> : (
+          <>
+            <form method="get" class="flex items-end gap-3">
+              <input type="hidden" name="tab" value="rules" />
+              <FormField label="Listener" for="rport" class="!mb-0 min-w-[240px]"><select id="rport" name="port" class="select" onchange="this.form.submit()">{listeners.map((l) => <option value={String(l.Port)} selected={String(l.Port) === rulesPort}>{l.Protocol}:{l.Port}</option>)}</select></FormField>
+              <noscript><button class="btn btn-normal" type="submit">Show</button></noscript>
+            </form>
+            <DataTable title="Rules" rows={(rulesRes?.data ?? []).map((r) => ({ id: r.RuleArn, priority: r.Priority, isDefault: !!r.IsDefault, conditions: (r.Conditions ?? []).map(conditionText).join('; '), actions: (r.Actions ?? []).map(actionText).join('; ') }))} error={rulesRes?.error} bare select="multi" idKey="id" nameKey="priority" id="rules" pageSize={15}
+              emptyTitle="No rules" emptyText="This listener only has its default action."
+              columns={[
+                { key: 'priority', label: 'Priority', render: (r) => (r.isDefault ? badge('Default', 'blue') : String(r.priority)), href: (r) => (r.isDefault ? undefined : here('rules', `&port=${encodeURIComponent(rulesPort)}&editRule=${encodeURIComponent(r.id!)}`) + '#rule-edit'), sort: (r) => (r.isDefault ? 99999 : Number(r.priority)) },
+                { key: 'conditions', label: 'Conditions', render: (r) => r.conditions || 'Otherwise (no conditions)' },
+                { key: 'actions', label: 'Actions' },
+              ]}>
+              <Fragment slot="actions">
+                <input type="hidden" name="port" value={rulesPort} />
+                <button class="btn btn-normal" name="intent" value="deleteRule" data-min="1" data-confirm="The selected rules will be deleted. The default rule cannot be deleted." data-confirm-title="Delete rules?" data-confirm-ok="Delete">Delete</button>
+              </Fragment>
+            </DataTable>
+            {editRuleArn && !isNlb && (editingRule ? (
+              <form method="post" id="rule-edit" class="border-t border-line pt-5" data-rule-edit>
+                <input type="hidden" name="intent" value="modifyRule" />
+                <input type="hidden" name="rule" value={editRuleArn} />
+                <input type="hidden" name="port" value={rulesPort} />
+                <h3 class="card-title mb-3">Edit rule (priority {editingRule.Priority})</h3>
+                <div class="grid max-w-3xl gap-4 sm:grid-cols-3">
+                  <FormField label="Priority" for="erprio"><input id="erprio" name="priority" type="number" min="1" max="50000" class="input" required value={rf.priority ?? ''} /></FormField>
+                  <FormField label="Path patterns" for="erpath" optional hint="Comma separated, e.g. /api/*"><input id="erpath" name="pathValues" class="input" autocomplete="off" value={rf.pathValues ?? ''} /></FormField>
+                  <FormField label="Host headers" for="erhost" optional hint="Comma separated"><input id="erhost" name="hostValues" class="input" autocomplete="off" value={rf.hostValues ?? ''} /></FormField>
+                </div>
+            <div class="grid max-w-3xl gap-4 sm:grid-cols-2">
+              <FormField label="Action" for="eraction"><select id="eraction" name="action" class="select"><option value="forward" selected={rf.action !== 'fixed-response' && rf.action !== 'redirect'}>Forward to target group</option>{!isNlb && <option value="fixed-response" selected={rf.action === 'fixed-response'}>Return fixed response</option>}{!isNlb && <option value="redirect" selected={rf.action === 'redirect'}>Redirect</option>}</select></FormField>
+              <div data-show-when="action:forward"><FormField label="Target group" for="ertg"><select id="ertg" name="tg" class="select">{tgs.map((t) => <option value={t.TargetGroupArn} selected={rf.tg === t.TargetGroupArn}>{t.TargetGroupName}</option>)}</select></FormField></div>
+            </div>
+            <div class="grid max-w-3xl gap-4 sm:grid-cols-3" data-show-when="action:fixed-response" hidden>
+              <FormField label="Response code" for="erstatus"><input id="erstatus" name="status" class="input" value={rf.status ?? '200'} /></FormField>
+              <FormField label="Content type" for="erctype"><select id="erctype" name="ctype" class="select">{['text/plain', 'text/html', 'application/json'].map((c) => <option selected={rf.ctype === c}>{c}</option>)}</select></FormField>
+              <FormField label="Response body" for="erbody" optional><input id="erbody" name="body" class="input" value={rf.body ?? ''} /></FormField>
+            </div>
+            <div class="grid max-w-3xl gap-4 sm:grid-cols-3" data-show-when="action:redirect" hidden>
+              <FormField label="Protocol" for="errproto"><select id="errproto" name="rProtocol" class="select">{['#{protocol}', 'HTTP', 'HTTPS'].map((c) => <option selected={(rf.rProtocol ?? '#{protocol}') === c}>{c}</option>)}</select></FormField>
+              <FormField label="Port" for="errport"><input id="errport" name="rPort" class="input" value={rf.rPort ?? '#{port}'} /></FormField>
+              <FormField label="Status code" for="errcode"><select id="errcode" name="rCode" class="select"><option value="HTTP_301" selected={rf.rCode !== 'HTTP_302'}>301 (permanent)</option><option value="HTTP_302" selected={rf.rCode === 'HTTP_302'}>302 (found)</option></select></FormField>
+              <FormField label="Host" for="errhost"><input id="errhost" name="rHost" class="input" value={rf.rHost ?? '#{host}'} /></FormField>
+              <FormField label="Path" for="errpath"><input id="errpath" name="rPath" class="input" value={rf.rPath ?? '/#{path}'} /></FormField>
+              <FormField label="Query" for="errquery"><input id="errquery" name="rQuery" class="input" value={rf.rQuery ?? '#{query}'} /></FormField>
+            </div>
+                <div class="flex gap-2"><button class="btn btn-primary" type="submit">Save rule</button><a class="btn btn-normal" href={here('rules', `&port=${encodeURIComponent(rulesPort)}`)}>Cancel</a></div>
+              </form>
+            ) : <p class="border-t border-line pt-5 text-muted">Rule not found (the default rule is edited through its listener).</p>)}
+            {!isNlb && (
+              <form method="post" class="border-t border-line pt-5">
+                <input type="hidden" name="intent" value="createRule" />
+                <input type="hidden" name="listener" value={ruleListener?.ListenerArn} />
+                <input type="hidden" name="port" value={rulesPort} />
+                <h3 class="card-title mb-3">Add rule</h3>
+                <div class="grid max-w-3xl gap-4 sm:grid-cols-3">
+                  <FormField label="Priority" for="rprio"><input id="rprio" name="priority" type="number" min="1" max="50000" class="input" required /></FormField>
+                  <FormField label="Condition" for="rfield"><select id="rfield" name="field" class="select"><option value="path-pattern">Path</option><option value="host-header">Host header</option></select></FormField>
+                  <FormField label="Values" for="rvalues" hint="Comma separated, e.g. /api/*"><input id="rvalues" name="values" class="input" required autocomplete="off" /></FormField>
+                </div>
+                <div class="grid max-w-3xl gap-4 sm:grid-cols-2">
+                  <FormField label="Action" for="raction"><select id="raction" name="action" class="select"><option value="forward">Forward to target group</option><option value="fixed-response">Return fixed response</option></select></FormField>
+                  <div data-show-when="action:forward"><FormField label="Target group" for="rtg"><select id="rtg" name="tg" class="select">{tgs.map((t) => <option value={t.TargetGroupArn}>{t.TargetGroupName}</option>)}</select></FormField></div>
+                </div>
+                <div class="grid max-w-3xl gap-4 sm:grid-cols-3" data-show-when="action:fixed-response" hidden>
+                  <FormField label="Response code" for="rstatus"><input id="rstatus" name="status" class="input" value="200" /></FormField>
+                  <FormField label="Content type" for="rctype"><select id="rctype" name="ctype" class="select"><option>text/plain</option><option>text/html</option><option>application/json</option></select></FormField>
+                  <FormField label="Response body" for="rbody" optional><input id="rbody" name="body" class="input" /></FormField>
+                </div>
+                <button class="btn btn-primary" type="submit">Add rule</button>
+              </form>
+            )}
+          </>
+        )}
+      </div>
+    )}
+
+    {tab === 'details' && lb && (
+      <div class="space-y-5 p-5">
+        <Details items={[
+          { label: 'Name', value: lb.LoadBalancerName }, { label: 'State', value: stateStatus(lb.State?.Code) }, { label: 'Type', value: capitalize(lb.Type ?? '') },
+          { label: 'Scheme', value: lb.Scheme }, { label: 'IP address type', value: lb.IpAddressType }, { label: 'VPC', value: mono(lb.VpcId) },
+          { label: 'DNS name', value: copyable(lb.DNSName ?? ''), wide: true }, { label: 'ARN', value: copyable(lbArn), wide: true },
+          { label: 'Availability Zones', value: (lb.AvailabilityZones ?? []).map((z) => `${z.ZoneName} (${z.SubnetId})`).join(', ') },
+          { label: 'Security groups', value: uniq(lb.SecurityGroups).join(', ') || '-' }, { label: 'Created', value: dateTime(lb.CreatedTime) },
+        ]} />
+        <div class="border-t border-line pt-5"><h3 class="card-title mb-2">Tags</h3>{tagList(tags?.value)}</div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Attributes</h3>
+          {attrs?.error && <p class="mb-3 text-[13px] text-muted">Couldn't read attributes: {attrs.error}</p>}
+          {(attrs?.value ?? []).length === 0 ? <p class="text-muted">Attributes are not available.</p> : (
+            <form method="post" data-attrs-form>
+              <input type="hidden" name="intent" value="modifyAttributes" />
+              <div class="tbl-wrap"><table class="tbl">
+                <thead><tr><th scope="col">Key</th><th scope="col">Value</th></tr></thead>
+                <tbody>
+                  {(attrs?.value ?? []).map((a, i) => (
+                    <tr><td class="font-mono text-[13px]">{a.Key}</td><td>
+                      <input type="hidden" name={`orig:${a.Key}`} value={a.Value ?? ''} />
+                      <input name={`attr:${a.Key}`} class="input" aria-label={a.Key} value={a.Value ?? ''} autocomplete="off" id={`lbattr-${i}`} />
+                    </td></tr>
+                  ))}
+                </tbody>
+              </table></div>
+              <button class="btn btn-normal mt-3" type="submit">Save attributes</button>
+            </form>
+          )}
+        </div>
+        <div class="grid gap-6 border-t border-line pt-5 lg:grid-cols-2">
+          <form method="post" data-sg-form>
+            <input type="hidden" name="intent" value="setSecurityGroups" />
+            <h3 class="card-title mb-3">Security groups</h3>
+            {ec2Lists?.error && <p class="mb-3 text-[13px] text-muted">Couldn't list EC2 resources: {ec2Lists.error}</p>}
+            {isNlb ? <p class="text-muted">Network load balancers have no security groups here.</p> : (
+              <>
+                <div class="mb-3 space-y-1.5">{(ec2Lists?.value?.sgs ?? []).map((g) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="sg" value={g.GroupId} checked={curSgs.has(g.GroupId!)} /> {nameOf(g.Tags) || g.GroupName} <span class="font-mono text-[13px] text-muted">{g.GroupId}</span></label>)}</div>
+                <button class="btn btn-normal" type="submit">Save security groups</button>
+              </>
+            )}
+          </form>
+          <form method="post" data-subnet-form>
+            <input type="hidden" name="intent" value="setSubnets" />
+            <h3 class="card-title mb-3">Subnets</h3>
+            <div class="mb-3 space-y-1.5">{(ec2Lists?.value?.subnets ?? []).map((n) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="subnet" value={n.SubnetId} checked={curSubnets.has(n.SubnetId)} /> <span class="font-mono text-[13px]">{n.SubnetId}</span> <span class="text-muted">{n.AvailabilityZone} {n.CidrBlock}</span></label>)}</div>
+            <button class="btn btn-normal" type="submit">Save subnets</button>
+          </form>
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3 text-danger">Danger zone</h3>
+          <form method="post"><input type="hidden" name="intent" value="deleteLb" />
+            <button class="btn btn-danger" data-confirm="The load balancer and its listeners will be permanently deleted." data-confirm-title="Delete load balancer?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete load balancer"><Icon name="trash-2" size={16} /> Delete load balancer</button></form>
+        </div>
+      </div>
+    )}
+  </div>
+</Console>

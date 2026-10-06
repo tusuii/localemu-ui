@@ -1,0 +1,35 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateStateMachineCommand } from '@aws-sdk/client-sfn';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, jsonOf, required, str } from '../../lib/action';
+
+const ctx = getCtx(Astro.cookies);
+const sample = JSON.stringify({ Comment: 'Hello World', StartAt: 'Hello', States: { Hello: { Type: 'Pass', Result: { greeting: 'Hello from LocalEmu' }, Next: 'Wait' }, Wait: { Type: 'Wait', Seconds: 1, Next: 'Done' }, Done: { Type: 'Succeed' } } }, null, 2);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Name');
+    jsonOf(f, 'definition', 'Definition');
+    await aws.sfn(ctx).send(new CreateStateMachineCommand({ name, definition: str(f, 'definition'), roleArn: required(f, 'role', 'Execution role'), type: (str(f, 'type') || 'STANDARD') as never }));
+    return { message: `State machine ${name} created.`, redirect: `/stepfunctions/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create state machine" crumbs={[{ label: 'State machines', href: '/stepfunctions' }, { label: 'Create' }]} error={post.error}>
+  <PageHeader title="Create state machine" description="Define the workflow in Amazon States Language." />
+  <form method="post" class="max-w-4xl space-y-4"><input type="hidden" name="intent" value="create" />
+    <Card title="Details">
+      <div class="grid gap-4 sm:grid-cols-2"><FormField label="Name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+        <FormField label="Type" for="type"><select id="type" name="type" class="select"><option value="STANDARD">Standard</option><option value="EXPRESS" selected={v.type === 'EXPRESS'}>Express</option></select></FormField></div>
+      <FormField label="Execution role (ARN)" for="role"><input id="role" name="role" class="input font-mono" required value={v.role ?? `arn:aws:iam::${ctx.account}:role/step-functions-role`} /></FormField>
+    </Card>
+    <Card title="Definition"><textarea name="definition" class="textarea code-area" rows="22" data-code data-json spellcheck="false" required>{v.definition ?? sample}</textarea></Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/stepfunctions">Cancel</a><button class="btn btn-primary" type="submit">Create state machine</button></div>
+  </form>
+</Console>

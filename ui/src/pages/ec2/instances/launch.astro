@@ -1,0 +1,65 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { RunInstancesCommand, DescribeImagesCommand, DescribeKeyPairsCommand, DescribeSecurityGroupsCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../../lib/action';
+import { load } from '../../../lib/errors';
+import { INSTANCE_TYPES } from '../../../lib/ec2';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  launch: async (f) => {
+    const count = intOf(f, 'count', 'Number of instances') ?? 1;
+    const sgs = strs(f, 'sg');
+    const userData = String(f.get('userdata') ?? '');
+    const r = await ec2.send(new RunInstancesCommand({
+      ImageId: required(f, 'ami', 'AMI'), InstanceType: (str(f, 'type') || 't3.micro') as never, MinCount: count, MaxCount: count,
+      KeyName: str(f, 'key') || undefined, SecurityGroupIds: sgs.length ? sgs : undefined, SubnetId: str(f, 'subnet') || undefined,
+      UserData: userData ? Buffer.from(userData).toString('base64') : undefined,
+      TagSpecifications: str(f, 'name') ? [{ ResourceType: 'instance', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined,
+    }));
+    const first = r.Instances?.[0]?.InstanceId;
+    return { message: `Successfully initiated launch of ${count} instance${count > 1 ? 's' : ''}.`, redirect: count === 1 && first ? `/ec2/instances/${first}` : '/ec2/instances' };
+  },
+});
+if (post.response) return post.response;
+
+const [images, keys, sgs, subnets] = await Promise.all([
+  load(async () => ((await ec2.send(new DescribeImagesCommand({ Owners: ['amazon'] }))).Images ?? []).map((i) => ({ id: i.ImageId!, name: i.Name ?? '' })).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 300)),
+  load(async () => (await ec2.send(new DescribeKeyPairsCommand({}))).KeyPairs ?? []),
+  load(async () => (await ec2.send(new DescribeSecurityGroupsCommand({}))).SecurityGroups ?? []),
+  load(async () => (await ec2.send(new DescribeSubnetsCommand({}))).Subnets ?? []),
+]);
+const v = post.values;
+---
+<Console title="Launch an instance" crumbs={[{ label: 'Instances', href: '/ec2/instances' }, { label: 'Launch an instance' }]} error={post.error}>
+  <PageHeader title="Launch an instance" description="Amazon EC2 allows you to create virtual machines, or instances, that run on LocalEmu." />
+  <form method="post" class="max-w-4xl space-y-4">
+    <input type="hidden" name="intent" value="launch" />
+    <Card title="Name and image">
+      <FormField label="Name" for="name" optional><input id="name" name="name" class="input" autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Amazon Machine Image (AMI)" for="ami" hint="Pick from the list or type any AMI ID that LocalEmu knows."><input id="ami" name="ami" class="input font-mono" list="amis" required autocomplete="off" placeholder="ami-…" value={v.ami ?? ''} /></FormField>
+      <datalist id="amis">{(images.data ?? []).map((i) => <option value={i.id}>{i.name}</option>)}</datalist>
+    </Card>
+    <Card title="Instance configuration">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Instance type" for="type"><select id="type" name="type" class="select">{INSTANCE_TYPES.map((t) => <option value={t} selected={(v.type ?? 't3.micro') === t}>{t}</option>)}</select></FormField>
+        <FormField label="Number of instances" for="count"><input id="count" name="count" type="number" min="1" max="20" class="input" value={v.count ?? '1'} /></FormField>
+        <FormField label="Key pair" for="key" optional><select id="key" name="key" class="select"><option value="">Proceed without a key pair</option>{(keys.data ?? []).map((k) => <option value={k.KeyName} selected={v.key === k.KeyName}>{k.KeyName}</option>)}</select></FormField>
+        <FormField label="Subnet" for="subnet" optional><select id="subnet" name="subnet" class="select"><option value="">No preference (default subnet)</option>{(subnets.data ?? []).map((s) => <option value={s.SubnetId} selected={v.subnet === s.SubnetId}>{s.SubnetId} · {s.CidrBlock} · {s.AvailabilityZone}</option>)}</select></FormField>
+      </div>
+      <FormField label="Security groups" for="sg" optional hint="Hold Ctrl/Cmd to select several.">
+        <select id="sg" name="sg" class="select !h-32" multiple>{(sgs.data ?? []).map((g) => <option value={g.GroupId}>{g.GroupName} ({g.GroupId})</option>)}</select>
+      </FormField>
+    </Card>
+    <Card title="Advanced details">
+      <FormField label="User data" for="userdata" optional hint="A shell script that runs at first boot."><textarea id="userdata" name="userdata" class="textarea code-area" rows="6" data-code placeholder="#!/bin/bash&#10;echo hello">{v.userdata ?? ''}</textarea></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/ec2/instances">Cancel</a><button class="btn btn-primary" type="submit">Launch instance</button></div>
+  </form>
+</Console>

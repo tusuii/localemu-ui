@@ -1,0 +1,32 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import Details from '../../components/Details.astro';
+import { GetAccountSummaryCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { load } from '../../lib/errors';
+import { num } from '../../lib/format';
+
+const ctx = getCtx(Astro.cookies);
+const sum = await load(async () => (await aws.iam(ctx).send(new GetAccountSummaryCommand({}))).SummaryMap ?? {});
+const s = (sum.data ?? {}) as Record<string, number | undefined>;
+const tiles = [
+  { label: 'Users', key: 'Users', href: '/iam/users' }, { label: 'User groups', key: 'Groups', href: '/iam/groups' },
+  { label: 'Roles', key: 'Roles', href: '/iam/roles' }, { label: 'Customer managed policies', key: 'Policies', href: '/iam/policies' },
+];
+---
+<Console title="IAM dashboard" crumbs={[{ label: 'Dashboard' }]}>
+  <PageHeader title="IAM dashboard" description="Identity and Access Management for this account." />
+  {sum.error && <p class="mb-3 text-danger">Couldn't load the account summary: {sum.error}</p>}
+  <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    {tiles.map((t) => (
+      <a href={t.href} class="card group p-5 text-fg hover:bg-hover hover:no-underline"><div class="text-[32px] font-bold leading-9 group-hover:text-link">{s[t.key] === undefined ? '-' : num(s[t.key])}</div><div class="text-muted">{t.label}</div></a>
+    ))}
+  </div>
+  <Card class="mt-4" title="Account">
+    <Details items={[{ label: 'Account ID', value: ctx.account }, { label: 'Access keys', value: s.AccessKeysPerUserQuota !== undefined ? `quota ${s.AccessKeysPerUserQuota} per user` : undefined }, { label: 'MFA devices', value: s.MFADevices !== undefined ? String(s.MFADevices) : undefined }]} />
+    <p class="mt-4 text-[13px] text-muted">LocalEmu enforces IAM policies only when started with <code>IAM_ENFORCEMENT=1</code> (or <code>soft</code> for audit mode).</p>
+  </Card>
+</Console>

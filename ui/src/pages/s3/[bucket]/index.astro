@@ -1,0 +1,591 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Card from '../../../components/Card.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import JsonView from '../../../components/JsonView.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import Pager from '../../../components/Pager.astro';
+import FormField from '../../../components/FormField.astro';
+import {
+  ListObjectsV2Command, PutObjectCommand, DeleteBucketCommand, GetBucketVersioningCommand, PutBucketVersioningCommand,
+  GetBucketTaggingCommand, GetBucketPolicyCommand, PutBucketPolicyCommand, DeleteBucketPolicyCommand,
+  GetBucketCorsCommand, PutBucketCorsCommand, DeleteBucketCorsCommand, GetBucketLifecycleConfigurationCommand,
+  GetBucketNotificationConfigurationCommand, GetBucketEncryptionCommand, HeadBucketCommand, DeleteObjectsCommand,
+  PutBucketLifecycleConfigurationCommand, DeleteBucketLifecycleCommand, PutBucketNotificationConfigurationCommand,
+  GetBucketWebsiteCommand, PutBucketWebsiteCommand, DeleteBucketWebsiteCommand, GetBucketReplicationCommand, GetBucketLoggingCommand,
+  PutBucketReplicationCommand, DeleteBucketReplicationCommand, PutBucketLoggingCommand,
+} from '@aws-sdk/client-s3';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, jsonOf, required, str, strs } from '../../../lib/action';
+import { UserError, load, soft } from '../../../lib/errors';
+import { bytes, dateTime, plural } from '../../../lib/format';
+import { badge, tagList, copyable } from '../../../lib/html';
+import { baseName, cleanRelPath, deletePrefix, parentPrefix } from '../../../lib/s3';
+import { pageState, pageLinks } from '../../../lib/paging';
+import {
+  EVENT_TYPES, STORAGE_CLASSES, addNotification, cleanNotifications, flattenNotifications, lifecycleRuleFromForm,
+  removeNotification, ruleActions, ruleFilterText, ruleToForm, upsertRule,
+  REPLICATION_CLASSES, bucketOfArn, replicationRuleFromForm, replicationSummary, replicationToForm, supported, upsertReplicationRule,
+} from '../../../lib/s3-config';
+import { PUBLIC_ENDPOINT } from '../../../lib/config';
+
+const bucket = Astro.params.bucket!;
+const ctx = getCtx(Astro.cookies);
+const s3 = aws.s3(ctx);
+const sp = Astro.url.searchParams;
+const tab = ['objects', 'properties', 'permissions', 'management'].includes(sp.get('tab') ?? '') ? sp.get('tab')! : 'objects';
+const prefix = sp.get('prefix') ?? '';
+const PAGE_SIZE = 100;
+const pg = pageState(Astro.url);
+const search = sp.get('q') ?? '';
+const editRule = sp.get('edit') ?? '';
+const editRep = sp.get('repEdit') ?? '';
+const here = (p: Record<string, string | undefined>) => {
+  const u = new URLSearchParams();
+  for (const [k, v] of Object.entries({ tab: tab === 'objects' ? undefined : tab, ...p })) if (v) u.set(k, v);
+  const q = u.toString();
+  return `${Astro.url.pathname}${q ? '?' + q : ''}`;
+};
+
+const post = await handlePost(Astro, {
+  upload: async (f) => {
+    const all = f.getAll('files');
+    const files = all.filter((x): x is File => x instanceof File && !!x.name);
+    if (!files.length) throw new UserError('Choose at least one file to upload.');
+    const base = str(f, 'prefix');
+    // `paths` (set by the upload script) carries each file's relative path, aligned with `files`;
+    // without JS, Chrome puts the relative path of a picked folder into the file name itself.
+    const paths = f.getAll('paths').map(String);
+    const aligned = paths.length === files.length;
+    for (const [i, file] of files.entries()) {
+      const rel = cleanRelPath(aligned ? paths[i] : file.name);
+      if (!rel) continue;
+      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: base + rel, Body: new Uint8Array(await file.arrayBuffer()), ContentType: file.type || undefined }));
+    }
+    return `Uploaded ${plural(files.length, 'object')}.`;
+  },
+  folder: async (f) => {
+    let name = required(f, 'name', 'Folder name').replace(/^\/+|\/+$/g, '');
+    if (!name) throw new UserError('Folder name is required.');
+    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: `${str(f, 'prefix')}${name}/`, Body: '' }));
+    return `Created folder "${name}".`;
+  },
+  delete: async (f) => {
+    const ids = strs(f, 'id');
+    if (!ids.length) throw new UserError('Select at least one object.');
+    const keys = ids.filter((i) => !i.endsWith('/'));
+    for (const folder of ids.filter((i) => i.endsWith('/'))) await deletePrefix(s3, bucket, folder);
+    for (let i = 0; i < keys.length; i += 1000) await s3.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: keys.slice(i, i + 1000).map((Key) => ({ Key })), Quiet: true } }));
+    return `Deleted ${plural(ids.length, 'item')}.`;
+  },
+  versioning: async (f) => {
+    await s3.send(new PutBucketVersioningCommand({ Bucket: bucket, VersioningConfiguration: { Status: str(f, 'status') === 'Enabled' ? 'Enabled' : 'Suspended' } }));
+    return 'Bucket versioning updated.';
+  },
+  putPolicy: async (f) => {
+    const doc = jsonOf(f, 'policy', 'Bucket policy');
+    await s3.send(new PutBucketPolicyCommand({ Bucket: bucket, Policy: JSON.stringify(doc) }));
+    return 'Bucket policy saved.';
+  },
+  deletePolicy: async () => { await s3.send(new DeleteBucketPolicyCommand({ Bucket: bucket })); return 'Bucket policy deleted.'; },
+  putCors: async (f) => {
+    const rules = jsonOf<unknown>(f, 'cors', 'CORS configuration');
+    const arr = Array.isArray(rules) ? rules : (rules as { CORSRules?: unknown[] }).CORSRules;
+    if (!Array.isArray(arr)) throw new UserError('CORS configuration must be a JSON array of rules (or an object with "CORSRules").');
+    await s3.send(new PutBucketCorsCommand({ Bucket: bucket, CORSConfiguration: { CORSRules: arr as never } }));
+    return 'CORS configuration saved.';
+  },
+  deleteCors: async () => { await s3.send(new DeleteBucketCorsCommand({ Bucket: bucket })); return 'CORS configuration deleted.'; },
+  lcSave: async (f) => {
+    const rule = lifecycleRuleFromForm(f);
+    const cur = await soft(() => s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket })));
+    const rules = upsertRule(((cur.value as any)?.Rules ?? []) as any[], rule);
+    await s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: bucket, LifecycleConfiguration: { Rules: rules as never } }));
+    return { message: `Lifecycle rule "${rule.ID}" saved.`, redirect: here({ tab: 'management' }) };
+  },
+  lcToggle: async (f) => {
+    const id = required(f, 'ruleId', 'Rule');
+    const cur = await soft(() => s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket })));
+    const rules = ((cur.value as any)?.Rules ?? []) as any[];
+    const rule = rules.find((r) => r.ID === id);
+    if (!rule) throw new UserError(`Rule "${id}" no longer exists.`);
+    rule.Status = rule.Status === 'Enabled' ? 'Disabled' : 'Enabled';
+    await s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: bucket, LifecycleConfiguration: { Rules: rules as never } }));
+    return { message: `Rule "${id}" ${rule.Status === 'Enabled' ? 'enabled' : 'disabled'}.`, redirect: here({ tab: 'management' }) };
+  },
+  lcDelete: async (f) => {
+    const id = required(f, 'ruleId', 'Rule');
+    const cur = await soft(() => s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket })));
+    const rules = (((cur.value as any)?.Rules ?? []) as any[]).filter((r) => r.ID !== id);
+    if (rules.length) await s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: bucket, LifecycleConfiguration: { Rules: rules as never } }));
+    else await s3.send(new DeleteBucketLifecycleCommand({ Bucket: bucket }));
+    return { message: `Deleted rule "${id}".`, redirect: here({ tab: 'management' }) };
+  },
+  lcJson: async (f) => {
+    const doc = jsonOf<unknown>(f, 'lifecycle', 'Lifecycle configuration');
+    const rules = Array.isArray(doc) ? doc : (doc as { Rules?: unknown[] }).Rules;
+    if (!Array.isArray(rules)) throw new UserError('Lifecycle configuration must be a JSON array of rules (or an object with "Rules").');
+    if (!rules.length) await s3.send(new DeleteBucketLifecycleCommand({ Bucket: bucket }));
+    else await s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: bucket, LifecycleConfiguration: { Rules: rules as never } }));
+    return { message: 'Lifecycle configuration saved.', redirect: here({ tab: 'management' }) };
+  },
+  ntAdd: async (f) => {
+    const cur = await soft(() => s3.send(new GetBucketNotificationConfigurationCommand({ Bucket: bucket })));
+    const next = addNotification(cur.value, f);
+    await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: bucket, NotificationConfiguration: next as never }));
+    return { message: 'Event notification added.', redirect: here({ tab: 'management' }) };
+  },
+  ntDelete: async (f) => {
+    const [type, ...rest] = required(f, 'nt', 'Notification').split('|');
+    const cur = await soft(() => s3.send(new GetBucketNotificationConfigurationCommand({ Bucket: bucket })));
+    const next = removeNotification(cur.value, type, rest.join('|'));
+    await s3.send(new PutBucketNotificationConfigurationCommand({ Bucket: bucket, NotificationConfiguration: next as never }));
+    return { message: 'Event notification deleted.', redirect: here({ tab: 'management' }) };
+  },
+  putWebsite: async (f) => {
+    const index = required(f, 'indexDoc', 'Index document');
+    const error = str(f, 'errorDoc');
+    await s3.send(new PutBucketWebsiteCommand({ Bucket: bucket, WebsiteConfiguration: { IndexDocument: { Suffix: index }, ...(error ? { ErrorDocument: { Key: error } } : {}) } }));
+    return { message: 'Static website hosting saved.', redirect: here({ tab: 'management' }) };
+  },
+  deleteWebsite: async () => { await s3.send(new DeleteBucketWebsiteCommand({ Bucket: bucket })); return { message: 'Static website hosting disabled.', redirect: here({ tab: 'management' }) }; },
+  repSave: async (f) => {
+    const rule = replicationRuleFromForm(f);
+    const dst = bucketOfArn(rule.Destination.Bucket);
+    const srcV = await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: bucket })));
+    if ((srcV.value as any)?.Status !== 'Enabled') throw new UserError(`Replication requires versioning on the source bucket. Enable it on the Properties tab of "${bucket}" first.`);
+    const dstV = await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: dst })));
+    if (dstV.missing) throw new UserError(`Destination bucket "${dst}" does not exist. Create it first (with versioning enabled).`);
+    if (!dstV.error && (dstV.value as any)?.Status !== 'Enabled') throw new UserError(`Replication requires versioning on the destination bucket too. Enable versioning on "${dst}" first.`);
+    const cur = await soft(() => s3.send(new GetBucketReplicationCommand({ Bucket: bucket })));
+    const old = (cur.value as any)?.ReplicationConfiguration;
+    const role = str(f, 'role') || old?.Role || `arn:aws:iam::${ctx.account}:role/s3-replication`;
+    const rules = upsertReplicationRule((old?.Rules ?? []) as any[], rule);
+    await supported('bucket replication', () => s3.send(new PutBucketReplicationCommand({ Bucket: bucket, ReplicationConfiguration: { Role: role, Rules: rules as never } })));
+    return { message: `Replication rule "${rule.ID}" saved.`, redirect: here({ tab: 'management' }) };
+  },
+  repToggle: async (f) => {
+    const id = required(f, 'ruleId', 'Rule');
+    const cur = await soft(() => s3.send(new GetBucketReplicationCommand({ Bucket: bucket })));
+    const old = (cur.value as any)?.ReplicationConfiguration;
+    const rules = (old?.Rules ?? []) as any[];
+    const rule = rules.find((r) => r.ID === id);
+    if (!rule) throw new UserError(`Rule "${id}" no longer exists.`);
+    rule.Status = rule.Status === 'Enabled' ? 'Disabled' : 'Enabled';
+    await supported('bucket replication', () => s3.send(new PutBucketReplicationCommand({ Bucket: bucket, ReplicationConfiguration: { Role: old.Role, Rules: rules as never } })));
+    return { message: `Replication rule "${id}" ${rule.Status === 'Enabled' ? 'enabled' : 'disabled'}.`, redirect: here({ tab: 'management' }) };
+  },
+  repDelete: async (f) => {
+    const id = required(f, 'ruleId', 'Rule');
+    const cur = await soft(() => s3.send(new GetBucketReplicationCommand({ Bucket: bucket })));
+    const old = (cur.value as any)?.ReplicationConfiguration;
+    const rules = ((old?.Rules ?? []) as any[]).filter((r) => r.ID !== id);
+    if (rules.length) await supported('bucket replication', () => s3.send(new PutBucketReplicationCommand({ Bucket: bucket, ReplicationConfiguration: { Role: old.Role, Rules: rules as never } })));
+    else await supported('bucket replication', () => s3.send(new DeleteBucketReplicationCommand({ Bucket: bucket })));
+    return { message: `Deleted replication rule "${id}".`, redirect: here({ tab: 'management' }) };
+  },
+  logSave: async (f) => {
+    const target = required(f, 'targetBucket', 'Target bucket');
+    const tp = str(f, 'targetPrefix');
+    const chk = await soft(() => s3.send(new HeadBucketCommand({ Bucket: target })));
+    if (chk.missing) throw new UserError(`Target bucket "${target}" does not exist. Create it first.`);
+    await supported('server access logging', () => s3.send(new PutBucketLoggingCommand({ Bucket: bucket, BucketLoggingStatus: { LoggingEnabled: { TargetBucket: target, TargetPrefix: tp } } })));
+    return { message: `Server access logging enabled (logs go to s3://${target}/${tp}).`, redirect: here({ tab: 'management' }) };
+  },
+  logDisable: async () => {
+    await supported('server access logging', () => s3.send(new PutBucketLoggingCommand({ Bucket: bucket, BucketLoggingStatus: {} })));
+    return { message: 'Server access logging disabled.', redirect: here({ tab: 'management' }) };
+  },
+  empty: async () => { const n = await deletePrefix(s3, bucket); return `Emptied bucket (${plural(n, 'object')} removed).`; },
+  deleteBucket: async (f) => {
+    if (str(f, 'force') === '1') await deletePrefix(s3, bucket);
+    await s3.send(new DeleteBucketCommand({ Bucket: bucket }));
+    return { message: `Deleted bucket "${bucket}".`, redirect: '/s3' };
+  },
+});
+if (post.response) return post.response;
+
+// Make sure the bucket exists before rendering anything else.
+const head = await soft(() => s3.send(new HeadBucketCommand({ Bucket: bucket })));
+if (head.missing) return new Response(`Bucket "${bucket}" does not exist`, { status: 404 });
+
+const crumbs = [{ label: 'Buckets', href: '/s3' }, { label: bucket }];
+const tabs = [{ id: 'objects', label: 'Objects' }, { id: 'properties', label: 'Properties' }, { id: 'permissions', label: 'Permissions' }, { id: 'management', label: 'Management' }];
+
+// ---- Objects tab ----
+let rows: any[] = [];
+let listing: Awaited<ReturnType<typeof load<any>>> | undefined;
+let nextToken: string | undefined;
+if (tab === 'objects') {
+  listing = await load(async () => s3.send(new ListObjectsV2Command({
+    Bucket: bucket, Prefix: prefix + search, Delimiter: '/', MaxKeys: PAGE_SIZE, ContinuationToken: pg.token as string | undefined,
+  })));
+  const r = listing.data as any;
+  if (r) {
+    nextToken = r.IsTruncated ? r.NextContinuationToken : undefined;
+    rows = [
+      ...(r.CommonPrefixes ?? []).map((p: any) => ({ id: p.Prefix, name: baseName(p.Prefix) + '/', kind: 'Folder' })),
+      ...(r.Contents ?? []).filter((o: any) => o.Key !== prefix).map((o: any) => ({ id: o.Key, name: baseName(o.Key), kind: 'Object', size: o.Size, modified: o.LastModified, storage: o.StorageClass ?? 'STANDARD', etag: o.ETag })),
+    ];
+  }
+}
+const links = pageLinks(Astro.url, pg, nextToken);
+
+// ---- Properties / permissions / management ----
+const soft_ = {
+  versioning: tab === 'properties' || tab === 'management' ? await soft(() => s3.send(new GetBucketVersioningCommand({ Bucket: bucket }))) : undefined,
+  tags: tab === 'properties' ? await soft(() => s3.send(new GetBucketTaggingCommand({ Bucket: bucket }))) : undefined,
+  encryption: tab === 'properties' ? await soft(() => s3.send(new GetBucketEncryptionCommand({ Bucket: bucket }))) : undefined,
+  policy: tab === 'permissions' ? await soft(() => s3.send(new GetBucketPolicyCommand({ Bucket: bucket }))) : undefined,
+  cors: tab === 'permissions' ? await soft(() => s3.send(new GetBucketCorsCommand({ Bucket: bucket }))) : undefined,
+  lifecycle: tab === 'management' ? await soft(() => s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket }))) : undefined,
+  notifications: tab === 'management' ? await soft(() => s3.send(new GetBucketNotificationConfigurationCommand({ Bucket: bucket }))) : undefined,
+  website: tab === 'management' ? await soft(() => s3.send(new GetBucketWebsiteCommand({ Bucket: bucket }))) : undefined,
+  replication: tab === 'management' ? await soft(() => s3.send(new GetBucketReplicationCommand({ Bucket: bucket }))) : undefined,
+  logging: tab === 'management' ? await soft(() => s3.send(new GetBucketLoggingCommand({ Bucket: bucket }))) : undefined,
+};
+const versioningStatus = (soft_.versioning?.value as any)?.Status as string | undefined;
+const policyText = (soft_.policy?.value as any)?.Policy as string | undefined;
+const corsRules = (soft_.cors?.value as any)?.CORSRules;
+const prettyPolicy = policyText ? JSON.stringify(JSON.parse(policyText), null, 2) : '';
+const stripMeta = (o: any) => { if (!o) return o; const { $metadata, ...rest } = o; return rest; };
+const lcRules: any[] = (soft_.lifecycle?.value as any)?.Rules ?? [];
+const ntRows = flattenNotifications(soft_.notifications?.value);
+const lcForm: Record<string, string> = post.intent === 'lcSave' ? post.values : editRule ? ruleToForm(lcRules.find((r) => r.ID === editRule) ?? {}) : {};
+const ntForm = post.intent === 'ntAdd' ? post.values : {};
+const website = soft_.website?.value as any;
+const replication = (soft_.replication?.value as any)?.ReplicationConfiguration;
+const logging = (soft_.logging?.value as any)?.LoggingEnabled;
+const repRules: any[] = replication?.Rules ?? [];
+const repForm: Record<string, string> = post.intent === 'repSave' ? post.values : editRep ? replicationToForm(repRules.find((r) => r.ID === editRep)) : {};
+const logForm: Record<string, string> = post.intent === 'logSave' ? post.values : { targetBucket: logging?.TargetBucket ?? '', targetPrefix: logging?.TargetPrefix ?? '' };
+const prefixParts = prefix.split('/').filter(Boolean);
+---
+<Console title={bucket} crumbs={crumbs} error={post.error}>
+  <PageHeader title={bucket} badge={ctx.region} />
+
+  <div class="card" data-s3-dropzone>
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'objects' && (
+      <div class="p-0">
+        <div class="flex flex-wrap items-center gap-1 px-5 pt-4 text-[14px]">
+          <a href={here({})}><Icon name="hard-drive" size={14} /> {bucket}</a>
+          {prefixParts.map((part, i) => (<><Icon name="chevron-right" size={12} class="text-faint" /><a href={here({ prefix: prefixParts.slice(0, i + 1).join('/') + '/' })}>{part}</a></>))}
+          {prefix && <a class="ml-3 text-[13px]" href={here({ prefix: parentPrefix(prefix) || undefined })}><Icon name="arrow-left" size={12} /> Up one level</a>}
+        </div>
+        <form method="get" class="flex flex-wrap items-end gap-2 px-5 pt-3" role="search">
+          {prefix && <input type="hidden" name="prefix" value={prefix} />}
+          <div class="w-full max-w-sm">
+            <label class="field-label" for="prefix-search">Search by prefix (server-side)</label>
+            <input id="prefix-search" type="search" name="q" value={search} class="input" placeholder="Keys starting with..." autocomplete="off" />
+          </div>
+          <button class="btn btn-normal" type="submit">Search</button>
+          {search && <a class="btn btn-normal" href={here({ prefix: prefix || undefined })}>Clear</a>}
+          <span class="pb-2 text-[12px] text-muted">The filter box in the table below only narrows the {rows.length} loaded objects.</span>
+        </form>
+        <div class="-mx-px">
+          <DataTable
+            title="Objects" rows={rows} error={listing?.error} select="multi" nameKey="name" pageSize={1000} id="objects" bare
+            filter="Filter loaded objects by name"
+            description={prefix ? `s3://${bucket}/${prefix}` : `s3://${bucket}/`}
+            emptyTitle="No objects" emptyText={prefix ? 'This folder is empty.' : 'You don\'t have any objects in this bucket.'}
+            columns={[
+              { key: 'name', label: 'Name', render: (r) => r.kind === 'Folder' ? `📁 ${r.name}` : r.name, href: (r) => r.kind === 'Folder' ? here({ prefix: r.id }) : `/s3/${encodeURIComponent(bucket)}/object?key=${encodeURIComponent(r.id)}`, sort: (r) => (r.kind === 'Folder' ? '0' : '1') + r.name.toLowerCase() },
+              { key: 'kind', label: 'Type' },
+              { key: 'modified', label: 'Last modified', nowrap: true, render: (r) => r.modified ? dateTime(r.modified) : '-', sort: (r) => new Date(r.modified ?? 0).getTime() },
+              { key: 'size', label: 'Size', nowrap: true, render: (r) => r.kind === 'Folder' ? '-' : bytes(r.size), sort: (r) => r.size ?? -1 },
+              { key: 'storage', label: 'Storage class', render: (r) => r.storage ? badge(r.storage) : '-' },
+            ]}
+          >
+            <Fragment slot="actions">
+              <a class="btn btn-normal" data-href-template={`/s3/${encodeURIComponent(bucket)}/download?key={id}`} data-min="1" data-max="1">Download</a>
+              <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected objects (and everything inside selected folders) will be permanently deleted." data-confirm-title="Delete objects?" data-confirm-type="permanently delete" data-confirm-ok="Delete objects">Delete</button>
+              <button class="btn btn-normal" formaction={`/s3/${encodeURIComponent(bucket)}/zip`} formmethod="post" data-min="1" data-zip>Download as zip</button>
+              <a class="btn btn-normal" href="#create-folder">Create folder</a>
+              <a class="btn btn-primary" href="#upload"><Icon name="file-up" size={16} /> Upload</a>
+            </Fragment>
+            <a slot="empty" class="btn btn-primary" href="#upload">Upload</a>
+          </DataTable>
+        </div>
+        <Pager links={links} count={rows.length} noun="items" />
+      </div>
+    )}
+
+    {tab === 'properties' && (
+      <div class="space-y-6 p-5">
+        <section>
+          <h3 class="card-title mb-3">Bucket overview</h3>
+          <Details items={[
+            { label: 'AWS Region', value: ctx.region },
+            { label: 'Amazon Resource Name (ARN)', value: copyable(`arn:aws:s3:::${bucket}`) },
+            { label: 'Bucket endpoint (path style)', value: copyable(`${PUBLIC_ENDPOINT}/${bucket}`) },
+          ]} />
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Bucket Versioning</h3>
+          <p class="card-desc mb-3">Current status: <strong>{versioningStatus ?? 'Disabled (never enabled)'}</strong></p>
+          <form method="post" class="flex items-center gap-2">
+            <input type="hidden" name="intent" value="versioning" />
+            {versioningStatus === 'Enabled'
+              ? <button class="btn btn-normal" name="status" value="Suspended">Suspend versioning</button>
+              : <button class="btn btn-normal" name="status" value="Enabled">Enable versioning</button>}
+          </form>
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-2">Tags</h3>
+          {soft_.tags?.missing ? <p class="text-muted">No tags on this bucket.</p> : <div>{tagList(((soft_.tags?.value as any)?.TagSet ?? []))}</div>}
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-2">Default encryption</h3>
+          {soft_.encryption?.missing || !soft_.encryption?.value ? <p class="text-muted">Not configured.</p> : <JsonView value={stripMeta(soft_.encryption.value)} maxHeight="240px" />}
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1 text-danger">Danger zone</h3>
+          <p class="card-desc mb-3">These actions can't be undone.</p>
+          <form method="post" class="flex flex-wrap gap-2">
+            <button class="btn btn-danger" name="intent" value="empty" data-confirm="Permanently deletes every object and version in this bucket." data-confirm-title="Empty bucket?" data-confirm-type="permanently delete" data-confirm-name={bucket} data-confirm-ok="Empty bucket">Empty bucket</button>
+            <button class="btn btn-danger" name="intent" value="deleteBucket" data-confirm="The bucket must be empty. To delete a bucket with objects, empty it first or use the force option." data-confirm-title="Delete bucket?" data-confirm-name={bucket} data-confirm-type={bucket} data-confirm-ok="Delete bucket">Delete bucket</button>
+            <label class="flex items-center gap-2 text-muted"><input type="checkbox" class="checkbox" name="force" value="1" /> also delete all objects</label>
+          </form>
+        </section>
+      </div>
+    )}
+
+    {tab === 'permissions' && (
+      <div class="space-y-6 p-5">
+        <section>
+          <h3 class="card-title mb-1">Bucket policy</h3>
+          <p class="card-desc mb-3">JSON policy document controlling access to this bucket.</p>
+          {soft_.policy?.error && <Flash type="warning" text="Couldn't read the bucket policy" detail={soft_.policy.error} dismissible={false} class="mb-3" />}
+          <form method="post" class="space-y-3">
+            <textarea name="policy" class="textarea code-area" rows="12" data-code data-json spellcheck="false" placeholder={'{\n  "Version": "2012-10-17",\n  "Statement": []\n}'}>{post.values.policy ?? prettyPolicy}</textarea>
+            <div class="flex gap-2">
+              <button class="btn btn-primary" name="intent" value="putPolicy">Save policy</button>
+              {policyText && <button class="btn btn-danger" name="intent" value="deletePolicy" formnovalidate data-confirm="Removes the bucket policy." data-confirm-title="Delete bucket policy?" data-confirm-name="Bucket policy" data-confirm-list="false">Delete</button>}
+            </div>
+          </form>
+        </section>
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Cross-origin resource sharing (CORS)</h3>
+          <p class="card-desc mb-3">A JSON array of CORS rules.</p>
+          <form method="post" class="space-y-3">
+            <textarea name="cors" class="textarea code-area" rows="10" data-code data-json spellcheck="false" placeholder={'[\n  {\n    "AllowedOrigins": ["*"],\n    "AllowedMethods": ["GET"],\n    "AllowedHeaders": ["*"]\n  }\n]'}>{post.values.cors ?? (corsRules ? JSON.stringify(corsRules, null, 2) : '')}</textarea>
+            <div class="flex gap-2">
+              <button class="btn btn-primary" name="intent" value="putCors">Save CORS</button>
+              {corsRules && <button class="btn btn-danger" name="intent" value="deleteCors" formnovalidate data-confirm="Removes the CORS configuration." data-confirm-title="Delete CORS configuration?" data-confirm-name="CORS configuration" data-confirm-list="false">Delete</button>}
+            </div>
+          </form>
+        </section>
+      </div>
+    )}
+
+    {tab === 'management' && (
+      <div class="space-y-6 p-5">
+        <section>
+          <h3 class="card-title mb-1">Lifecycle rules ({lcRules.length})</h3>
+          <p class="card-desc mb-3">Rules that expire, transition or clean up objects automatically.</p>
+          {soft_.lifecycle?.error && <Flash type="warning" text="Couldn't read lifecycle rules" detail={soft_.lifecycle.error} dismissible={false} class="mb-3" />}
+          {lcRules.length === 0 ? <p class="text-muted">No lifecycle rules configured.</p> : (
+            <div class="tbl-wrap"><table class="tbl" data-lifecycle-rules>
+              <thead><tr><th scope="col">Rule</th><th scope="col">Status</th><th scope="col">Scope</th><th scope="col">Actions</th><th scope="col"></th></tr></thead>
+              <tbody>
+                {lcRules.map((r) => (
+                  <tr data-rule={r.ID}>
+                    <td>{r.ID}</td>
+                    <td><Fragment set:html={badge(r.Status)} /></td>
+                    <td>{ruleFilterText(r)}</td>
+                    <td><ul class="list-disc pl-4">{ruleActions(r).map((a) => <li>{a}</li>)}</ul></td>
+                    <td class="nowrap">
+                      <form method="post" class="flex gap-1">
+                        <input type="hidden" name="ruleId" value={r.ID} />
+                        <a class="btn btn-normal btn-sm" href={here({ tab: 'management', edit: r.ID }) + '#lc-form'}>Edit</a>
+                        <button class="btn btn-normal btn-sm" name="intent" value="lcToggle">{r.Status === 'Enabled' ? 'Disable' : 'Enable'}</button>
+                        <button class="btn btn-danger btn-sm" name="intent" value="lcDelete" data-confirm="This lifecycle rule will be deleted." data-confirm-title="Delete lifecycle rule?" data-confirm-name={r.ID} data-confirm-list="false" data-confirm-ok="Delete rule">Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          )}
+          <form method="post" id="lc-form" class="mt-4 space-y-3 rounded border border-line p-4">
+            <input type="hidden" name="intent" value="lcSave" />
+            <h4 class="font-semibold">{editRule ? `Edit rule "${editRule}"` : 'Add lifecycle rule'} <span class="text-[13px] font-normal text-muted">(saving with an existing name replaces that rule)</span></h4>
+            <div class="grid gap-3 md:grid-cols-3">
+              <FormField label="Rule name" for="lc-id"><input id="lc-id" name="ruleId" class="input" required value={lcForm.ruleId ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Status" for="lc-status"><select id="lc-status" name="status" class="select"><option value="Enabled" selected={(lcForm.status ?? 'Enabled') === 'Enabled'}>Enabled</option><option value="Disabled" selected={lcForm.status === 'Disabled'}>Disabled</option></select></FormField>
+              <FormField label="Prefix filter" for="lc-prefix" optional><input id="lc-prefix" name="prefix" class="input" value={lcForm.prefix ?? ''} placeholder="logs/" autocomplete="off" /></FormField>
+              <FormField label="Tag key" for="lc-tk" optional><input id="lc-tk" name="tagKey" class="input" value={lcForm.tagKey ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Tag value" for="lc-tv" optional><input id="lc-tv" name="tagValue" class="input" value={lcForm.tagValue ?? ''} autocomplete="off" /></FormField>
+              <span></span>
+              <FormField label="Expire current versions after (days)" for="lc-exp" optional><input id="lc-exp" name="expDays" type="number" min="1" class="input" value={lcForm.expDays ?? ''} /></FormField>
+              <FormField label="Transition after (days)" for="lc-tr" optional><input id="lc-tr" name="transDays" type="number" min="1" class="input" value={lcForm.transDays ?? ''} /></FormField>
+              <FormField label="Transition storage class" for="lc-tc"><select id="lc-tc" name="transClass" class="select">{STORAGE_CLASSES.map((c) => <option value={c} selected={(lcForm.transClass ?? 'GLACIER') === c}>{c}</option>)}</select></FormField>
+              <FormField label="Delete noncurrent versions after (days)" for="lc-nc" optional><input id="lc-nc" name="ncDays" type="number" min="1" class="input" value={lcForm.ncDays ?? ''} /></FormField>
+              <FormField label="Abort incomplete multipart uploads after (days)" for="lc-ab" optional><input id="lc-ab" name="abortDays" type="number" min="1" class="input" value={lcForm.abortDays ?? ''} /></FormField>
+            </div>
+            <div class="flex gap-2">
+              <button class="btn btn-primary" type="submit">{editRule ? 'Save rule' : 'Add rule'}</button>
+              {editRule && <a class="btn btn-normal" href={here({ tab: 'management' })}>Cancel</a>}
+            </div>
+          </form>
+          <details class="mt-3">
+            <summary class="cursor-pointer text-[13px]">Edit all rules as JSON</summary>
+            <form method="post" class="mt-2 space-y-3">
+              <input type="hidden" name="intent" value="lcJson" />
+              <textarea name="lifecycle" class="textarea code-area" rows="12" data-code data-json spellcheck="false" placeholder={'[\n  {\n    "ID": "expire-logs",\n    "Status": "Enabled",\n    "Filter": { "Prefix": "logs/" },\n    "Expiration": { "Days": 30 }\n  }\n]'}>{post.intent === 'lcJson' ? post.values.lifecycle : (lcRules.length ? JSON.stringify(lcRules, null, 2) : '')}</textarea>
+              <button class="btn btn-normal" type="submit">Save JSON (an empty array removes all rules)</button>
+            </form>
+          </details>
+        </section>
+
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Event notifications ({ntRows.length})</h3>
+          <p class="card-desc mb-3">Send S3 events to an SQS queue, SNS topic or Lambda function. The destination must already exist.</p>
+          {soft_.notifications?.error && <Flash type="warning" text="Couldn't read event notifications" detail={soft_.notifications.error} dismissible={false} class="mb-3" />}
+          {ntRows.length === 0 ? <p class="text-muted">No event notifications configured.</p> : (
+            <div class="tbl-wrap"><table class="tbl" data-notifications>
+              <thead><tr><th scope="col">Name</th><th scope="col">Destination</th><th scope="col">Events</th><th scope="col">Filter</th><th scope="col"></th></tr></thead>
+              <tbody>
+                {ntRows.map((n) => (
+                  <tr data-notification={n.id}>
+                    <td>{n.id}</td>
+                    <td><span class="text-muted">{n.type}</span> <span class="font-mono text-[13px] break-all">{n.arn}</span></td>
+                    <td><ul class="list-disc pl-4">{n.events.map((e) => <li>{e}</li>)}</ul></td>
+                    <td>{[n.prefix && `prefix "${n.prefix}"`, n.suffix && `suffix "${n.suffix}"`].filter(Boolean).join(', ') || '-'}</td>
+                    <td class="nowrap">
+                      <form method="post">
+                        <input type="hidden" name="nt" value={`${n.type}|${n.id}`} />
+                        <button class="btn btn-danger btn-sm" name="intent" value="ntDelete" data-confirm="This event notification will be deleted." data-confirm-title="Delete event notification?" data-confirm-name={n.id} data-confirm-list="false" data-confirm-ok="Delete notification">Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          )}
+          <form method="post" id="nt-form" class="mt-4 space-y-3 rounded border border-line p-4">
+            <input type="hidden" name="intent" value="ntAdd" />
+            <h4 class="font-semibold">Add event notification</h4>
+            <div class="grid gap-3 md:grid-cols-3">
+              <FormField label="Name" for="nt-id" optional><input id="nt-id" name="id" class="input" value={ntForm.id ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Destination type" for="nt-type"><select id="nt-type" name="type" class="select"><option value="Queue" selected={ntForm.type === 'Queue'}>SQS queue</option><option value="Topic" selected={ntForm.type === 'Topic'}>SNS topic</option><option value="Lambda" selected={ntForm.type === 'Lambda'}>Lambda function</option></select></FormField>
+              <FormField label="Destination ARN" for="nt-arn"><input id="nt-arn" name="arn" class="input" required value={ntForm.arn ?? ''} placeholder={`arn:aws:sqs:${ctx.region}:${ctx.account}:my-queue`} autocomplete="off" /></FormField>
+              <FormField label="Prefix filter" for="nt-prefix" optional><input id="nt-prefix" name="prefix" class="input" value={ntForm.prefix ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Suffix filter" for="nt-suffix" optional><input id="nt-suffix" name="suffix" class="input" value={ntForm.suffix ?? ''} autocomplete="off" /></FormField>
+            </div>
+            <fieldset>
+              <legend class="field-label">Event types</legend>
+              <div class="grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
+                {EVENT_TYPES.map((e) => <label class="flex items-center gap-2 text-[13px]"><input type="checkbox" class="checkbox" name="events" value={e} checked={e === 's3:ObjectCreated:*' && !post.posted} /> {e}</label>)}
+              </div>
+            </fieldset>
+            <button class="btn btn-primary" type="submit">Add notification</button>
+          </form>
+        </section>
+
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Static website hosting</h3>
+          {website ? <p class="card-desc mb-3">Enabled: index <code>{website.IndexDocument?.Suffix}</code>{website.ErrorDocument?.Key ? <> , error <code>{website.ErrorDocument.Key}</code></> : null}.</p> : <p class="card-desc mb-3">Not enabled.</p>}
+          {soft_.website?.error && <Flash type="warning" text="Couldn't read website configuration" detail={soft_.website.error} dismissible={false} class="mb-3" />}
+          <form method="post" class="flex flex-wrap items-end gap-2">
+            <div><label class="field-label" for="web-index">Index document</label><input id="web-index" name="indexDoc" class="input" required value={post.values.indexDoc ?? website?.IndexDocument?.Suffix ?? 'index.html'} /></div>
+            <div><label class="field-label" for="web-error">Error document <span class="opt"> - optional</span></label><input id="web-error" name="errorDoc" class="input" value={post.values.errorDoc ?? website?.ErrorDocument?.Key ?? ''} /></div>
+            <button class="btn btn-normal" name="intent" value="putWebsite">Save</button>
+            {website && <button class="btn btn-danger" name="intent" value="deleteWebsite" formnovalidate data-confirm="Disables static website hosting." data-confirm-title="Disable website hosting?" data-confirm-name="Website hosting" data-confirm-list="false">Disable</button>}
+          </form>
+        </section>
+
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Replication rules ({repRules.length})</h3>
+          <p class="card-desc mb-3">Copy new objects to another bucket. Both the source and the destination bucket need versioning enabled.</p>
+          {versioningStatus !== 'Enabled' && <Flash type="warning" text="Versioning is not enabled on this bucket" detail="Replication requires versioning. Enable it on the Properties tab before adding rules." dismissible={false} class="mb-3" />}
+          {soft_.replication?.error && <Flash type="warning" text="Couldn't read replication configuration" detail={soft_.replication.error} dismissible={false} class="mb-3" />}
+          {repRules.length === 0 ? <p class="text-muted">No replication rules configured.</p> : (
+            <div class="tbl-wrap"><table class="tbl" data-replication>
+              <thead><tr><th scope="col">Rule</th><th scope="col">Status</th><th scope="col">Priority</th><th scope="col">Prefix</th><th scope="col">Destination</th><th scope="col">Storage class</th><th scope="col"></th></tr></thead>
+              <tbody>
+                {repRules.map((r) => { const s = replicationSummary(r); return (
+                  <tr data-rep-rule={r.ID}>
+                    <td><a href={here({ tab: 'management', repEdit: r.ID }) + '#rep-form'}>{r.ID}</a></td>
+                    <td set:html={r.Status === 'Enabled' ? badge('Enabled', 'green') : badge('Disabled', 'grey')} />
+                    <td>{r.Priority ?? '-'}</td><td>{s.prefix || '(all objects)'}</td><td class="font-mono text-[13px]">{s.dest}</td><td>{s.storage}</td>
+                    <td class="nowrap">
+                      <form method="post" class="flex gap-2">
+                        <input type="hidden" name="ruleId" value={r.ID} />
+                        <button class="btn btn-normal btn-sm" name="intent" value="repToggle">{r.Status === 'Enabled' ? 'Disable' : 'Enable'}</button>
+                        <button class="btn btn-danger btn-sm" name="intent" value="repDelete" data-confirm="This replication rule will be deleted." data-confirm-title="Delete replication rule?" data-confirm-name={r.ID} data-confirm-list="false" data-confirm-ok="Delete rule">Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                ); })}
+              </tbody>
+            </table></div>
+          )}
+          <form method="post" id="rep-form" class="mt-4 space-y-3 rounded border border-line p-4">
+            <input type="hidden" name="intent" value="repSave" />
+            <h4 class="font-semibold">{editRep ? `Edit replication rule "${editRep}"` : 'Add replication rule'}</h4>
+            <div class="grid gap-3 md:grid-cols-3">
+              <FormField label="Rule name" for="rep-id"><input id="rep-id" name="ruleId" class="input" required value={repForm.ruleId ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Status" for="rep-status"><select id="rep-status" name="status" class="select"><option value="Enabled" selected={repForm.status !== 'Disabled'}>Enabled</option><option value="Disabled" selected={repForm.status === 'Disabled'}>Disabled</option></select></FormField>
+              <FormField label="Priority" for="rep-prio"><input id="rep-prio" name="priority" type="number" min="0" class="input" value={repForm.priority ?? '1'} /></FormField>
+              <FormField label="Prefix filter" for="rep-prefix" optional hint="Leave blank to replicate every object."><input id="rep-prefix" name="prefix" class="input" value={repForm.prefix ?? ''} autocomplete="off" /></FormField>
+              <FormField label="Destination bucket" for="rep-dest" hint="Bucket name or ARN."><input id="rep-dest" name="dest" class="input" required value={repForm.dest ?? ''} autocomplete="off" placeholder="arn:aws:s3:::my-replica-bucket" /></FormField>
+              <FormField label="Destination storage class" for="rep-class"><select id="rep-class" name="storageClass" class="select">{REPLICATION_CLASSES.map((c) => <option value={c} selected={(repForm.storageClass ?? '') === c}>{c || 'Same as source'}</option>)}</select></FormField>
+              <FormField label="IAM role ARN" for="rep-role" optional hint="Defaults to the existing role or a placeholder."><input id="rep-role" name="role" class="input" value={repForm.role ?? ''} autocomplete="off" /></FormField>
+            </div>
+            <button class="btn btn-primary" type="submit">{editRep ? 'Save rule' : 'Add rule'}</button>
+            {editRep && <a class="btn btn-normal" href={here({ tab: 'management' })}>Cancel</a>}
+          </form>
+        </section>
+
+        <section class="border-t border-line pt-5">
+          <h3 class="card-title mb-1">Server access logging</h3>
+          {logging ? <p class="card-desc mb-3" data-logging-state>Enabled: logs are delivered to <code>s3://{logging.TargetBucket}/{logging.TargetPrefix ?? ''}</code>.</p> : <p class="card-desc mb-3" data-logging-state>Disabled.</p>}
+          {soft_.logging?.error && <Flash type="warning" text="Couldn't read logging configuration" detail={soft_.logging.error} dismissible={false} class="mb-3" />}
+          <form method="post" class="flex flex-wrap items-end gap-2">
+            <div><label class="field-label" for="log-target">Target bucket</label><input id="log-target" name="targetBucket" class="input" required value={logForm.targetBucket ?? ''} autocomplete="off" /></div>
+            <div><label class="field-label" for="log-prefix">Target prefix <span class="opt"> - optional</span></label><input id="log-prefix" name="targetPrefix" class="input" value={logForm.targetPrefix ?? ''} autocomplete="off" /></div>
+            <button class="btn btn-normal" name="intent" value="logSave">{logging ? 'Save' : 'Enable logging'}</button>
+            {logging && <button class="btn btn-danger" name="intent" value="logDisable" formnovalidate data-confirm="Server access logs will no longer be delivered." data-confirm-title="Disable server access logging?" data-confirm-name="Server access logging" data-confirm-list="false">Disable</button>}
+          </form>
+        </section>
+      </div>
+    )}
+  </div>
+
+  {tab === 'objects' && (
+    <div class="mt-4 grid gap-4 lg:grid-cols-2">
+      <Card title="Upload" id="upload" description={`Files and folders are uploaded to s3://${bucket}/${prefix}. You can also drop them anywhere on the objects card.`}>
+        <form method="post" enctype="multipart/form-data" class="space-y-3" data-s3-upload>
+          <input type="hidden" name="intent" value="upload" />
+          <input type="hidden" name="prefix" value={prefix} />
+          <FormField label="Files" for="up-files"><input id="up-files" type="file" name="files" multiple class="input !py-1.5" /></FormField>
+          <FormField label="Folder" for="up-folder" hint="Relative paths inside the folder are preserved."><input id="up-folder" type="file" name="files" multiple {...{ webkitdirectory: true }} class="input !py-1.5" /></FormField>
+          <div class="flex items-center gap-3">
+            <button class="btn btn-primary" type="submit"><Icon name="file-up" size={16} /> Upload</button>
+            <span data-upload-status class="text-[13px] text-muted" aria-live="polite"></span>
+          </div>
+        </form>
+      </Card>
+      <Card title="Create folder" id="create-folder" description="Folders are zero-byte keys ending in a slash.">
+        <form method="post" class="flex items-end gap-2">
+          <input type="hidden" name="intent" value="folder" />
+          <input type="hidden" name="prefix" value={prefix} />
+          <div class="flex-1"><label class="field-label" for="folder-name">Folder name</label><input id="folder-name" name="name" class="input" required autocomplete="off" /></div>
+          <button class="btn btn-normal" type="submit">Create folder</button>
+        </form>
+      </Card>
+    </div>
+  )}
+  <style is:global>
+    .s3-dragging { outline: 2px dashed var(--color-link, #0972d3); outline-offset: -2px; }
+  </style>
+  <script>import '../../../scripts/s3-upload';</script>
+</Console>

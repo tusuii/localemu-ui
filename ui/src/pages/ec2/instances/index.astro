@@ -1,0 +1,56 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import ActionsMenu from '../../../components/ActionsMenu.astro';
+import Icon from '../../../components/Icon.astro';
+import { DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand, RebootInstancesCommand, TerminateInstancesCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load } from '../../../lib/errors';
+import { dateTime, plural } from '../../../lib/format';
+import { stateStatus } from '../../../lib/html';
+import { nameOf } from '../../../lib/ec2';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const ids = (f: FormData) => { const x = strs(f, 'id'); if (!x.length) throw new UserError('Select at least one instance.'); return x; };
+const post = await handlePost(Astro, {
+  start: async (f) => bulk(strs(f, 'id'), { verb: 'Starting', noun: 'instance' }, (i) => ec2.send(new StartInstancesCommand({ InstanceIds: [i] }))),
+  stop: async (f) => bulk(strs(f, 'id'), { verb: 'Stopping', noun: 'instance' }, (i) => ec2.send(new StopInstancesCommand({ InstanceIds: [i] }))),
+  reboot: async (f) => bulk(strs(f, 'id'), { verb: 'Rebooting', noun: 'instance' }, (i) => ec2.send(new RebootInstancesCommand({ InstanceIds: [i] }))),
+  terminate: async (f) => bulk(strs(f, 'id'), { verb: 'Terminating', noun: 'instance' }, (i) => ec2.send(new TerminateInstancesCommand({ InstanceIds: [i] }))),
+});
+if (post.response) return post.response;
+
+const res = await load(async () => ((await ec2.send(new DescribeInstancesCommand({}))).Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => ({
+  id: i.InstanceId, name: nameOf(i.Tags) || '-', state: i.State?.Name, type: i.InstanceType, az: i.Placement?.AvailabilityZone, publicIp: i.PublicIpAddress, privateIp: i.PrivateIpAddress, key: i.KeyName, launched: i.LaunchTime, ami: i.ImageId,
+})));
+---
+<Console title="Instances" crumbs={[{ label: 'Instances' }]} error={post.error}>
+  <PageHeader title="Instances" />
+  <DataTable
+    title="Instances" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="name" pageSize={25} filter="Find instances by attribute or tag"
+    emptyTitle="No instances" emptyText="You do not have any instances in this region."
+    columns={[
+      { key: 'name', label: 'Name' }, { key: 'id', label: 'Instance ID', href: (r) => `/ec2/instances/${r.id}`, mono: true },
+      { key: 'state', label: 'Instance state', render: (r) => stateStatus(r.state, { running: 'success', stopped: 'stopped', terminated: 'stopped' }) },
+      { key: 'type', label: 'Type' }, { key: 'az', label: 'Availability Zone' }, { key: 'publicIp', label: 'Public IPv4' }, { key: 'privateIp', label: 'Private IPv4' },
+      { key: 'key', label: 'Key name' }, { key: 'launched', label: 'Launch time', nowrap: true, render: (r) => dateTime(r.launched), sort: (r) => new Date(r.launched ?? 0).getTime() },
+    ]}
+  >
+    <Fragment slot="actions">
+      <ActionsMenu id="instance-actions" label="Instance state">
+        <button class="menu-item" name="intent" value="start" data-min="1">Start instance</button>
+        <button class="menu-item" name="intent" value="stop" data-min="1" data-confirm="The selected instances will be stopped." data-confirm-title="Stop instances?" data-confirm-ok="Stop" data-confirm-style="primary">Stop instance</button>
+        <button class="menu-item" name="intent" value="reboot" data-min="1" data-confirm="The selected instances will be rebooted." data-confirm-title="Reboot instances?" data-confirm-ok="Reboot" data-confirm-style="primary">Reboot instance</button>
+        <div class="menu-sep"></div>
+        <button class="menu-item !text-danger" name="intent" value="terminate" data-min="1" data-confirm="Terminated instances can't be recovered. Their instance store data is lost." data-confirm-title="Terminate instances?" data-confirm-type="terminate" data-confirm-ok="Terminate">Terminate instance</button>
+      </ActionsMenu>
+      <a class="btn btn-primary" href="/ec2/instances/launch"><Icon name="play" size={16} /> Launch instances</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/ec2/instances/launch">Launch instances</a>
+  </DataTable>
+</Console>

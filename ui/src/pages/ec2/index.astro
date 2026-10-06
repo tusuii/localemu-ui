@@ -1,0 +1,46 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import Icon from '../../components/Icon.astro';
+import {
+  DescribeInstancesCommand, DescribeVolumesCommand, DescribeKeyPairsCommand, DescribeSecurityGroupsCommand,
+  DescribeAddressesCommand, DescribeVpcsCommand, DescribeSubnetsCommand, DescribeSnapshotsCommand,
+} from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { regionName } from '../../lib/config';
+import { num } from '../../lib/format';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const o = () => ({ abortSignal: AbortSignal.timeout(6000) });
+const safe = async <T,>(fn: () => Promise<T>) => { try { return await fn(); } catch { return undefined; } };
+const [inst, vols, keys, sgs, addrs, vpcs, subnets, snaps] = await Promise.all([
+  safe(() => ec2.send(new DescribeInstancesCommand({}), o())), safe(() => ec2.send(new DescribeVolumesCommand({}), o())), safe(() => ec2.send(new DescribeKeyPairsCommand({}), o())),
+  safe(() => ec2.send(new DescribeSecurityGroupsCommand({}), o())), safe(() => ec2.send(new DescribeAddressesCommand({}), o())), safe(() => ec2.send(new DescribeVpcsCommand({}), o())),
+  safe(() => ec2.send(new DescribeSubnetsCommand({}), o())), safe(() => ec2.send(new DescribeSnapshotsCommand({ OwnerIds: ['self'] }), o())),
+]);
+const instances = (inst?.Reservations ?? []).flatMap((r) => r.Instances ?? []);
+const running = instances.filter((i) => i.State?.Name === 'running').length;
+const stopped = instances.filter((i) => i.State?.Name === 'stopped').length;
+const tiles = [
+  { label: 'Instances (running)', n: running, href: '/ec2/instances' }, { label: 'Instances (stopped)', n: stopped, href: '/ec2/instances' },
+  { label: 'Volumes', n: vols?.Volumes?.length, href: '/ec2/volumes' }, { label: 'Snapshots', n: snaps?.Snapshots?.length, href: '/ec2/snapshots' },
+  { label: 'Key pairs', n: keys?.KeyPairs?.length, href: '/ec2/key-pairs' }, { label: 'Security groups', n: sgs?.SecurityGroups?.length, href: '/ec2/security-groups' },
+  { label: 'Elastic IPs', n: addrs?.Addresses?.length, href: '/ec2/addresses' }, { label: 'VPCs', n: vpcs?.Vpcs?.length, href: '/ec2/vpcs' }, { label: 'Subnets', n: subnets?.Subnets?.length, href: '/ec2/subnets' },
+];
+---
+<Console title="EC2 dashboard" crumbs={[{ label: 'Dashboard' }]}>
+  <PageHeader title="EC2 dashboard" description={`Resources in ${regionName(ctx.region)}.`}>
+    <a class="btn btn-primary" href="/ec2/instances/launch"><Icon name="play" size={16} /> Launch instance</a>
+  </PageHeader>
+  <Card title="Resources">
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {tiles.map((t) => (
+        <a href={t.href} class="group rounded-lg border border-line p-4 text-fg hover:bg-hover hover:no-underline"><div class="text-[28px] font-bold leading-8 group-hover:text-link">{t.n === undefined ? '—' : num(t.n)}</div><div class="text-muted">{t.label}</div></a>
+      ))}
+    </div>
+  </Card>
+  <p class="mt-4 text-[13px] text-muted">With Docker available, LocalEmu backs each instance with a real container (SSH, IMDS and security groups work). Without Docker, instances exist as API metadata only.</p>
+</Console>

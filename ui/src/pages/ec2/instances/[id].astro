@@ -1,0 +1,73 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import Flash from '../../../components/Flash.astro';
+import ActionsMenu from '../../../components/ActionsMenu.astro';
+import { DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand, RebootInstancesCommand, TerminateInstancesCommand, DescribeInstanceAttributeCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost } from '../../../lib/action';
+import { load, soft } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { copyable, stateStatus, tagList } from '../../../lib/html';
+import { nameOf } from '../../../lib/ec2';
+
+const id = Astro.params.id!;
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const tab = ['details', 'network', 'storage', 'userdata', 'tags'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'details';
+const post = await handlePost(Astro, {
+  start: async () => { await ec2.send(new StartInstancesCommand({ InstanceIds: [id] })); return 'Starting the instance.'; },
+  stop: async () => { await ec2.send(new StopInstancesCommand({ InstanceIds: [id] })); return 'Stopping the instance.'; },
+  reboot: async () => { await ec2.send(new RebootInstancesCommand({ InstanceIds: [id] })); return 'Rebooting the instance.'; },
+  terminate: async () => { await ec2.send(new TerminateInstancesCommand({ InstanceIds: [id] })); return { message: 'Terminating the instance.', redirect: '/ec2/instances' }; },
+});
+if (post.response) return post.response;
+
+const r = await load(async () => ((await ec2.send(new DescribeInstancesCommand({ InstanceIds: [id] }))).Reservations ?? []).flatMap((x) => x.Instances ?? [])[0]);
+if (r.error && /NotFound/i.test(r.error)) return new Response(`Instance "${id}" does not exist`, { status: 404 });
+const i = r.data;
+const ud = tab === 'userdata' ? await soft(() => ec2.send(new DescribeInstanceAttributeCommand({ InstanceId: id, Attribute: 'userData' }))) : undefined;
+const userData = (() => { const v = (ud?.value as any)?.UserData?.Value; if (!v) return ''; try { return Buffer.from(v, 'base64').toString('utf8'); } catch { return v; } })();
+const tabs = [{ id: 'details', label: 'Details' }, { id: 'network', label: 'Networking & security' }, { id: 'storage', label: 'Storage' }, { id: 'userdata', label: 'User data' }, { id: 'tags', label: 'Tags' }];
+const name = i ? nameOf(i.Tags) : '';
+---
+<Console title={name || id} crumbs={[{ label: 'Instances', href: '/ec2/instances' }, { label: id }]} error={post.error}>
+  <PageHeader title={name ? `${name} (${id})` : id}>
+    <form method="post">
+      <ActionsMenu id="inst-actions" label="Instance state">
+        <button class="menu-item" name="intent" value="start">Start instance</button>
+        <button class="menu-item" name="intent" value="stop" data-confirm="The instance will be stopped." data-confirm-title="Stop instance?" data-confirm-name={id} data-confirm-ok="Stop" data-confirm-style="primary">Stop instance</button>
+        <button class="menu-item" name="intent" value="reboot" data-confirm="The instance will be rebooted." data-confirm-title="Reboot instance?" data-confirm-name={id} data-confirm-ok="Reboot" data-confirm-style="primary">Reboot instance</button>
+        <div class="menu-sep"></div>
+        <button class="menu-item !text-danger" name="intent" value="terminate" data-confirm="Terminated instances can't be recovered." data-confirm-title="Terminate instance?" data-confirm-name={id} data-confirm-type="terminate" data-confirm-ok="Terminate">Terminate instance</button>
+      </ActionsMenu>
+    </form>
+  </PageHeader>
+  {r.error && <Flash type="error" text="Couldn't load the instance" detail={r.error} dismissible={false} />}
+  {i && (
+    <div class="card">
+      <Tabs tabs={tabs} active={tab} />
+      <div class="p-5">
+        {tab === 'details' && <Details items={[
+          { label: 'Instance ID', value: copyable(id) }, { label: 'State', value: stateStatus(i.State?.Name, { running: 'success', stopped: 'stopped', terminated: 'stopped' }) }, { label: 'Instance type', value: i.InstanceType },
+          { label: 'AMI ID', value: i.ImageId }, { label: 'Architecture', value: i.Architecture }, { label: 'Platform', value: i.PlatformDetails ?? 'Linux/UNIX' },
+          { label: 'Launch time', value: dateTime(i.LaunchTime) }, { label: 'Key pair', value: i.KeyName }, { label: 'Availability Zone', value: i.Placement?.AvailabilityZone },
+          { label: 'IAM instance profile', value: i.IamInstanceProfile?.Arn, wide: true },
+        ]} />}
+        {tab === 'network' && <div class="space-y-5"><Details items={[
+          { label: 'Public IPv4 address', value: i.PublicIpAddress ? copyable(i.PublicIpAddress) : undefined }, { label: 'Private IPv4 address', value: i.PrivateIpAddress ? copyable(i.PrivateIpAddress) : undefined }, { label: 'Public DNS', value: i.PublicDnsName },
+          { label: 'Private DNS', value: i.PrivateDnsName }, { label: 'VPC ID', value: i.VpcId }, { label: 'Subnet ID', value: i.SubnetId }, { label: 'Source/dest check', value: i.SourceDestCheck === undefined ? undefined : String(i.SourceDestCheck) },
+        ]} />
+          <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Security groups</h3><ul class="list-disc pl-5">{(i.SecurityGroups ?? []).map((g) => <li><a href={`/ec2/security-groups/${g.GroupId}`}>{g.GroupName}</a> <span class="text-muted">({g.GroupId})</span></li>)}{!(i.SecurityGroups?.length) && <li class="list-none text-muted">None</li>}</ul></div></div>}
+        {tab === 'storage' && ((i.BlockDeviceMappings ?? []).length === 0 ? <p class="text-muted">No block devices.</p> : <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Volume ID</th><th>Device name</th><th>Status</th><th>Attached</th></tr></thead><tbody>
+          {(i.BlockDeviceMappings ?? []).map((b) => <tr><td><a href="/ec2/volumes">{b.Ebs?.VolumeId}</a></td><td class="font-mono text-[13px]">{b.DeviceName}</td><td set:html={stateStatus(b.Ebs?.Status).v} /><td class="nowrap">{dateTime(b.Ebs?.AttachTime)}</td></tr>)}
+        </tbody></table></div>)}
+        {tab === 'userdata' && (userData ? <pre class="code-block">{userData}</pre> : <p class="text-muted">{ud?.error ?? 'No user data.'}</p>)}
+        {tab === 'tags' && <div>{tagList(i.Tags)}</div>}
+      </div>
+    </div>
+  )}
+</Console>

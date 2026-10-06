@@ -1,0 +1,6 @@
+---
+import { highlightJson } from '../lib/html';
+interface Props { value: unknown; maxHeight?: string; class?: string }
+const { value, maxHeight = '480px', class: cls = '' } = Astro.props;
+---
+<pre class:list={['code-block', cls]} style={`max-height:${maxHeight}`} set:html={highlightJson(value).v} />

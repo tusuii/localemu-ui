@@ -1,0 +1,249 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import FormField from '../../../components/FormField.astro';
+import Icon from '../../../components/Icon.astro';
+import Pager from '../../../components/Pager.astro';
+import {
+  DescribeTableCommand, DeleteTableCommand, ScanCommand, QueryCommand, DeleteItemCommand,
+  DescribeTimeToLiveCommand, ListTagsOfResourceCommand,
+} from '@aws-sdk/client-dynamodb';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { pageLinks, pageState } from '../../../lib/paging';
+import { UserError, load, soft } from '../../../lib/errors';
+import { bytes, dateTime, num, plural } from '../../../lib/format';
+import { copyable, stateStatus, tagList, badge, raw } from '../../../lib/html';
+import { FILTER_OPS, PAGE_SIZES, attrType, batchWrite, buildRead, cell, decodeKey, encodeKey, keyOf, pageSizeOf, parseImport, plain, type Item } from '../../../lib/ddb';
+
+const table = Astro.params.table!;
+const ctx = getCtx(Astro.cookies);
+const ddb = aws.dynamodb(ctx);
+const sp = Astro.url.searchParams;
+const tab = ['items', 'overview', 'indexes', 'settings'].includes(sp.get('tab') ?? '') ? sp.get('tab')! : 'items';
+
+const post = await handlePost(Astro, {
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'item' }, (id) => ddb.send(new DeleteItemCommand({ TableName: table, Key: decodeKey(id) }))),
+  import: async (f) => {
+    const file = f.get('file');
+    if (!(file instanceof File) || file.size === 0) throw new UserError('Choose a .json or .csv file to import.');
+    if (file.size > 25 * 1024 * 1024) throw new UserError('The file is larger than 25 MB; split it into smaller files.');
+    const d = (await ddb.send(new DescribeTableCommand({ TableName: table }))).Table!;
+    const parsed = parseImport(await file.text(), file.name, d, { format: String(f.get('format') ?? ''), infer: f.get('infer') === '1' });
+    if (!parsed.items.length) throw new UserError(`No importable items found${parsed.invalid.length ? ` (${parsed.invalid.length} invalid: row ${parsed.invalid[0].row} ${parsed.invalid[0].reason})` : ''}.`);
+    const r = await batchWrite(ddb, table, d, parsed.items);
+    const total = parsed.items.length + parsed.invalid.length;
+    const failed = total - r.written;
+    const extra = [r.duplicates ? `${plural(r.duplicates, 'duplicate key', 'duplicate keys')} collapsed` : '', parsed.invalid.length ? `${parsed.invalid.length} invalid rows skipped${parsed.invalid[0] ? ` (e.g. row ${parsed.invalid[0].row}: ${parsed.invalid[0].reason})` : ''}` : '', ...r.errors].filter(Boolean).join('; ');
+    if (!r.written) throw new UserError(`Imported 0 of ${total} items (${failed} failed: ${extra}).`);
+    return { message: failed ? `Imported ${r.written} of ${total} items (${failed} failed: ${extra})` : `Imported ${plural(r.written, 'item')} from ${file.name}.`, detail: !failed && extra ? extra : undefined };
+  },
+  deleteTable: async () => {
+    await ddb.send(new DeleteTableCommand({ TableName: table }));
+    return { message: `Deleted table "${table}".`, redirect: '/dynamodb' };
+  },
+});
+if (post.response) return post.response;
+
+const desc = await load(() => ddb.send(new DescribeTableCommand({ TableName: table })));
+if (desc.error && /ResourceNotFound/i.test(desc.error)) return new Response(`Table "${table}" does not exist`, { status: 404 });
+const t = desc.data?.Table;
+
+// ---- explore items ----
+const state = pageState(Astro.url);
+const mode = sp.get('mode') === 'query' ? 'query' : 'scan';
+const indexName = sp.get('index') ?? '';
+const limit = pageSizeOf(sp);
+const indexes = [...(t?.GlobalSecondaryIndexes ?? []), ...(t?.LocalSecondaryIndexes ?? [])];
+const schema = indexName ? indexes.find((i) => i.IndexName === indexName)?.KeySchema : t?.KeySchema;
+const pkName = schema?.find((k) => k.KeyType === 'HASH')?.AttributeName;
+const skName = schema?.find((k) => k.KeyType === 'RANGE')?.AttributeName;
+let rows: { id: string; item: Record<string, unknown> }[] = [];
+let lastKey: Item | undefined;
+let queryError: string | undefined;
+let columns: { key: string; label: string; render: (r: any) => unknown; sort?: (r: any) => any }[] = [];
+
+if (tab === 'items' && t) {
+  const run = await load(async () => {
+    const { mode: m, input } = buildRead(table, t, sp);
+    const out: Item[] = [];
+    let start = state.token as Item | undefined;
+    let last: Item | undefined;
+    // With a filter expression a page of N evaluated items can hold fewer than N matches: keep reading until the page is full.
+    for (let i = 0; i < (input.FilterExpression ? 30 : 1); i++) {
+      const common = { ...input, Limit: limit - out.length, ExclusiveStartKey: start };
+      const r = m === 'scan' ? await ddb.send(new ScanCommand(common)) : await ddb.send(new QueryCommand(common as never));
+      out.push(...(r.Items ?? []));
+      last = r.LastEvaluatedKey as Item | undefined;
+      if (!last || out.length >= limit) break;
+      start = last;
+    }
+    return { Items: out, LastEvaluatedKey: last };
+  });
+  if (run.error) queryError = run.error;
+  else {
+    const r = run.data!;
+    lastKey = r.LastEvaluatedKey;
+    rows = (r.Items ?? []).map((it) => ({ id: encodeKey(keyOf(it, t)), item: plain(it) }));
+    const keys = (t.KeySchema ?? []).map((k) => k.AttributeName!);
+    const attrs = new Set<string>();
+    rows.forEach((x) => Object.keys(x.item).forEach((k) => attrs.add(k)));
+    const ordered = [...keys.filter((k) => attrs.has(k)), ...[...attrs].filter((k) => !keys.includes(k)).sort()].slice(0, 14);
+    columns = ordered.map((k) => ({
+      key: k, label: keys.includes(k) ? `${k} ${k === keys[0] ? '(partition)' : '(sort)'}` : k,
+      render: (r: any) => raw(cell(r.item[k])),
+      sort: (r: any) => (typeof r.item[k] === 'number' ? r.item[k] : String(r.item[k] ?? '')),
+    }));
+  }
+}
+const links = pageLinks(Astro.url, state, lastKey);
+const exportBase = (() => {
+  const u = new URLSearchParams(sp);
+  for (const k of ['pt', 'ph', 'tab', 'limit']) u.delete(k);
+  return (extra: string) => `/dynamodb/${encodeURIComponent(table)}/export?${u}${u.size ? '&' : ''}${extra}`;
+})();
+
+const ttl = tab === 'overview' ? await soft(() => ddb.send(new DescribeTimeToLiveCommand({ TableName: table }))) : undefined;
+const tags = tab === 'overview' && t?.TableArn ? await soft(() => ddb.send(new ListTagsOfResourceCommand({ ResourceArn: t.TableArn }))) : undefined;
+const tabs = [{ id: 'items', label: 'Explore items' }, { id: 'overview', label: 'Overview' }, { id: 'indexes', label: 'Indexes', count: indexes.length }, { id: 'settings', label: 'Settings' }];
+const qs = (extra: Record<string, string | undefined>) => {
+  const u = new URLSearchParams(sp);
+  for (const [k, v] of Object.entries(extra)) v === undefined ? u.delete(k) : u.set(k, v);
+  return `${Astro.url.pathname}?${u}`;
+};
+const skTypeLabel = skName && t ? attrType(t, skName) : '';
+---
+<Console title={table} crumbs={[{ label: 'Tables', href: '/dynamodb' }, { label: table }]} error={post.error}>
+  <PageHeader title={table} badge={t?.TableStatus}>
+    <a class="btn btn-primary" href={`/dynamodb/${encodeURIComponent(table)}/item`}><Icon name="plus" size={16} /> Create item</a>
+  </PageHeader>
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'items' && (
+      <div>
+        <form method="get" class="space-y-4 border-b border-line p-5" data-no-busy>
+          <div class="flex flex-wrap items-center gap-6">
+            <strong>Mode</strong>
+            <label class="flex items-center gap-2"><input type="radio" class="radio" name="mode" value="scan" checked={mode === 'scan'} /> Scan</label>
+            <label class="flex items-center gap-2"><input type="radio" class="radio" name="mode" value="query" checked={mode === 'query'} /> Query</label>
+            {indexes.length > 0 && (
+              <label class="flex items-center gap-2 ml-auto">Table or index
+                <select name="index" class="select !w-auto"><option value="">{table} (table)</option>{indexes.map((i) => <option value={i.IndexName} selected={i.IndexName === indexName}>{i.IndexName} (index)</option>)}</select>
+              </label>
+            )}
+          </div>
+          <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4" data-show-when="mode:query" hidden>
+            <FormField label={`${pkName ?? 'Partition key'} (partition key)`} for="pk"><input id="pk" name="pk" class="input" value={sp.get('pk') ?? ''} placeholder="Value" /></FormField>
+            {skName && (
+              <>
+                <FormField label={`${skName} (sort key, ${skTypeLabel})`} for="skop">
+                  <select id="skop" name="skop" class="select"><option value="">- any -</option>{['=', '<', '<=', '>', '>=', 'between', 'begins_with'].map((o) => <option value={o} selected={sp.get('skop') === o}>{o}</option>)}</select>
+                </FormField>
+                <FormField label="Sort key value" for="sk"><input id="sk" name="sk" class="input" value={sp.get('sk') ?? ''} /></FormField>
+                <FormField label="…and (for between)" for="sk2"><input id="sk2" name="sk2" class="input" value={sp.get('sk2') ?? ''} /></FormField>
+              </>
+            )}
+            <FormField label="Sort order" for="order"><select id="order" name="order" class="select"><option value="asc">Ascending</option><option value="desc" selected={sp.get('order') === 'desc'}>Descending</option></select></FormField>
+          </div>
+          <details class="rounded-lg border border-line px-4 py-3" open={!!sp.get('fa')}>
+            <summary class="cursor-pointer font-bold">Filters <span class="font-normal text-muted">(optional, applied after reading)</span></summary>
+            <div class="mt-3 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <FormField label="Attribute name" for="fa"><input id="fa" name="fa" class="input" value={sp.get('fa') ?? ''} placeholder="e.g. status" /></FormField>
+              <FormField label="Condition" for="fop"><select id="fop" name="fop" class="select">{FILTER_OPS.map((o) => <option value={o} selected={(sp.get('fop') ?? '=') === o}>{o}</option>)}</select></FormField>
+              <FormField label="Value" for="fv"><input id="fv" name="fv" class="input" value={sp.get('fv') ?? ''} /></FormField>
+              <FormField label="Type" for="ft"><select id="ft" name="ft" class="select">{[['auto', 'Auto (number / boolean / string)'], ['S', 'String'], ['N', 'Number'], ['BOOL', 'Boolean']].map(([v, l]) => <option value={v} selected={(sp.get('ft') ?? 'auto') === v}>{l}</option>)}</select></FormField>
+            </div>
+          </details>
+          <div class="flex flex-wrap items-end gap-4">
+            <FormField label="Page size" for="limit" class="!mb-0"><select id="limit" name="limit" class="select !w-28">{PAGE_SIZES.map((n) => <option value={n} selected={n === limit}>{n} items</option>)}{!(PAGE_SIZES as readonly number[]).includes(limit) && <option value={limit} selected>{limit} items</option>}</select></FormField>
+            <button class="btn btn-primary" type="submit"><Icon name="play" size={14} /> Run</button>
+            <a class="btn btn-normal" href={`/dynamodb/${encodeURIComponent(table)}`}>Reset</a>
+            <span class="ml-auto flex flex-wrap items-center gap-2 text-[13px]" data-export-links>
+              <span class="text-muted">Export {mode === 'query' || sp.get('fa') ? 'matching' : 'all'} items:</span>
+              <a class="btn btn-normal btn-sm" href={exportBase('format=json')} data-export="json" download>JSON</a>
+              <a class="btn btn-normal btn-sm" href={exportBase('format=json&typed=1')} data-export="ddb-json" download>DynamoDB JSON</a>
+              <a class="btn btn-normal btn-sm" href={exportBase('format=csv')} data-export="csv" download>CSV</a>
+            </span>
+          </div>
+        </form>
+
+        {queryError && <div class="px-5 pt-4"><div class="flash flash-error"><Icon name="circle-x" size={20} /><div><div class="font-bold">Couldn't run the {mode}</div><div class="text-muted">{queryError}</div></div></div></div>}
+
+        <DataTable
+          title={mode === 'query' ? 'Items returned' : 'Items scanned'} rows={rows} bare select="multi" idKey="id" pageSize={Math.max(limit, 25)} id="items"
+          columns={columns.length ? columns : [{ key: 'id', label: 'Item', render: () => '' }]}
+          filter="Filter returned items" refresh={false}
+          emptyTitle="No items" emptyText={queryError ? 'Fix the query above and run it again.' : mode === 'scan' ? 'This table has no items yet.' : 'The query returned no items.'}
+        >
+          <Fragment slot="actions">
+            <a class="btn btn-normal" data-href-template={`/dynamodb/${encodeURIComponent(table)}/item?key={id}`} data-min="1" data-max="1">Edit item</a>
+            <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected items will be permanently deleted." data-confirm-title="Delete items?" data-confirm-list="false" data-confirm-ok="Delete items">Delete</button>
+            <a class="btn btn-normal" href={`/dynamodb/${encodeURIComponent(table)}/item`}>Create item</a>
+          </Fragment>
+        </DataTable>
+        {!queryError && <Pager links={links} count={rows.length} />}
+
+        <details class="border-t border-line px-5 py-3" open={post.intent === 'import' && !!post.error} data-import>
+          <summary class="cursor-pointer font-bold"><Icon name="upload" size={14} /> Import items</summary>
+          <form method="post" enctype="multipart/form-data" class="mt-3 flex flex-wrap items-end gap-4">
+            <input type="hidden" name="intent" value="import" />
+            <FormField label="File" for="import-file" hint="JSON array (plain or DynamoDB JSON items, or JSON Lines) or CSV with a header row of attribute names. Key attributes are required." class="min-w-[280px] flex-1 !mb-0"><input id="import-file" type="file" name="file" accept=".json,.jsonl,.csv,.txt,application/json,text/csv" class="input !py-1.5" required /></FormField>
+            <FormField label="Format" for="import-format" class="!mb-0"><select id="import-format" name="format" class="select !w-40"><option value="">Auto-detect</option><option value="json">JSON</option><option value="csv">CSV</option></select></FormField>
+            <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="infer" value="1" checked /> Infer number / boolean types in CSV</label>
+            <button class="btn btn-normal" type="submit"><Icon name="upload" size={16} /> Import</button>
+          </form>
+        </details>
+      </div>
+    )}
+
+    {tab === 'overview' && t && (
+      <div class="space-y-6 p-5">
+        <Details items={[
+          { label: 'Table status', value: stateStatus(t.TableStatus) },
+          { label: 'Partition key', value: `${pkName ?? ''} (${attrType(t, (t.KeySchema ?? [])[0]?.AttributeName ?? '')})` },
+          { label: 'Sort key', value: (t.KeySchema ?? [])[1] ? `${t.KeySchema![1].AttributeName} (${attrType(t, t.KeySchema![1].AttributeName!)})` : undefined },
+          { label: 'Capacity mode', value: (t.BillingModeSummary?.BillingMode ?? 'PROVISIONED') === 'PAY_PER_REQUEST' ? 'On-demand' : `Provisioned (R ${t.ProvisionedThroughput?.ReadCapacityUnits} / W ${t.ProvisionedThroughput?.WriteCapacityUnits})` },
+          { label: 'Item count', value: num(t.ItemCount) },
+          { label: 'Table size', value: bytes(t.TableSizeBytes) },
+          { label: 'Created', value: dateTime(t.CreationDateTime) },
+          { label: 'Table class', value: t.TableClassSummary?.TableClass ?? 'STANDARD' },
+          { label: 'Deletion protection', value: t.DeletionProtectionEnabled ? 'On' : 'Off' },
+          { label: 'Time to live', value: ttl?.value ? (ttl.value as any).TimeToLiveDescription?.TimeToLiveStatus : undefined },
+          { label: 'Stream', value: t.StreamSpecification?.StreamEnabled ? `${t.StreamSpecification.StreamViewType}` : 'Off' },
+          { label: 'Table ARN', value: copyable(t.TableArn ?? ''), wide: true },
+        ]} />
+        <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Tags</h3>{tagList((tags?.value as any)?.Tags)}</div>
+      </div>
+    )}
+
+    {tab === 'indexes' && (
+      <div class="p-5">
+        {indexes.length === 0 ? <p class="text-muted">This table has no secondary indexes. Create them with the AWS CLI or CloudFormation.</p> : (
+          <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Type</th><th>Partition key</th><th>Sort key</th><th>Projection</th><th>Status</th></tr></thead><tbody>
+            {indexes.map((i: any) => (
+              <tr><td><a href={`/dynamodb/${encodeURIComponent(table)}?index=${encodeURIComponent(i.IndexName)}`}>{i.IndexName}</a></td><td>{i.IndexStatus ? 'Global' : 'Local'}</td>
+                <td>{i.KeySchema?.find((k: any) => k.KeyType === 'HASH')?.AttributeName}</td><td>{i.KeySchema?.find((k: any) => k.KeyType === 'RANGE')?.AttributeName ?? '-'}</td>
+                <td>{badge(i.Projection?.ProjectionType ?? '-')}</td><td set:html={i.IndexStatus ? stateStatus(i.IndexStatus).v : '-'} /></tr>
+            ))}
+          </tbody></table></div>
+        )}
+      </div>
+    )}
+
+    {tab === 'settings' && (
+      <div class="p-5">
+        <h3 class="card-title mb-1 text-danger">Delete table</h3>
+        <p class="card-desc mb-3">Permanently deletes the table and all of its items.</p>
+        <form method="post"><input type="hidden" name="intent" value="deleteTable" />
+          <button class="btn btn-danger" data-confirm="This permanently deletes the table and every item in it." data-confirm-title="Delete table?" data-confirm-name={table} data-confirm-type="confirm" data-confirm-ok="Delete table"><Icon name="trash-2" size={16} /> Delete table</button></form>
+      </div>
+    )}
+  </div>
+</Console>

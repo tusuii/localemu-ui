@@ -1,0 +1,89 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import { DescribeTableCommand, GetItemCommand, PutItemCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
+import { unmarshall } from '@aws-sdk/util-dynamodb';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { attrType, decodeKey, jsonReplacer, keyOf, lossy, toItem } from '../../../lib/ddb';
+
+const table = Astro.params.table!;
+const ctx = getCtx(Astro.cookies);
+const ddb = aws.dynamodb(ctx);
+const keyParam = Astro.url.searchParams.get('key');
+const back = `/dynamodb/${encodeURIComponent(table)}`;
+
+const desc = await load(() => ddb.send(new DescribeTableCommand({ TableName: table })));
+const t = desc.data?.Table;
+
+const post = await handlePost(Astro, {
+  save: async (f) => {
+    if (!t) throw new UserError('Table description unavailable.');
+    const item = toItem(required(f, 'item', 'Item'), str(f, 'format'));
+    for (const k of (t.KeySchema ?? []).map((x) => x.AttributeName!)) if (!item[k]) throw new UserError(`The item must include the key attribute "${k}".`);
+    const original = str(f, 'original');
+    await ddb.send(new PutItemCommand({ TableName: table, Item: item }));
+    // If the key changed while editing, the old item is removed (DynamoDB keys are immutable).
+    if (original) {
+      const oldKey = decodeKey(original);
+      const newKey = keyOf(item, t);
+      if (JSON.stringify(oldKey) !== JSON.stringify(newKey) && str(f, 'moveKey') === '1') await ddb.send(new DeleteItemCommand({ TableName: table, Key: oldKey }));
+    }
+    return { message: 'Item saved.', redirect: `${back}` };
+  },
+  delete: async () => {
+    if (!keyParam) throw new UserError('No item selected.');
+    await ddb.send(new DeleteItemCommand({ TableName: table, Key: decodeKey(keyParam) }));
+    return { message: 'Item deleted.', redirect: back };
+  },
+});
+if (post.response) return post.response;
+
+let loadError: string | undefined;
+let format = 'json';
+let text = '';
+if (keyParam && t) {
+  const got = await load(() => ddb.send(new GetItemCommand({ TableName: table, Key: decodeKey(keyParam), ConsistentRead: true })));
+  if (got.error) loadError = got.error;
+  else if (!got.data?.Item) loadError = 'That item no longer exists.';
+  else {
+    const it = got.data.Item;
+    format = lossy(it) ? 'ddb' : 'json';
+    text = JSON.stringify(format === 'ddb' ? it : unmarshall(it), jsonReplacer, 2);
+  }
+} else if (t) {
+  const tpl: Record<string, unknown> = {};
+  for (const k of t.KeySchema ?? []) tpl[k.AttributeName!] = attrType(t, k.AttributeName!) === 'N' ? 0 : `${k.AttributeName}-value`;
+  tpl.example = 'any attribute you like';
+  text = JSON.stringify(tpl, null, 2);
+}
+if (post.posted && post.values.item !== undefined) { text = post.values.item; format = post.values.format ?? format; }
+const editing = !!keyParam;
+---
+<Console title={editing ? 'Edit item' : 'Create item'} crumbs={[{ label: 'Tables', href: '/dynamodb' }, { label: table, href: back }, { label: editing ? 'Edit item' : 'Create item' }]} error={post.error}>
+  <PageHeader title={editing ? 'Edit item' : 'Create item'} description={`Table: ${table}`} />
+  {(desc.error || loadError) ? <Flash type="error" text="Couldn't load" detail={desc.error ?? loadError} dismissible={false} /> : (
+    <form method="post" class="max-w-4xl space-y-4">
+      <input type="hidden" name="intent" value="save" />
+      {keyParam && <input type="hidden" name="original" value={keyParam} />}
+      <Card title="Attributes" description={'Edit the item as JSON. In DynamoDB JSON, every value carries its type, e.g. {"id": {"S": "1"}}.'}>
+        <div class="mb-3 flex items-center gap-6">
+          <label class="flex items-center gap-2"><input type="radio" class="radio" name="format" value="json" checked={format === 'json'} /> JSON</label>
+          <label class="flex items-center gap-2"><input type="radio" class="radio" name="format" value="ddb" checked={format === 'ddb'} /> DynamoDB JSON</label>
+        </div>
+        {format === 'ddb' && !post.posted && <p class="mb-3 text-[13px] text-muted">Shown as DynamoDB JSON because this item has sets, binary values or numbers that plain JSON could not represent exactly.</p>}
+        <textarea name="item" class="textarea code-area" rows={Math.min(Math.max(text.split("\n").length + 2, 8), 30)} data-code data-json spellcheck="false" required>{text}</textarea>
+        {editing && <label class="mt-3 flex items-center gap-2 text-muted"><input type="checkbox" class="checkbox" name="moveKey" value="1" /> If I change the key, delete the original item (otherwise a new item is created)</label>}
+      </Card>
+      <div class="flex justify-between gap-2">
+        <div>{editing && <button class="btn btn-danger" name="intent" value="delete" formnovalidate data-confirm="This item will be permanently deleted." data-confirm-title="Delete item?" data-confirm-list="false"><Icon name="trash-2" size={16} /> Delete</button>}</div>
+        <div class="flex gap-2"><a class="btn btn-normal" href={back}>Cancel</a><button class="btn btn-primary" type="submit">{editing ? 'Save changes' : 'Create item'}</button></div>
+      </div>
+    </form>
+  )}
+</Console>

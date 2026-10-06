@@ -1,0 +1,138 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import Details from '../../components/Details.astro';
+import FormField from '../../components/FormField.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import {
+  DescribeKeyCommand, ListAliasesCommand, CreateAliasCommand, DeleteAliasCommand, GetKeyPolicyCommand, PutKeyPolicyCommand,
+  GetKeyRotationStatusCommand, EnableKeyRotationCommand, DisableKeyRotationCommand, EncryptCommand, DecryptCommand,
+  EnableKeyCommand, DisableKeyCommand, ScheduleKeyDeletionCommand, CancelKeyDeletionCommand, UpdateKeyDescriptionCommand,
+} from '@aws-sdk/client-kms';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, jsonOf, required, str } from '../../lib/action';
+import { UserError, load, soft } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { copyable, stateStatus } from '../../lib/html';
+
+const id = Astro.params.id!;
+const ctx = getCtx(Astro.cookies);
+const kms = aws.kms(ctx);
+const tab = ['overview', 'policy', 'rotation', 'crypto'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'overview';
+const here = (t?: string) => `${Astro.url.pathname}${t ? `?tab=${t}` : ''}`;
+
+const post = await handlePost(Astro, {
+  enable: async () => { await kms.send(new EnableKeyCommand({ KeyId: id })); return 'Key enabled.'; },
+  disable: async () => { await kms.send(new DisableKeyCommand({ KeyId: id })); return 'Key disabled.'; },
+  schedule: async (f) => { const d = Math.min(Math.max(intOf(f, 'days', 'Waiting period') ?? 7, 7), 30); await kms.send(new ScheduleKeyDeletionCommand({ KeyId: id, PendingWindowInDays: d })); return `Key scheduled for deletion in ${d} days.`; },
+  cancel: async () => { await kms.send(new CancelKeyDeletionCommand({ KeyId: id })); return 'Key deletion cancelled (the key is now disabled).'; },
+  description: async (f) => { await kms.send(new UpdateKeyDescriptionCommand({ KeyId: id, Description: str(f, 'description') })); return 'Description updated.'; },
+  addAlias: async (f) => { const a = required(f, 'alias', 'Alias').replace(/^alias\//, ''); await kms.send(new CreateAliasCommand({ AliasName: `alias/${a}`, TargetKeyId: id })); return `Alias "${a}" added.`; },
+  delAlias: async (f) => { await kms.send(new DeleteAliasCommand({ AliasName: required(f, 'alias') })); return 'Alias deleted.'; },
+  putPolicy: async (f) => { jsonOf(f, 'policy', 'Key policy'); await kms.send(new PutKeyPolicyCommand({ KeyId: id, PolicyName: 'default', Policy: str(f, 'policy') })); return { message: 'Key policy saved.', redirect: here('policy') }; },
+  rotate: async (f) => { await kms.send(str(f, 'enable') === '1' ? new EnableKeyRotationCommand({ KeyId: id }) : new DisableKeyRotationCommand({ KeyId: id })); return { message: 'Rotation setting updated.', redirect: here('rotation') }; },
+  encrypt: async (f) => {
+    const r = await kms.send(new EncryptCommand({ KeyId: id, Plaintext: Buffer.from(String(f.get('plaintext') ?? ''), 'utf8') }));
+    return { stay: true, data: { kind: 'encrypt', out: Buffer.from(r.CiphertextBlob!).toString('base64') } };
+  },
+  decrypt: async (f) => {
+    let blob: Buffer;
+    try { blob = Buffer.from(required(f, 'ciphertext', 'Ciphertext').replace(/\s+/g, ''), 'base64'); } catch { throw new UserError('The ciphertext must be base64.'); }
+    const r = await kms.send(new DecryptCommand({ CiphertextBlob: blob, KeyId: id }));
+    return { stay: true, data: { kind: 'decrypt', out: Buffer.from(r.Plaintext!).toString('utf8') } };
+  },
+});
+if (post.response) return post.response;
+
+const d = await load(async () => (await kms.send(new DescribeKeyCommand({ KeyId: id }))).KeyMetadata!);
+if (d.error && /NotFound|does not exist/i.test(d.error)) return new Response(`Key "${id}" does not exist`, { status: 404 });
+const k = d.data;
+const keyId = k?.KeyId ?? id;
+const aliases = await load(async () => ((await kms.send(new ListAliasesCommand({ KeyId: keyId }))).Aliases ?? []).map((a) => a.AliasName!));
+const policy = tab === 'policy' ? await soft(() => kms.send(new GetKeyPolicyCommand({ KeyId: keyId, PolicyName: 'default' }))) : undefined;
+const rotation = tab === 'rotation' ? await soft(() => kms.send(new GetKeyRotationStatusCommand({ KeyId: keyId }))) : undefined;
+const out = post.result?.data as { kind: string; out: string } | undefined;
+const symmetric = (k?.KeySpec ?? 'SYMMETRIC_DEFAULT') === 'SYMMETRIC_DEFAULT';
+const tabs = [{ id: 'overview', label: 'General configuration' }, { id: 'policy', label: 'Key policy' }, { id: 'rotation', label: 'Key rotation' }, ...(symmetric ? [{ id: 'crypto', label: 'Cryptographic operations' }] : [])];
+const v = post.values;
+const prettyPolicy = (() => { try { return JSON.stringify(JSON.parse((policy?.value as any)?.Policy), null, 2); } catch { return (policy?.value as any)?.Policy ?? ''; } })();
+---
+<Console title={aliases.data?.[0]?.replace('alias/', '') || keyId} crumbs={[{ label: 'Customer managed keys', href: '/kms' }, { label: aliases.data?.[0]?.replace('alias/', '') || keyId }]} error={post.error} notice={post.result?.message ? { text: post.result.message } : null}>
+  <PageHeader title={aliases.data?.[0]?.replace('alias/', '') || keyId} badge={k?.KeyState}>
+    {k?.KeyState === 'PendingDeletion' ? (
+      <form method="post"><input type="hidden" name="intent" value="cancel" /><button class="btn btn-normal">Cancel key deletion</button></form>
+    ) : k && (
+      <form method="post" class="flex gap-2">
+        <button class="btn btn-normal" name="intent" value={k.Enabled ? 'disable' : 'enable'}>{k.Enabled ? 'Disable' : 'Enable'}</button>
+        <button class="btn btn-danger" name="intent" value="schedule" data-confirm="After the waiting period the key and everything encrypted with it becomes unrecoverable." data-confirm-title="Schedule key deletion?" data-confirm-name={keyId} data-confirm-ok="Schedule deletion">Schedule deletion</button>
+      </form>
+    )}
+  </PageHeader>
+  {d.error && <Flash type="error" text="Couldn't load the key" detail={d.error} dismissible={false} />}
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    {tab === 'overview' && k && (
+      <div class="space-y-6 p-5">
+        <Details items={[
+          { label: 'Key ID', value: copyable(keyId) }, { label: 'Status', value: stateStatus(k.KeyState, { enabled: 'success' }) }, { label: 'Created', value: dateTime(k.CreationDate) },
+          { label: 'Key spec', value: k.KeySpec }, { label: 'Key usage', value: k.KeyUsage }, { label: 'Origin', value: k.Origin },
+          { label: 'Key manager', value: k.KeyManager }, { label: 'Multi-Region', value: k.MultiRegion ? 'Yes' : 'No' }, { label: 'Deletion date', value: k.DeletionDate ? dateTime(k.DeletionDate) : undefined },
+          { label: 'ARN', value: copyable(k.Arn ?? ''), wide: true },
+        ]} />
+        <form method="post" class="flex max-w-2xl items-end gap-2 border-t border-line pt-5"><input type="hidden" name="intent" value="description" />
+          <div class="flex-1"><label class="field-label" for="description">Description</label><input id="description" name="description" class="input" value={k.Description ?? ''} /></div><button class="btn btn-normal">Update</button></form>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Aliases</h3>
+          <ul class="mb-3 space-y-1">
+            {(aliases.data ?? []).length === 0 && <li class="text-muted">No aliases.</li>}
+            {(aliases.data ?? []).map((a) => <li class="flex items-center gap-2"><code>{a}</code><form method="post"><input type="hidden" name="intent" value="delAlias" /><input type="hidden" name="alias" value={a} /><button class="text-danger" title="Delete alias" aria-label="Delete alias"><Icon name="trash-2" size={14} /></button></form></li>)}
+          </ul>
+          <form method="post" class="flex max-w-md gap-2"><input type="hidden" name="intent" value="addAlias" /><input name="alias" class="input" placeholder="alias name" required /><button class="btn btn-normal" type="submit">Add alias</button></form>
+        </div>
+      </div>
+    )}
+
+    {tab === 'policy' && (
+      <form method="post" class="space-y-3 p-5">
+        <input type="hidden" name="intent" value="putPolicy" />
+        {policy?.error && <Flash type="warning" text="Couldn't read the key policy" detail={policy.error} dismissible={false} />}
+        <textarea name="policy" class="textarea code-area" rows="20" data-code data-json spellcheck="false">{v.policy ?? prettyPolicy}</textarea>
+        <button class="btn btn-primary" type="submit">Save policy</button>
+      </form>
+    )}
+
+    {tab === 'rotation' && (
+      <div class="p-5">
+        {rotation?.error ? <Flash type="warning" text="Rotation status unavailable" detail={rotation.error} dismissible={false} /> : (
+          <form method="post" class="space-y-3"><input type="hidden" name="intent" value="rotate" />
+            <p>Automatic rotation is <strong>{(rotation?.value as any)?.KeyRotationEnabled ? 'enabled' : 'disabled'}</strong>{(rotation?.value as any)?.RotationPeriodInDays ? ` (every ${(rotation!.value as any).RotationPeriodInDays} days)` : ''}.</p>
+            {(rotation?.value as any)?.KeyRotationEnabled
+              ? <button class="btn btn-normal" type="submit" name="enable" value="0">Disable automatic rotation</button>
+              : <button class="btn btn-normal" type="submit" name="enable" value="1">Enable automatic rotation</button>}
+          </form>
+        )}
+      </div>
+    )}
+
+    {tab === 'crypto' && (
+      <div class="grid gap-6 p-5 xl:grid-cols-2">
+        <form method="post"><input type="hidden" name="intent" value="encrypt" />
+          <h3 class="card-title mb-3">Encrypt</h3>
+          <FormField label="Plaintext" for="plaintext"><textarea id="plaintext" name="plaintext" class="textarea code-area" rows="5" required>{v.plaintext ?? ''}</textarea></FormField>
+          <button class="btn btn-primary" type="submit"><Icon name="lock" size={16} /> Encrypt</button>
+          {out?.kind === 'encrypt' && <div class="mt-4"><div class="kv-label mb-1">Ciphertext (base64)</div><pre class="code-block break-all">{out.out}</pre><button type="button" class="btn btn-normal btn-sm mt-2" data-copy={out.out}><Icon name="copy" size={14} /> Copy</button></div>}
+        </form>
+        <form method="post"><input type="hidden" name="intent" value="decrypt" />
+          <h3 class="card-title mb-3">Decrypt</h3>
+          <FormField label="Ciphertext (base64)" for="ciphertext"><textarea id="ciphertext" name="ciphertext" class="textarea code-area" rows="5" required>{v.ciphertext ?? ''}</textarea></FormField>
+          <button class="btn btn-primary" type="submit"><Icon name="key-round" size={16} /> Decrypt</button>
+          {out?.kind === 'decrypt' && <div class="mt-4"><div class="kv-label mb-1">Plaintext</div><pre class="code-block">{out.out}</pre></div>}
+        </form>
+      </div>
+    )}
+  </div>
+</Console>

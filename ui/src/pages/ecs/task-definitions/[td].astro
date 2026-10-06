@@ -1,0 +1,73 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Details from '../../../components/Details.astro';
+import DataTable from '../../../components/DataTable.astro';
+import JsonView from '../../../components/JsonView.astro';
+import TagsPanel from '../../../components/TagsPanel.astro';
+import { DescribeTaskDefinitionCommand, DeregisterTaskDefinitionCommand, ListTagsForResourceCommand, TagResourceCommand, UntagResourceCommand } from '@aws-sdk/client-ecs';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { guard } from '../../../lib/unsupported';
+import { load } from '../../../lib/errors';
+import { cpuMem, ecsTagRows } from '../../../lib/ecs';
+import { copyable, stateStatus } from '../../../lib/html';
+
+const id = decodeURIComponent(Astro.params.td!);
+const ctx = getCtx(Astro.cookies);
+const ecs = aws.ecs(ctx);
+
+const res = await load(async () => (await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: id }))).taskDefinition!);
+if (res.error && /Unable to describe|not found|ClientException/i.test(res.error)) return new Response(`Task definition "${id}" does not exist`, { status: 404 });
+const td = res.data;
+const tdArn = td?.taskDefinitionArn ?? '';
+
+const post = await handlePost(Astro, {
+  addTag: async (f) => {
+    await guard('TagResource', () => ecs.send(new TagResourceCommand({ resourceArn: tdArn, tags: [{ key: required(f, 'key', 'Tag key'), value: str(f, 'value') }] })));
+    return 'Tag added.';
+  },
+  removeTag: (f) => bulk(strs(f, 'id'), { verb: 'Removed', noun: 'tag' }, (k) => guard('UntagResource', () => ecs.send(new UntagResourceCommand({ resourceArn: tdArn, tagKeys: [k] })))),
+  deregister: async () => {
+    await ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: `${td!.family}:${td!.revision}` }));
+    return { message: `Deregistered ${td!.family}:${td!.revision}.`, redirect: '/ecs/task-definitions' };
+  },
+});
+if (post.response) return post.response;
+
+const tags = td ? await load(async () => ecsTagRows((await guard('ListTagsForResource', () => ecs.send(new ListTagsForResourceCommand({ resourceArn: tdArn })))).tags)) : null;
+const title = td ? `${td.family}:${td.revision}` : id;
+const containers = (td?.containerDefinitions ?? []).map((c) => ({
+  name: c.name, image: c.image, memory: c.memory ? `${c.memory} MiB` : '-', cpu: c.cpu ?? 0,
+  ports: (c.portMappings ?? []).map((p) => `${p.hostPort ? p.hostPort + ':' : ''}${p.containerPort}/${p.protocol ?? 'tcp'}`).join(', '),
+  env: (c.environment ?? []).map((e) => `${e.name}=${e.value}`).join(', '), essential: c.essential,
+}));
+---
+<Console title={title} crumbs={[{ label: 'Task definitions', href: '/ecs/task-definitions' }, { label: title }]} error={post.error ?? res.error}>
+  <PageHeader title={title}>
+    {td?.status === 'ACTIVE' && <form method="post"><button class="btn btn-normal" name="intent" value="deregister" data-confirm="The revision will be marked INACTIVE. New tasks can no longer be started from it." data-confirm-title="Deregister revision?" data-confirm-ok="Deregister">Deregister</button></form>}
+  </PageHeader>
+  {td && (
+    <div class="space-y-5">
+      <Card title="Overview">
+        <Details items={[
+          { label: 'Family', value: td.family }, { label: 'Revision', value: td.revision }, { label: 'Status', value: stateStatus(td.status) },
+          { label: 'Compatibility', value: (td.requiresCompatibilities ?? td.compatibilities ?? []).join(', ') },
+          { label: 'Network mode', value: td.networkMode }, { label: 'Task size', value: cpuMem(td.cpu, td.memory) },
+          { label: 'Task role', value: td.taskRoleArn }, { label: 'Execution role', value: td.executionRoleArn },
+          { label: 'ARN', value: copyable(td.taskDefinitionArn ?? ''), wide: true },
+        ]} />
+      </Card>
+      <DataTable title="Containers" rows={containers} id="containers" idKey="name" filter={false} refresh={false}
+        columns={[
+          { key: 'name', label: 'Name' }, { key: 'image', label: 'Image', mono: true }, { key: 'memory', label: 'Memory' }, { key: 'cpu', label: 'CPU' },
+          { key: 'ports', label: 'Ports', mono: true }, { key: 'env', label: 'Environment', mono: true }, { key: 'essential', label: 'Essential', render: (r) => (r.essential ? 'Yes' : 'No') },
+        ]} />
+      <Card title="Tags"><TagsPanel tags={tags?.data ?? []} error={tags?.error} /></Card>
+      <Card title="JSON"><JsonView value={td} maxHeight="420px" /></Card>
+    </div>
+  )}
+</Console>

@@ -1,0 +1,105 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateDBInstanceCommand, CreateDBClusterCommand, DescribeDBSubnetGroupsCommand } from '@aws-sdk/client-rds';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str } from '../../lib/action';
+import { UserError, soft } from '../../lib/errors';
+import { ENGINES, INSTANCE_CLASSES, validIdentifier } from '../../lib/rds';
+
+const ctx = getCtx(Astro.cookies);
+const rds = aws.rds(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const kind = str(f, 'kind') === 'cluster' ? 'cluster' : 'instance';
+    const id = required(f, 'identifier', 'DB identifier').toLowerCase();
+    if (!validIdentifier(id)) throw new UserError('Identifiers start with a letter and use only letters, numbers and single hyphens (max 63 characters).');
+    const engine = required(f, 'engine', 'Engine');
+    const user = required(f, 'username', 'Master username');
+    const pass = required(f, 'password', 'Master password');
+    if (pass.length < 8) throw new UserError('The master password must be at least 8 characters.');
+    const dbName = str(f, 'dbname') || undefined;
+    const port = intOf(f, 'port', 'Port');
+    const version = str(f, 'version') || undefined;
+    const subnetGroup = str(f, 'subnetGroup') || undefined;
+    if (kind === 'cluster') {
+      await rds.send(new CreateDBClusterCommand({
+        DBClusterIdentifier: id, Engine: engine, EngineVersion: version, MasterUsername: user, MasterUserPassword: pass, DatabaseName: dbName, Port: port, DBSubnetGroupName: subnetGroup,
+      }));
+      return { message: `DB cluster ${id} is being created.`, redirect: `/rds/${id}?type=cluster` };
+    }
+    await rds.send(new CreateDBInstanceCommand({
+      DBInstanceIdentifier: id, Engine: engine, EngineVersion: version, DBInstanceClass: required(f, 'class', 'Instance class'),
+      MasterUsername: user, MasterUserPassword: pass, AllocatedStorage: intOf(f, 'storage', 'Allocated storage') ?? 20,
+      DBName: dbName, Port: port, DBSubnetGroupName: subnetGroup,
+      PubliclyAccessible: str(f, 'public') === '1', MultiAZ: str(f, 'multiAz') === '1',
+      Tags: str(f, 'tagKey') ? [{ Key: str(f, 'tagKey'), Value: str(f, 'tagValue') }] : undefined,
+    }));
+    return { message: `DB instance ${id} is being created.`, redirect: `/rds/${id}` };
+  },
+});
+if (post.response) return post.response;
+
+const groups = ((await soft(() => rds.send(new DescribeDBSubnetGroupsCommand({})))).value?.DBSubnetGroups ?? []).map((g) => g.DBSubnetGroupName!);
+const v = post.values;
+const kind = v.kind ?? (Astro.url.searchParams.get('type') === 'cluster' ? 'cluster' : 'instance');
+const engine = v.engine ?? (kind === 'cluster' ? 'aurora-mysql' : 'mysql');
+---
+<Console title="Create database" crumbs={[{ label: 'Databases', href: '/rds' }, { label: 'Create database' }]} error={post.error}>
+  <PageHeader title="Create database" />
+  <form method="post" class="max-w-3xl space-y-4" autocomplete="off">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Database type">
+      <div class="space-y-2">
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="kind" value="instance" checked={kind === 'instance'} /><span><strong>DB instance</strong><br /><span class="text-muted">A single database server (MySQL, PostgreSQL, MariaDB and others).</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="kind" value="cluster" checked={kind === 'cluster'} /><span><strong>DB cluster</strong><br /><span class="text-muted">An Aurora-style cluster with a shared writer and reader endpoint.</span></span></label>
+      </div>
+    </Card>
+    <Card title="Engine and identifier">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Engine" for="engine">
+          <select id="engine" name="engine" class="select">
+            <optgroup label="Instance engines">{ENGINES.filter((e) => !e.cluster).map((e) => <option value={e.id} selected={engine === e.id}>{e.label}</option>)}</optgroup>
+            <optgroup label="Cluster engines (Aurora)">{ENGINES.filter((e) => e.cluster).map((e) => <option value={e.id} selected={engine === e.id}>{e.label}</option>)}</optgroup>
+          </select>
+        </FormField>
+        <FormField label="Engine version" for="version" optional><input id="version" name="version" class="input" placeholder="Default" value={v.version ?? ''} /></FormField>
+        <FormField label="DB identifier" for="identifier" hint="Lowercase letters, numbers and hyphens."><input id="identifier" name="identifier" class="input" required autofocus value={v.identifier ?? ''} maxlength="63" /></FormField>
+        <FormField label="Initial database name" for="dbname" optional><input id="dbname" name="dbname" class="input" value={v.dbname ?? ''} /></FormField>
+      </div>
+    </Card>
+    <Card title="Credentials">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Master username" for="username"><input id="username" name="username" class="input" required value={v.username ?? 'admin'} /></FormField>
+        <FormField label="Master password" for="password" hint="At least 8 characters."><input id="password" name="password" type="password" class="input" required minlength="8" autocomplete="new-password" value="" /></FormField>
+      </div>
+    </Card>
+    <div data-show-when="kind:instance">
+      <Card title="Instance configuration">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <FormField label="DB instance class" for="class"><select id="class" name="class" class="select">{INSTANCE_CLASSES.map((c) => <option value={c} selected={(v.class ?? 'db.t3.micro') === c}>{c}</option>)}</select></FormField>
+          <FormField label="Allocated storage (GiB)" for="storage"><input id="storage" name="storage" type="number" min="5" max="65536" class="input" value={v.storage ?? '20'} /></FormField>
+        </div>
+        <div class="flex flex-wrap gap-6">
+          <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="public" value="1" checked={v.public === '1'} /> Publicly accessible</label>
+          <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="multiAz" value="1" checked={v.multiAz === '1'} /> Multi-AZ deployment</label>
+        </div>
+      </Card>
+    </div>
+    <Card title="Connectivity and tags" description="Optional.">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="DB subnet group" for="subnetGroup" optional><select id="subnetGroup" name="subnetGroup" class="select"><option value="">Default</option>{groups.map((g) => <option value={g} selected={v.subnetGroup === g}>{g}</option>)}</select></FormField>
+        <FormField label="Port" for="port" optional><input id="port" name="port" type="number" min="1" max="65535" class="input" placeholder="Engine default" value={v.port ?? ''} /></FormField>
+        <div data-show-when="kind:instance" class="sm:col-span-2 grid gap-4 sm:grid-cols-2">
+          <FormField label="Tag key" for="tagKey" optional><input id="tagKey" name="tagKey" class="input" value={v.tagKey ?? ''} /></FormField>
+          <FormField label="Tag value" for="tagValue" optional><input id="tagValue" name="tagValue" class="input" value={v.tagValue ?? ''} /></FormField>
+        </div>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/rds">Cancel</a><button class="btn btn-primary" type="submit">Create database</button></div>
+  </form>
+</Console>

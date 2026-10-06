@@ -1,0 +1,54 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { RequestCertificateCommand } from '@aws-sdk/client-acm';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { KEY_ALGORITHMS, certId, splitDomains } from '../../lib/acm';
+
+const ctx = getCtx(Astro.cookies);
+const acm = aws.acm(ctx);
+
+const post = await handlePost(Astro, {
+  request: async (f) => {
+    const domain = required(f, 'domain', 'Domain name');
+    const sans = splitDomains(str(f, 'sans')).filter((d) => d !== domain);
+    const tagKey = str(f, 'tagKey');
+    const r = await acm.send(new RequestCertificateCommand({
+      DomainName: domain, SubjectAlternativeNames: sans.length ? sans : undefined,
+      ValidationMethod: str(f, 'method') === 'EMAIL' ? 'EMAIL' : 'DNS', KeyAlgorithm: (str(f, 'algo') || 'RSA_2048') as never,
+      Tags: tagKey ? [{ Key: tagKey, Value: str(f, 'tagValue') }] : undefined,
+    }));
+    return { message: `Certificate requested for ${domain}.`, detail: r.CertificateArn, redirect: `/acm/${certId(r.CertificateArn!)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Request certificate" crumbs={[{ label: 'Certificates', href: '/acm' }, { label: 'Request certificate' }]} error={post.error}>
+  <PageHeader title="Request a public certificate" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="request" />
+    <Card title="Domain names">
+      <FormField label="Fully qualified domain name" for="domain" hint="For example www.example.com or *.example.com."><input id="domain" name="domain" class="input" required autofocus autocomplete="off" value={v.domain ?? ''} /></FormField>
+      <FormField label="Additional names" for="sans" optional hint="One domain per line."><textarea id="sans" name="sans" class="textarea" rows="3">{v.sans ?? ''}</textarea></FormField>
+    </Card>
+    <Card title="Validation method">
+      <div class="space-y-2">
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="method" value="DNS" checked={(v.method ?? 'DNS') === 'DNS'} /><span><strong>DNS validation</strong><br /><span class="text-muted">Add a CNAME record to your DNS configuration.</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="method" value="EMAIL" checked={v.method === 'EMAIL'} /><span><strong>Email validation</strong><br /><span class="text-muted">Approve a message sent to the domain's registered contacts.</span></span></label>
+      </div>
+    </Card>
+    <Card title="Key algorithm and tags">
+      <div class="grid gap-4 sm:grid-cols-3">
+        <FormField label="Key algorithm" for="algo"><select id="algo" name="algo" class="select">{KEY_ALGORITHMS.map(([val, label]) => <option value={val} selected={v.algo === val}>{label}</option>)}</select></FormField>
+        <FormField label="Tag key" for="tagKey" optional><input id="tagKey" name="tagKey" class="input" value={v.tagKey ?? ''} /></FormField>
+        <FormField label="Tag value" for="tagValue" optional><input id="tagValue" name="tagValue" class="input" value={v.tagValue ?? ''} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/acm">Cancel</a><button class="btn btn-primary" type="submit">Request</button></div>
+  </form>
+</Console>

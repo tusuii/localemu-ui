@@ -1,0 +1,18 @@
+import { start } from './lib.mjs';
+const t = await start(); const { p } = t;
+await t.go('/kms/create'); await p.fill('#alias', 'ui-key'); await p.fill('#description', 'made in the console');
+await t.submit('button:has-text("Create key")');
+t.ok(/\/kms\/[0-9a-f-]{36}$/.test(p.url()) && (await t.flash()).includes('created successfully'), 'create key: ' + await t.flash());
+t.ok((await p.innerText('main')).includes('ui-key') && (await p.innerText('main')).includes('Enabled'), 'overview shows alias + enabled');
+await t.go(p.url().replace('http://localhost:4321', '') + '?tab=crypto');
+await p.fill('#plaintext', 'attack at dawn'); await t.submit('button:has-text("Encrypt")');
+const ct = (await p.locator('pre.code-block').first().innerText()).trim();
+t.ok(ct.length > 20, 'ciphertext produced');
+await p.fill('#ciphertext', ct); await p.click('button:has-text("Decrypt")'); await p.waitForLoadState('load');
+t.ok((await p.locator('pre.code-block').last().innerText()).trim() === 'attack at dawn', 'decrypt round-trips');
+await t.go('/kms');
+t.ok((await p.locator('tr[data-row]:has-text("ui-key")').count()) === 1, 'listed with alias');
+await t.confirmAction('ui-key', 'Schedule deletion', null);
+t.ok((await t.flash()).includes('Scheduled'), 'schedule deletion: ' + await t.flash());
+t.ok((await p.locator('tr[data-row]:has-text("ui-key")').innerText()).includes('PendingDeletion'), 'state shows pending deletion');
+await t.done();

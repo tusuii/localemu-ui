@@ -1,0 +1,18 @@
+---
+export interface TabDef { id: string; label: string; count?: number | string }
+interface Props { tabs: TabDef[]; active: string; param?: string }
+const { tabs, active, param = 'tab' } = Astro.props;
+const href = (id: string) => {
+  const u = new URL(Astro.url);
+  u.searchParams.set(param, id);
+  for (const k of ['page', 'next', 'prefix', 'token']) u.searchParams.delete(k);
+  return u.pathname + u.search;
+};
+---
+<nav class="tabs" aria-label="Sections">
+  {tabs.map((t) => (
+    <a class="tab" href={href(t.id)} aria-current={t.id === active ? 'page' : undefined}>
+      {t.label}{t.count !== undefined && <span class="font-normal text-faint ml-1">({t.count})</span>}
+    </a>
+  ))}
+</nav>

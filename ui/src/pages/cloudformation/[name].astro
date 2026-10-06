@@ -1,0 +1,116 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import FormField from '../../components/FormField.astro';
+import Details from '../../components/Details.astro';
+import Flash from '../../components/Flash.astro';
+import TemplateInput from '../../components/TemplateInput.astro';
+import Icon from '../../components/Icon.astro';
+import { DescribeStacksCommand, DescribeStackResourcesCommand, DescribeStackEventsCommand, GetTemplateCommand, UpdateStackCommand, DeleteStackCommand,
+  ValidateTemplateCommand, CreateChangeSetCommand, ListChangeSetsCommand, DescribeChangeSetCommand, ExecuteChangeSetCommand, DeleteChangeSetCommand } from '@aws-sdk/client-cloudformation';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load } from '../../lib/errors';
+import { dateTime, shortDateTime } from '../../lib/format';
+import { copyable, stateStatus } from '../../lib/html';
+import { parseParams, templateFrom, CAPABILITIES } from '../../lib/cfn';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const cfn = aws.cfn(ctx);
+const tab = ['overview', 'resources', 'events', 'template', 'changesets'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'overview';
+const post = await handlePost(Astro, {
+  update: async (f) => {
+    if (str(f, 'validate') === '1') {
+      const r = await cfn.send(new ValidateTemplateCommand(await templateFrom(f)));
+      return { stay: true, message: `Template is valid (${(r.Parameters ?? []).length} parameter(s)${r.Description ? ': ' + r.Description : ''}).` };
+    }
+    await cfn.send(new UpdateStackCommand({ StackName: name, ...(await templateFrom(f)), Parameters: parseParams(str(f, 'params')), Capabilities: CAPABILITIES as never }));
+    return { message: 'Stack update started.', redirect: `${Astro.url.pathname}?tab=events` };
+  },
+  createChangeSet: async (f) => {
+    const csName = required(f, 'csName', 'Change set name');
+    await cfn.send(new CreateChangeSetCommand({ StackName: name, ChangeSetName: csName, ChangeSetType: 'UPDATE', ...(await templateFrom(f)), Parameters: parseParams(str(f, 'params')), Capabilities: CAPABILITIES as never }));
+    return { message: `Change set ${csName} created.`, redirect: `${Astro.url.pathname}?tab=changesets&cs=${encodeURIComponent(csName)}` };
+  },
+  executeChangeSet: async (f) => { await cfn.send(new ExecuteChangeSetCommand({ StackName: name, ChangeSetName: required(f, 'id', 'Change set') })); return { message: 'Change set execution started.', redirect: `${Astro.url.pathname}?tab=events` }; },
+  deleteChangeSet: async (f) => ({ ...(await bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'change set' }, (c) => cfn.send(new DeleteChangeSetCommand({ StackName: name, ChangeSetName: c })))), redirect: `${Astro.url.pathname}?tab=changesets` }),
+  delete: async () => { await cfn.send(new DeleteStackCommand({ StackName: name })); return { message: `Deleting stack ${name}.`, redirect: '/cloudformation' }; },
+});
+if (post.response) return post.response;
+const s = await load(async () => (await cfn.send(new DescribeStacksCommand({ StackName: name }))).Stacks?.[0]);
+if (s.error && /does not exist/i.test(s.error)) return new Response(`Stack "${name}" does not exist`, { status: 404 });
+const st = s.data;
+const resources = tab === 'resources' ? await load(async () => (await cfn.send(new DescribeStackResourcesCommand({ StackName: name }))).StackResources ?? []) : undefined;
+const events = tab === 'events' ? await load(async () => (await cfn.send(new DescribeStackEventsCommand({ StackName: name }))).StackEvents ?? []) : undefined;
+const template = tab === 'template' || tab === 'changesets' ? await load(async () => { const t = (await cfn.send(new GetTemplateCommand({ StackName: name }))).TemplateBody; return typeof t === 'string' ? t : JSON.stringify(t, null, 2); }) : undefined;
+const changeSets = tab === 'changesets' ? await load(async () => (await cfn.send(new ListChangeSetsCommand({ StackName: name }))).Summaries ?? []) : undefined;
+const csName = Astro.url.searchParams.get('cs');
+const csDetail = tab === 'changesets' && csName ? await load(() => cfn.send(new DescribeChangeSetCommand({ StackName: name, ChangeSetName: csName }))) : undefined;
+const tabs = [{ id: 'overview', label: 'Overview' }, { id: 'resources', label: 'Resources' }, { id: 'events', label: 'Events' }, { id: 'template', label: 'Template' }, { id: 'changesets', label: 'Change sets' }];
+const busy = !!st?.StackStatus?.endsWith('IN_PROGRESS');
+---
+<Console title={name} crumbs={[{ label: 'Stacks', href: '/cloudformation' }, { label: name }]} error={post.error} notice={post.result?.message ? { text: post.result.message } : null}>
+  <PageHeader title={name} badge={st?.StackStatus}>
+    <label class="flex items-center gap-2 text-muted" data-autorefresh data-interval="3000"><input type="checkbox" class="checkbox" /> Live refresh</label>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The stack and all of its resources will be deleted." data-confirm-title="Delete stack?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete stack"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {busy && <Flash type="info" class="mb-3" dismissible={false} text={`Stack status: ${st?.StackStatus}`} detail="Enable live refresh to follow progress." />}
+  {st?.StackStatus?.includes('FAILED') && <Flash type="error" class="mb-3" dismissible={false} text={`Stack status: ${st.StackStatus}`} detail={st.StackStatusReason} />}
+  {s.error && <Flash type="error" text="Couldn't load the stack" detail={s.error} dismissible={false} />}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    {tab === 'overview' && st && (
+      <div class="space-y-6 p-5">
+        <Details items={[{ label: 'Status', value: stateStatus(st.StackStatus) }, { label: 'Created', value: dateTime(st.CreationTime) }, { label: 'Last updated', value: st.LastUpdatedTime ? dateTime(st.LastUpdatedTime) : '-' }, { label: 'Stack ID', value: copyable(st.StackId ?? ''), wide: true }, { label: 'Description', value: st.Description, wide: true }]} />
+        <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Outputs ({st.Outputs?.length ?? 0})</h3>
+          {(st.Outputs ?? []).length === 0 ? <p class="text-muted">No outputs.</p> : <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Key</th><th>Value</th><th>Description</th></tr></thead><tbody>{st.Outputs!.map((o) => <tr><td class="font-bold">{o.OutputKey}</td><td class="font-mono text-[13px] break-all">{o.OutputValue}</td><td>{o.Description ?? '-'}</td></tr>)}</tbody></table></div>}</div>
+        <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Parameters ({st.Parameters?.length ?? 0})</h3>
+          {(st.Parameters ?? []).length === 0 ? <p class="text-muted">No parameters.</p> : <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>{st.Parameters!.map((o) => <tr><td class="font-bold">{o.ParameterKey}</td><td class="font-mono text-[13px]">{o.ParameterValue}</td></tr>)}</tbody></table></div>}</div>
+      </div>
+    )}
+    {tab === 'resources' && <div class="p-5">{resources?.error ? <Flash type="error" text="Couldn't list resources" detail={resources.error} dismissible={false} /> : (
+      <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Logical ID</th><th>Physical ID</th><th>Type</th><th>Status</th></tr></thead><tbody>
+        {(resources?.data ?? []).map((r) => <tr><td class="font-bold">{r.LogicalResourceId}</td><td class="font-mono text-[13px] break-all">{r.PhysicalResourceId ?? '-'}</td><td>{r.ResourceType}</td><td set:html={stateStatus(r.ResourceStatus).v} /></tr>)}
+      </tbody></table></div>)}</div>}
+    {tab === 'events' && <div class="p-5">{events?.error ? <Flash type="error" text="Couldn't list events" detail={events.error} dismissible={false} /> : (
+      <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Timestamp</th><th>Logical ID</th><th>Status</th><th>Reason</th></tr></thead><tbody>
+        {(events?.data ?? []).map((e) => <tr><td class="nowrap font-mono text-[12.5px]">{shortDateTime(e.Timestamp)}</td><td>{e.LogicalResourceId}</td><td set:html={stateStatus(e.ResourceStatus).v} /><td class="text-[13px]">{e.ResourceStatusReason ?? '-'}</td></tr>)}
+      </tbody></table></div>)}</div>}
+    {tab === 'template' && (
+      <form method="post" enctype="multipart/form-data" class="space-y-3 p-5"><input type="hidden" name="intent" value="update" />
+        {template?.error && <Flash type="error" text="Couldn't load the template" detail={template.error} dismissible={false} />}
+        <TemplateInput body={post.values.template ?? template?.data ?? ''} url={post.values.templateUrl ?? ''} rows={24} />
+        <div><label class="field-label" for="params">Parameters <span class="opt font-normal text-muted">- optional, Key=Value per line</span></label><textarea id="params" name="params" class="textarea code-area" rows="2" data-code>{post.values.params ?? (st?.Parameters ?? []).map((p) => `${p.ParameterKey}=${p.ParameterValue}`).join('\n')}</textarea></div>
+        <div class="flex gap-2"><button class="btn btn-primary" type="submit">Update stack</button><button class="btn btn-normal" type="submit" name="validate" value="1" formnovalidate>Validate template</button></div></form>
+    )}
+    {tab === 'changesets' && (
+      <div class="space-y-6 p-5">
+        {changeSets?.error ? <Flash type="error" text="Couldn't list change sets" detail={changeSets.error} dismissible={false} /> : (changeSets?.data ?? []).length === 0 ? <p class="text-muted">No change sets. Create one below to preview an update before applying it.</p> : (
+          <form method="post" data-table="changesets" data-page-size="50" data-no-busy>
+            <div class="mb-2 flex gap-2"><button class="btn btn-normal btn-sm" name="intent" value="deleteChangeSet" data-min="1" data-confirm="The selected change sets will be deleted." data-confirm-title="Delete change sets?" data-confirm-ok="Delete">Delete</button></div>
+            <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th class="sel"><input type="checkbox" class="checkbox" data-select-all aria-label="Select all" /></th><th>Name</th><th>Status</th><th>Execution</th><th>Created</th><th></th></tr></thead><tbody>
+              {(changeSets!.data as any[]).map((c) => <tr data-row><td class="sel"><input type="checkbox" class="checkbox" name="id" value={c.ChangeSetName} data-row-select aria-label={`Select ${c.ChangeSetName}`} /></td><td><a href={`?tab=changesets&cs=${encodeURIComponent(c.ChangeSetName)}`}>{c.ChangeSetName}</a></td><td set:html={stateStatus(c.Status).v} /><td>{c.ExecutionStatus}</td><td class="nowrap">{dateTime(c.CreationTime)}</td><td>{c.ExecutionStatus === 'AVAILABLE' && <button class="btn btn-normal btn-sm" name="intent" value="executeChangeSet" formaction={`?tab=changesets`} onclick={`this.form.querySelectorAll('[name=id]').forEach(function(i){i.checked=i.value==='${c.ChangeSetName}'})`}>Execute</button>}</td></tr>)}
+            </tbody></table></div>
+          </form>
+        )}
+        {csDetail && (csDetail.error ? <Flash type="error" text="Couldn't describe the change set" detail={csDetail.error} dismissible={false} /> : (
+          <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Changes in {csName}</h3>
+            {(csDetail.data!.Changes ?? []).length === 0 ? <p class="text-muted">{csDetail.data!.StatusReason ?? 'No changes.'}</p> : (
+              <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Action</th><th>Logical ID</th><th>Type</th><th>Replacement</th></tr></thead><tbody>
+                {csDetail.data!.Changes!.map((c) => <tr><td>{c.ResourceChange?.Action}</td><td class="font-bold">{c.ResourceChange?.LogicalResourceId}</td><td>{c.ResourceChange?.ResourceType}</td><td>{c.ResourceChange?.Replacement ?? '-'}</td></tr>)}
+              </tbody></table></div>)}
+          </div>))}
+        <form method="post" enctype="multipart/form-data" class="space-y-3 border-t border-line pt-5"><input type="hidden" name="intent" value="createChangeSet" />
+          <h3 class="card-title">Create change set</h3>
+          <FormField label="Change set name" for="csName"><input id="csName" name="csName" class="input !max-w-sm" required pattern="[A-Za-z][A-Za-z0-9-]*" value={post.values.csName ?? ''} /></FormField>
+          <TemplateInput body={post.values.template ?? template?.data ?? ''} url={post.values.templateUrl ?? ''} rows={14} />
+          <FormField label="Parameters" for="cs-params" optional hint="Key=Value per line."><textarea id="cs-params" name="params" class="textarea code-area" rows="2" data-code>{post.values.params ?? (st?.Parameters ?? []).map((p) => `${p.ParameterKey}=${p.ParameterValue}`).join('\n')}</textarea></FormField>
+          <button class="btn btn-primary" type="submit">Create change set</button></form>
+      </div>
+    )}
+  </div>
+</Console>

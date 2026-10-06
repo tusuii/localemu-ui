@@ -1,0 +1,55 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import { getActivity, isConsoleNoise } from '../../lib/localemu';
+import { load } from '../../lib/errors';
+import { ago, shortDateTime } from '../../lib/format';
+import { badge, status } from '../../lib/html';
+
+const q = Astro.url.searchParams;
+const svc = q.get('service') ?? '';
+const text = (q.get('q') ?? '').toLowerCase();
+const onlyErrors = q.get('errors') === '1';
+const hideReads = q.get('writes') === '1';
+const showConsole = q.get('console') === '1';
+
+const res = await load(() => getActivity(500));
+const all = (res.data?.events ?? []) as any[];
+const services = [...new Set(all.map((e) => e.service))].sort();
+const rows = all.filter((e) =>
+  (!svc || e.service === svc) &&
+  (!text || `${e.operation} ${e.service} ${e.request_id} ${e.error_code ?? ''}`.toLowerCase().includes(text)) &&
+  (!onlyErrors || e.status >= 400) &&
+  (!hideReads || !e.read_only) &&
+  (showConsole || !isConsoleNoise(e)));
+---
+<Console title="Event history" crumbs={[{ label: 'Event history' }]}>
+  <PageHeader title="Event history" description="Every API call LocalEmu has served, newest first (CloudTrail-style, last 500)." />
+
+  <form method="get" class="card mb-4 flex flex-wrap items-end gap-4 p-4" data-no-busy>
+    <div class="min-w-[220px] flex-1"><label class="field-label" for="q">Search</label><input class="input" id="q" name="q" value={q.get('q') ?? ''} placeholder="Operation, request ID, error code…" /></div>
+    <div><label class="field-label" for="service">Service</label>
+      <select class="select" id="service" name="service"><option value="">All services</option>{services.map((s) => <option value={s} selected={s === svc}>{s}</option>)}</select></div>
+    <label class="flex items-center gap-2 pb-1.5"><input type="checkbox" class="checkbox" name="errors" value="1" checked={onlyErrors} /> Errors only</label>
+    <label class="flex items-center gap-2 pb-1.5"><input type="checkbox" class="checkbox" name="writes" value="1" checked={hideReads} /> Hide read-only</label>
+    <label class="flex items-center gap-2 pb-1.5" title="Reads issued by this console while rendering pages"><input type="checkbox" class="checkbox" name="console" value="1" checked={showConsole} /> Include console reads</label>
+    <button class="btn btn-primary" type="submit">Apply</button>
+  </form>
+
+  <DataTable
+    title="Events" rows={rows} idKey="request_id" pageSize={25} error={res.error}
+    emptyTitle="No events" emptyText="No API calls match. Run a command with the AWS CLI or SDK and refresh."
+    filter="Filter loaded events"
+    columns={[
+      { key: 'timestamp', label: 'Event time', nowrap: true, render: (e) => `${shortDateTime(e.timestamp)}`, sort: (e) => e.timestamp },
+      { key: 'operation', label: 'Event name', render: (e) => e.operation, href: (e) => `/activity/${e.request_id}` },
+      { key: 'service', label: 'Event source', render: (e) => badge(e.service) },
+      { key: 'status', label: 'Status', sort: (e) => e.status, render: (e) => e.status >= 400 ? status('error', `${e.status}${e.error_code ? ' ' + e.error_code : ''}`) : status('success', e.status) },
+      { key: 'region', label: 'Region' },
+      { key: 'account_id', label: 'Account', mono: true },
+      { key: 'ago', label: 'Age', render: (e) => ago(e.timestamp), sort: (e) => -new Date(e.timestamp).getTime() },
+      { key: 'source_ip', label: 'Source IP', mono: true },
+    ]}
+  />
+</Console>

@@ -1,0 +1,152 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Card from '../../../components/Card.astro';
+import Details from '../../../components/Details.astro';
+import FormField from '../../../components/FormField.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  DescribeRouteTablesCommand, DescribeInternetGatewaysCommand, DescribeNatGatewaysCommand, DescribeInstancesCommand, DescribeSubnetsCommand,
+  CreateRouteCommand, ReplaceRouteCommand, DeleteRouteCommand, AssociateRouteTableCommand, DisassociateRouteTableCommand,
+  ReplaceRouteTableAssociationCommand, DeleteRouteTableCommand, CreateTagsCommand,
+} from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load, soft } from '../../../lib/errors';
+import { isIpv6Cidr, nameOf, routeDest, routeTarget, routeTargetParams } from '../../../lib/ec2';
+import { badge, copyable, raw, stateStatus } from '../../../lib/html';
+
+const id = Astro.params.id!;
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const here = Astro.url.pathname;
+
+async function describe() {
+  const t = ((await ec2.send(new DescribeRouteTablesCommand({ RouteTableIds: [id] }))).RouteTables ?? [])[0];
+  if (!t) throw new UserError(`Route table ${id} not found.`);
+  return t;
+}
+
+const post = await handlePost(Astro, {
+  saveRoute: async (f) => {
+    const dest = required(f, 'dest', 'Destination');
+    const target = routeTargetParams(required(f, 'target', 'Target'));
+    const input = { RouteTableId: id, ...(isIpv6Cidr(dest) ? { DestinationIpv6CidrBlock: dest } : { DestinationCidrBlock: dest }), ...target };
+    if (f.get('replace') === '1') await ec2.send(new ReplaceRouteCommand(input as never));
+    else await ec2.send(new CreateRouteCommand(input as never));
+    return { message: `${f.get('replace') === '1' ? 'Replaced' : 'Created'} route ${dest}.`, redirect: here };
+  },
+  deleteRoutes: async (f) => ({
+    ...(await bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'route' }, async (dest) => {
+      const t = await describe();
+      const r = (t.Routes ?? []).find((x) => routeDest(x) === dest);
+      if (r?.GatewayId === 'local') throw new UserError('the local route can\'t be deleted');
+      await ec2.send(new DeleteRouteCommand({ RouteTableId: id, ...(isIpv6Cidr(dest) ? { DestinationIpv6CidrBlock: dest } : { DestinationCidrBlock: dest }) }));
+    })), redirect: here,
+  }),
+  associate: async (f) => {
+    const subnets = strs(f, 'subnet');
+    return { ...(await bulk(subnets, { verb: 'Associated', noun: 'subnet' }, (s) => ec2.send(new AssociateRouteTableCommand({ RouteTableId: id, SubnetId: s })))), redirect: here };
+  },
+  disassociate: async (f) => ({ ...(await bulk(strs(f, 'assoc'), { verb: 'Disassociated', noun: 'subnet' }, (a) => ec2.send(new DisassociateRouteTableCommand({ AssociationId: a })))), redirect: here }),
+  setMain: async () => {
+    const t = await describe();
+    const all = (await ec2.send(new DescribeRouteTablesCommand({ Filters: [{ Name: 'vpc-id', Values: [t.VpcId!] }] }))).RouteTables ?? [];
+    const main = all.flatMap((x) => x.Associations ?? []).find((a) => a.Main);
+    if (!main) throw new UserError('This VPC has no main route table association to replace.');
+    if (main.RouteTableId === id) throw new UserError('This is already the main route table.');
+    await ec2.send(new ReplaceRouteTableAssociationCommand({ AssociationId: main.RouteTableAssociationId, RouteTableId: id }));
+    return { message: 'This route table is now the main route table of the VPC.', redirect: here };
+  },
+  rename: async (f) => { await ec2.send(new CreateTagsCommand({ Resources: [id], Tags: [{ Key: 'Name', Value: str(f, 'name') }] })); return { message: 'Name updated.', redirect: here }; },
+  deleteTable: async () => {
+    const t = await describe();
+    if (t.Associations?.some((a) => a.Main)) throw new UserError('The main route table of a VPC can\'t be deleted. Make another table the main one first.');
+    if (t.Associations?.some((a) => a.SubnetId)) throw new UserError('Disassociate all subnets before deleting the route table.');
+    await ec2.send(new DeleteRouteTableCommand({ RouteTableId: id }));
+    return { message: `Deleted route table ${id}.`, redirect: '/ec2/route-tables' };
+  },
+});
+if (post.response) return post.response;
+
+const tbl = await load(describe);
+if (tbl.error && /not found|InvalidRouteTableID/i.test(tbl.error)) return new Response(`Route table "${id}" does not exist`, { status: 404 });
+const t = tbl.data;
+const vpcFilter = t?.VpcId ? [{ Name: 'vpc-id', Values: [t.VpcId] }] : [];
+const [igws, nats, insts, subnets] = t ? await Promise.all([
+  soft(() => ec2.send(new DescribeInternetGatewaysCommand({ Filters: [{ Name: 'attachment.vpc-id', Values: [t.VpcId!] }] }))),
+  soft(() => ec2.send(new DescribeNatGatewaysCommand({ Filter: vpcFilter }))),
+  soft(() => ec2.send(new DescribeInstancesCommand({ Filters: vpcFilter }))),
+  soft(() => ec2.send(new DescribeSubnetsCommand({ Filters: vpcFilter }))),
+]) : [];
+const candidates: { id: string; label: string }[] = [
+  { id: 'local', label: 'local (VPC)' },
+  ...((igws?.value as any)?.InternetGateways ?? []).map((g: any) => ({ id: g.InternetGatewayId, label: `${g.InternetGatewayId} internet gateway ${nameOf(g.Tags)}` })),
+  ...((nats?.value as any)?.NatGateways ?? []).map((g: any) => ({ id: g.NatGatewayId, label: `${g.NatGatewayId} NAT gateway ${nameOf(g.Tags)}` })),
+  ...(((insts?.value as any)?.Reservations ?? []).flatMap((r: any) => r.Instances ?? [])).map((i: any) => ({ id: i.InstanceId, label: `${i.InstanceId} instance ${nameOf(i.Tags)}` })),
+];
+const assocs = (t?.Associations ?? []);
+const explicit = assocs.filter((a) => a.SubnetId);
+const isMain = assocs.some((a) => a.Main);
+const subnetRows = ((subnets?.value as any)?.Subnets ?? []) as { SubnetId: string; CidrBlock: string; Tags?: any[] }[];
+const taken = new Set(explicit.map((a) => a.SubnetId));
+const free = subnetRows.filter((s) => !taken.has(s.SubnetId));
+const subnetLabel = (sid?: string) => { const s = subnetRows.find((x) => x.SubnetId === sid); return s ? `${nameOf(s.Tags) ? nameOf(s.Tags) + ' - ' : ''}${s.CidrBlock}` : '-'; };
+const routes = (t?.Routes ?? []).map((r) => ({ id: routeDest(r), dest: routeDest(r), target: routeTarget(r), state: r.State, origin: r.Origin, local: r.GatewayId === 'local' }));
+const editDest = Astro.url.searchParams.get('edit') ?? '';
+const editing = routes.find((r) => r.dest === editDest);
+const v = post.values;
+---
+<Console title={id} crumbs={[{ label: 'Route tables', href: '/ec2/route-tables' }, { label: id }]} error={post.error}>
+  <PageHeader title={t ? `${nameOf(t.Tags) || id}` : id} badge={isMain ? 'Main' : undefined}>
+    {!isMain && t && <form method="post"><input type="hidden" name="intent" value="setMain" /><button class="btn btn-normal" data-confirm="Subnets without an explicit association will use this table." data-confirm-title="Set as main route table?" data-confirm-ok="Set as main">Set as main</button></form>}
+    <form method="post"><input type="hidden" name="intent" value="deleteTable" /><button class="btn btn-danger" data-confirm="The route table will be deleted." data-confirm-title="Delete route table?" data-confirm-ok="Delete"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {t && (
+    <Card class="mb-4" title="Details">
+      <Details columns={4} items={[{ label: 'Route table ID', value: copyable(id) }, { label: 'VPC', value: copyable(t.VpcId ?? '') }, { label: 'Main', value: isMain ? badge('Yes', 'blue') : 'No' }, { label: 'Explicit associations', value: explicit.length }]} />
+      <form method="post" class="mt-4 flex items-end gap-3"><input type="hidden" name="intent" value="rename" />
+        <FormField label="Name" for="rt-name" class="!mb-0"><input id="rt-name" name="name" class="input !w-64" value={nameOf(t.Tags)} /></FormField><button class="btn btn-normal" type="submit">Save name</button></form>
+    </Card>
+  )}
+
+  <DataTable title="Routes" id="routes" rows={routes} error={tbl.error} select="multi" idKey="id" nameKey="dest" pageSize={50} filter="Filter routes" emptyTitle="No routes" emptyText="Add a route below."
+    columns={[
+      { key: 'dest', label: 'Destination', mono: true }, { key: 'target', label: 'Target', mono: true }, { key: 'state', label: 'Status', render: (r) => stateStatus(r.state) },
+      { key: 'origin', label: 'Propagated / origin' },
+      { key: 'edit', label: '', render: (r) => raw(r.local ? '' : `<a href="?edit=${encodeURIComponent(r.dest)}#route-form">Edit</a>`) },
+    ]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="deleteRoutes" data-min="1" data-confirm="The selected routes will be deleted. The local route can't be removed." data-confirm-title="Delete routes?" data-confirm-ok="Delete">Delete routes</button>
+  </DataTable>
+
+  <Card class="mt-4" title={editing ? `Replace route ${editing.dest}` : 'Add route'} id="route-form">
+    <form method="post" class="grid items-end gap-4 md:grid-cols-[1.2fr_2fr_auto_auto]"><input type="hidden" name="intent" value="saveRoute" />
+      <FormField label="Destination (CIDR)" for="dest" class="!mb-0"><input id="dest" name="dest" class="input font-mono" required placeholder="0.0.0.0/0" value={v.dest ?? editing?.dest ?? ''} readonly={!!editing} /></FormField>
+      <FormField label="Target" for="target" hint="Internet gateway, NAT gateway, instance, peering connection ... or local." class="!mb-0"><input id="target" name="target" class="input font-mono" required list="rt-targets" placeholder="igw-..." value={v.target ?? ''} /><datalist id="rt-targets">{candidates.map((c) => <option value={c.id}>{c.label}</option>)}</datalist></FormField>
+      <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="replace" value="1" checked={!!editing || v.replace === '1'} /> Replace if it exists</label>
+      <div class="flex gap-2"><button class="btn btn-primary" type="submit">{editing ? 'Replace route' : 'Save route'}</button>{editing && <a class="btn btn-normal" href={here}>Cancel</a>}</div>
+    </form>
+  </Card>
+
+  <Card class="mt-4" title={`Subnet associations (${explicit.length})`}>
+    {isMain && <p class="mb-3 text-muted">This is the main route table: subnets without an explicit association use it.</p>}
+    {explicit.length === 0 ? <p class="mb-3 text-muted">No subnets are explicitly associated.</p> : (
+      <form method="post" class="mb-4" data-table="assoc" data-page-size="50" data-no-busy>
+        <div class="mb-2"><button class="btn btn-normal btn-sm" name="intent" value="disassociate" data-min="1" data-confirm="The selected subnets go back to the main route table." data-confirm-title="Disassociate subnets?" data-confirm-ok="Disassociate">Disassociate</button></div>
+        <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th class="sel"><input type="checkbox" class="checkbox" data-select-all aria-label="Select all" /></th><th>Subnet</th><th>CIDR</th><th>Association ID</th></tr></thead><tbody>
+          {explicit.map((a) => <tr data-row><td class="sel"><input type="checkbox" class="checkbox" name="assoc" value={a.RouteTableAssociationId} data-row-select aria-label={`Select ${a.SubnetId}`} /></td><td class="font-mono text-[13px]">{a.SubnetId}</td><td>{subnetLabel(a.SubnetId)}</td><td class="font-mono text-[13px]">{a.RouteTableAssociationId}</td></tr>)}
+        </tbody></table></div>
+      </form>
+    )}
+    <form method="post" class="flex flex-wrap items-end gap-4"><input type="hidden" name="intent" value="associate" />
+      <FormField label="Associate subnets" for="subnet" class="!mb-0 min-w-[320px]">
+        <select id="subnet" name="subnet" class="select" multiple size={Math.min(Math.max(free.length, 2), 6)} required>{free.map((s) => <option value={s.SubnetId}>{s.SubnetId} - {subnetLabel(s.SubnetId)}</option>)}</select>
+      </FormField>
+      <button class="btn btn-primary" type="submit" disabled={free.length === 0}>Associate selected</button>
+      {free.length === 0 && <span class="text-muted">All subnets of this VPC are already associated explicitly.</span>}
+    </form>
+  </Card>
+</Console>

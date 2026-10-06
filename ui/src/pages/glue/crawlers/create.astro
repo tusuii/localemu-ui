@@ -1,0 +1,57 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { GetDatabasesCommand, CreateCrawlerCommand } from '@aws-sdk/client-glue';
+import { ListRolesCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str } from '../../../lib/action';
+import { UserError, load, soft } from '../../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const glue = aws.glue(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Crawler name');
+    const path = required(f, 'path', 'S3 path');
+    if (!path.startsWith('s3://')) throw new UserError('The data source path must start with s3://.');
+    await glue.send(new CreateCrawlerCommand({
+      Name: name, Role: required(f, 'role', 'IAM role'), DatabaseName: required(f, 'db', 'Target database'), Description: str(f, 'description') || undefined,
+      Targets: { S3Targets: [{ Path: path }] }, Schedule: str(f, 'schedule') || undefined, TablePrefix: str(f, 'prefix') || undefined,
+    }));
+    return { message: `Crawler ${name} created.`, redirect: '/glue/crawlers' };
+  },
+});
+if (post.response) return post.response;
+const dbs = await load(async () => ((await glue.send(new GetDatabasesCommand({}))).DatabaseList ?? []).map((d) => d.Name!).sort());
+const roles = await soft(async () => ((await aws.iam(ctx).send(new ListRolesCommand({}))).Roles ?? []).map((r) => r.Arn!));
+const v = post.values;
+---
+<Console title="Create crawler" crumbs={[{ label: 'Crawlers', href: '/glue/crawlers' }, { label: 'Create crawler' }]} error={post.error ?? dbs.error}>
+  <PageHeader title="Create crawler" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Properties">
+      <FormField label="Name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+    </Card>
+    <Card title="Data source">
+      <FormField label="S3 path" for="path"><input id="path" name="path" class="input" required placeholder="s3://bucket/path/" value={v.path ?? ''} /></FormField>
+    </Card>
+    <Card title="Security and output">
+      <FormField label="IAM role" for="role">
+        <input id="role" name="role" class="input" list="roles" required autocomplete="off" value={v.role ?? `arn:aws:iam::${ctx.account}:role/AWSGlueServiceRole`} />
+        <datalist id="roles">{(roles.value ?? []).map((r) => <option value={r} />)}</datalist>
+      </FormField>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Target database" for="db"><select id="db" name="db" class="select" required>{(dbs.data ?? []).map((d) => <option value={d} selected={v.db === d}>{d}</option>)}</select></FormField>
+        <FormField label="Table name prefix" for="prefix" optional><input id="prefix" name="prefix" class="input" value={v.prefix ?? ''} /></FormField>
+      </div>
+      <FormField label="Schedule (cron expression)" for="schedule" optional hint="Leave blank to run on demand. Example: cron(0 12 * * ? *)"><input id="schedule" name="schedule" class="input" value={v.schedule ?? ''} /></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/glue/crawlers">Cancel</a><button class="btn btn-primary" type="submit">Create crawler</button></div>
+  </form>
+</Console>

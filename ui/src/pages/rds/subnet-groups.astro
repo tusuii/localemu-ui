@@ -1,0 +1,73 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { DescribeDBSubnetGroupsCommand, CreateDBSubnetGroupCommand, DeleteDBSubnetGroupCommand } from '@aws-sdk/client-rds';
+import { DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load, soft } from '../../lib/errors';
+import { stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const rds = aws.rds(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Name');
+    const subnets = strs(f, 'subnet');
+    if (subnets.length < 1) throw new UserError('Select at least one subnet.');
+    await rds.send(new CreateDBSubnetGroupCommand({ DBSubnetGroupName: name, DBSubnetGroupDescription: required(f, 'description', 'Description'), SubnetIds: subnets }));
+    return `DB subnet group ${name} created.`;
+  },
+  delete: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'subnet group' }, (id) => rds.send(new DeleteDBSubnetGroupCommand({ DBSubnetGroupName: id }))),
+});
+if (post.response) return post.response;
+
+const groups = await load(async () => (await rds.send(new DescribeDBSubnetGroupsCommand({}))).DBSubnetGroups ?? []);
+const subnets = (await soft(() => aws.ec2(ctx).send(new DescribeSubnetsCommand({})))).value?.Subnets ?? [];
+const rows = (groups.data ?? []).map((g) => ({
+  id: g.DBSubnetGroupName!, description: g.DBSubnetGroupDescription, vpc: g.VpcId, status: g.SubnetGroupStatus ?? 'Complete',
+  subnets: (g.Subnets ?? []).map((s) => s.SubnetIdentifier).join(', '),
+}));
+const v = post.values;
+const chosen = new Set(Object.entries(v).filter(([k]) => k === 'subnet').map(([, x]) => x));
+---
+<Console title="Subnet groups" crumbs={[{ label: 'Subnet groups' }]} error={post.error}>
+  <PageHeader title="Subnet groups" description="DB subnet groups tell RDS which subnets in a VPC it can place databases in." />
+  <div class="space-y-5">
+    <DataTable
+      title="DB subnet groups" rows={rows} error={groups.error} select="multi" nameKey="id" pageSize={20}
+      filter="Search subnet groups" emptyTitle="No subnet groups" emptyText="Create a DB subnet group to control where databases are placed."
+      columns={[
+        { key: 'id', label: 'Name' }, { key: 'description', label: 'Description' },
+        { key: 'status', label: 'Status', render: (r) => stateStatus(r.status, { complete: 'success' }) },
+        { key: 'vpc', label: 'VPC', mono: true }, { key: 'subnets', label: 'Subnets', mono: true },
+      ]}
+    >
+      <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected subnet groups will be deleted." data-confirm-title="Delete subnet groups?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+    </DataTable>
+    <Card title="Create DB subnet group">
+      <form method="post" class="max-w-3xl">
+        <input type="hidden" name="intent" value="create" />
+        <div class="grid gap-4 sm:grid-cols-2">
+          <FormField label="Name" for="name"><input id="name" name="name" class="input" required value={v.name ?? ''} /></FormField>
+          <FormField label="Description" for="description"><input id="description" name="description" class="input" required value={v.description ?? ''} /></FormField>
+        </div>
+        <FormField label="Subnets" description="Pick subnets from at least one Availability Zone.">
+          {subnets.length === 0 && <p class="text-muted">No subnets found in this region.</p>}
+          <div class="max-h-56 space-y-1 overflow-y-auto rounded border border-line p-3">
+            {subnets.map((s) => (
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="subnet" value={s.SubnetId} checked={chosen.has(s.SubnetId!)} /> <code class="text-[13px]">{s.SubnetId}</code> <span class="text-muted">{s.AvailabilityZone} - {s.CidrBlock}</span></label>
+            ))}
+          </div>
+        </FormField>
+        <button class="btn btn-primary" type="submit">Create subnet group</button>
+      </form>
+    </Card>
+  </div>
+</Console>

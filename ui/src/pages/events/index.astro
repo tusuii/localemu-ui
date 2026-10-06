@@ -1,0 +1,35 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import { ListEventBusesCommand, CreateEventBusCommand, DeleteEventBusCommand } from '@aws-sdk/client-eventbridge';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { plural } from '../../lib/format';
+import { badge } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const eb = aws.events(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => { const n = required(f, 'name', 'Event bus name'); await eb.send(new CreateEventBusCommand({ Name: n })); return `Event bus ${n} created.`; },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'event bus', nouns: 'event buses' }, async (b) => { if (b === 'default') throw new UserError('The default event bus can\'t be deleted.'); await eb.send(new DeleteEventBusCommand({ Name: b })); }),
+});
+if (post.response) return post.response;
+const res = await load(async () => ((await eb.send(new ListEventBusesCommand({}))).EventBuses ?? []).map((b) => ({ id: b.Name, name: b.Name, arn: b.Arn, isDefault: b.Name === 'default' })));
+---
+<Console title="Event buses" crumbs={[{ label: 'Event buses' }]} error={post.error}>
+  <PageHeader title="Event buses" description="Event buses receive events from your applications and route them to targets through rules." />
+  <DataTable title="Event buses" rows={res.data ?? []} error={res.error} select="multi" nameKey="name" pageSize={25} emptyTitle="No event buses" emptyText="Create one below."
+    columns={[{ key: 'name', label: 'Name', href: (r) => `/events/rules?bus=${encodeURIComponent(r.name)}`, render: (r) => r.name }, { key: 'isDefault', label: 'Type', render: (r) => badge(r.isDefault ? 'Default' : 'Custom', r.isDefault ? 'blue' : 'soft') }, { key: 'arn', label: 'ARN', mono: true }]}>
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/events/rules?bus={id}" data-min="1" data-max="1">View rules</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected event buses and their rules will be deleted." data-confirm-title="Delete event buses?" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/events/put">Send events</a>
+    </Fragment>
+  </DataTable>
+  <Card class="mt-4" title="Create event bus"><form data-cli="aws events create-event-bus --name {name}" method="post" class="flex max-w-xl items-end gap-2"><input type="hidden" name="intent" value="create" /><div class="flex-1"><label class="field-label" for="n">Name</label><input id="n" name="name" class="input" required autocomplete="off" /></div><button class="btn btn-primary" type="submit">Create</button></form></Card>
+</Console>

@@ -1,0 +1,51 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { DescribeSubnetsCommand, DescribeVpcsCommand, CreateSubnetCommand, DeleteSubnetCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { plural } from '../../lib/format';
+import { nameOf } from '../../lib/ec2';
+import { stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const r = await ec2.send(new CreateSubnetCommand({ VpcId: required(f, 'vpc', 'VPC'), CidrBlock: required(f, 'cidr', 'IPv4 CIDR'), AvailabilityZone: str(f, 'az') || undefined, TagSpecifications: str(f, 'name') ? [{ ResourceType: 'subnet', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined }));
+    return `Created subnet ${r.Subnet?.SubnetId}.`;
+  },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'subnet' }, (s) => ec2.send(new DeleteSubnetCommand({ SubnetId: s }))),
+});
+if (post.response) return post.response;
+const [res, vpcs] = await Promise.all([
+  load(async () => ((await ec2.send(new DescribeSubnetsCommand({}))).Subnets ?? []).map((s) => ({ id: s.SubnetId, name: nameOf(s.Tags) || '-', state: s.State, vpc: s.VpcId, cidr: s.CidrBlock, az: s.AvailabilityZone, free: s.AvailableIpAddressCount, pub: s.MapPublicIpOnLaunch }))),
+  load(async () => (await ec2.send(new DescribeVpcsCommand({}))).Vpcs ?? []),
+]);
+const v = post.values;
+---
+<Console title="Subnets" crumbs={[{ label: 'Subnets' }]} error={post.error}>
+  <PageHeader title="Subnets" />
+  <DataTable title="Subnets" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="id" pageSize={25} filter="Filter subnets" emptyTitle="No subnets" emptyText="Create a subnet below."
+    columns={[
+      { key: 'name', label: 'Name' }, { key: 'id', label: 'Subnet ID', mono: true }, { key: 'state', label: 'State', render: (r) => stateStatus(r.state) }, { key: 'vpc', label: 'VPC', mono: true },
+      { key: 'cidr', label: 'IPv4 CIDR', mono: true }, { key: 'az', label: 'Availability Zone' }, { key: 'free', label: 'Available IPs' }, { key: 'pub', label: 'Auto-assign public IP', render: (r) => (r.pub ? 'Yes' : 'No') },
+    ]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected subnets will be deleted." data-confirm-title="Delete subnets?" data-confirm-ok="Delete">Delete</button>
+  </DataTable>
+  <Card class="mt-4" title="Create subnet">
+    <form method="post" class="grid items-end gap-4 sm:grid-cols-2 lg:grid-cols-5"><input type="hidden" name="intent" value="create" />
+      <FormField label="VPC" for="vpc" class="!mb-0"><select id="vpc" name="vpc" class="select" required>{(vpcs.data ?? []).map((x) => <option value={x.VpcId} selected={v.vpc === x.VpcId}>{x.VpcId} · {x.CidrBlock}</option>)}</select></FormField>
+      <FormField label="Name" for="name" optional class="!mb-0"><input id="name" name="name" class="input" value={v.name ?? ''} /></FormField>
+      <FormField label="IPv4 CIDR block" for="cidr" class="!mb-0"><input id="cidr" name="cidr" class="input font-mono" required placeholder="10.0.1.0/24" value={v.cidr ?? ''} /></FormField>
+      <FormField label="Availability Zone" for="az" optional class="!mb-0"><input id="az" name="az" class="input" placeholder={`${ctx.region}a`} value={v.az ?? ''} /></FormField>
+      <button class="btn btn-primary" type="submit">Create subnet</button>
+    </form>
+  </Card>
+</Console>

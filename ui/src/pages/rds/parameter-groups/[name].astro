@@ -1,0 +1,140 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Details from '../../../components/Details.astro';
+import DataTable from '../../../components/DataTable.astro';
+import FormField from '../../../components/FormField.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Flash from '../../../components/Flash.astro';
+import {
+  DescribeDBParameterGroupsCommand, DescribeDBClusterParameterGroupsCommand, DescribeDBParametersCommand, DescribeDBClusterParametersCommand,
+  ModifyDBParameterGroupCommand, ModifyDBClusterParameterGroupCommand, ResetDBParameterGroupCommand, ResetDBClusterParameterGroupCommand,
+  type Parameter,
+} from '@aws-sdk/client-rds';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load } from '../../../lib/errors';
+import { badge, link } from '../../../lib/html';
+import { guard } from '../../../lib/unsupported';
+
+const name = decodeURIComponent(Astro.params.name!);
+const isCluster = Astro.url.searchParams.get('type') === 'cluster';
+const ctx = getCtx(Astro.cookies);
+const rds = aws.rds(ctx);
+const show = Astro.url.searchParams.get('show') === 'all' ? 'all' : 'modified';
+const edit = Astro.url.searchParams.get('edit') ?? '';
+const base = `${Astro.url.pathname}?${isCluster ? 'type=cluster&' : ''}`;
+
+const meta = await load(async () => {
+  if (isCluster) {
+    const g = (await rds.send(new DescribeDBClusterParameterGroupsCommand({ DBClusterParameterGroupName: name }))).DBClusterParameterGroups?.[0];
+    return g && { family: g.DBParameterGroupFamily, description: g.Description, arn: g.DBClusterParameterGroupArn };
+  }
+  const g = (await rds.send(new DescribeDBParameterGroupsCommand({ DBParameterGroupName: name }))).DBParameterGroups?.[0];
+  return g && { family: g.DBParameterGroupFamily, description: g.Description, arn: g.DBParameterGroupArn };
+});
+if ((meta.error && /NotFound/i.test(meta.error)) || (!meta.error && !meta.data)) return new Response(`Parameter group "${name}" does not exist`, { status: 404 });
+
+const APPLY = ['immediate', 'pending-reboot'] as const;
+const applyOf = (f: FormData) => {
+  const m = str(f, 'apply') || 'pending-reboot';
+  if (!(APPLY as readonly string[]).includes(m)) throw new UserError('Apply method must be immediate or pending-reboot.');
+  return m as 'immediate' | 'pending-reboot';
+};
+
+const post = await handlePost(Astro, {
+  modify: async (f) => {
+    const pname = required(f, 'pname', 'Parameter name');
+    if (!/^[A-Za-z0-9_.:-]+$/.test(pname)) throw new UserError('Parameter names use letters, numbers and _ . : -');
+    const Parameters = [{ ParameterName: pname, ParameterValue: str(f, 'pvalue'), ApplyMethod: applyOf(f) }];
+    if (isCluster) await guard('ModifyDBClusterParameterGroup', () => rds.send(new ModifyDBClusterParameterGroupCommand({ DBClusterParameterGroupName: name, Parameters })));
+    else await guard('ModifyDBParameterGroup', () => rds.send(new ModifyDBParameterGroupCommand({ DBParameterGroupName: name, Parameters })));
+    return { message: `Parameter ${pname} set to "${str(f, 'pvalue')}".`, redirect: base + 'show=modified' };
+  },
+  reset: async (f) => {
+    const r = await bulk(strs(f, 'id'), { verb: 'Reset', noun: 'parameter' }, (p) => {
+      const Parameters = [{ ParameterName: p, ApplyMethod: 'pending-reboot' as const }];
+      return isCluster
+        ? guard('ResetDBClusterParameterGroup', () => rds.send(new ResetDBClusterParameterGroupCommand({ DBClusterParameterGroupName: name, Parameters })))
+        : guard('ResetDBParameterGroup', () => rds.send(new ResetDBParameterGroupCommand({ DBParameterGroupName: name, Parameters })));
+    });
+    return { ...r, redirect: base + 'show=modified' };
+  },
+});
+if (post.response) return post.response;
+
+const params = await load(async () => {
+  const out: Parameter[] = [];
+  let marker: string | undefined;
+  do {
+    const r = isCluster
+      ? await rds.send(new DescribeDBClusterParametersCommand({ DBClusterParameterGroupName: name, Marker: marker, MaxRecords: 100 }))
+      : await rds.send(new DescribeDBParametersCommand({ DBParameterGroupName: name, Marker: marker, MaxRecords: 100 }));
+    out.push(...(r.Parameters ?? []));
+    marker = r.Marker;
+  } while (marker && out.length < 2000);
+  return out;
+});
+const all = (params.data ?? []).map((p) => ({
+  id: p.ParameterName!, name: p.ParameterName!, value: p.ParameterValue, source: p.Source ?? '', applyType: p.ApplyType, method: p.ApplyMethod,
+  modifiable: p.IsModifiable, allowed: p.AllowedValues, description: p.Description,
+  // A parameter counts as modified when the engine says it came from the user (or does not say, as LocalEmu only lists stored overrides).
+  modified: !p.Source || p.Source === 'user',
+})).sort((a, b) => a.name.localeCompare(b.name));
+const rows = show === 'all' ? all : all.filter((p) => p.modified);
+const editing = all.find((p) => p.name === edit);
+const v = post.values;
+---
+<Console title={name} crumbs={[{ label: 'Parameter groups', href: `/rds/parameter-groups${isCluster ? '?tab=cluster' : ''}` }, { label: name }]} error={post.error ?? meta.error}>
+  <PageHeader title={name} badge={isCluster ? 'DB cluster parameter group' : 'DB parameter group'} />
+  <div class="space-y-5">
+    <Card title="Details">
+      <Details items={[
+        { label: 'Name', value: name }, { label: 'Family', value: meta.data?.family }, { label: 'Description', value: meta.data?.description },
+        { label: 'ARN', value: meta.data?.arn, wide: true },
+      ]} />
+    </Card>
+
+    <div class="card">
+      <Tabs tabs={[{ id: 'modified', label: 'Modified parameters' }, { id: 'all', label: 'All parameters' }]} active={show} param="show" />
+      <div class="space-y-6 p-5">
+        {!params.error && !all.length && (
+          <Flash type="info" text="This group has no parameters listed" detail="LocalEmu returns only parameters that were explicitly set. Add any parameter name and value below to override it." dismissible={false} />
+        )}
+        <DataTable title={show === 'all' ? 'All parameters' : 'Modified parameters'} rows={rows} error={params.error} bare select="multi" id="params" nameKey="name" pageSize={25} filter="Search parameters"
+          emptyTitle={show === 'all' ? 'No parameters' : 'No modified parameters'} emptyText="Use the form below to set a parameter value."
+          columns={[
+            { key: 'name', label: 'Name', mono: true },
+            { key: 'value', label: 'Value', mono: true },
+            { key: 'method', label: 'Apply method', render: (r) => (r.method ? badge(r.method) : '-') },
+            { key: 'applyType', label: 'Apply type' },
+            { key: 'source', label: 'Source' },
+            { key: 'allowed', label: 'Allowed values' },
+            { key: 'description', label: 'Description' },
+            { key: 'edit', label: '', render: (r) => (r.modifiable === false ? '' : link(`${base}show=${show}&edit=${encodeURIComponent(r.name)}#edit`, 'Edit')) },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="reset" data-min="1" data-confirm="The selected parameters will be reset to their default values." data-confirm-title="Reset parameters?" data-confirm-ok="Reset">Reset to default</button>
+        </DataTable>
+
+        <form method="post" id="edit" class="max-w-3xl space-y-1 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="modify" />
+          <h3 class="card-title mb-3">{editing ? `Edit ${editing.name}` : 'Set a parameter'}</h3>
+          <div class="grid gap-4 sm:grid-cols-3">
+            <FormField label="Parameter name" for="pname">
+              <input id="pname" name="pname" class="input" required autocomplete="off" list="param-names" value={v.pname ?? editing?.name ?? ''} />
+              <datalist id="param-names">{all.map((p) => <option value={p.name} />)}</datalist>
+            </FormField>
+            <FormField label="Value" for="pvalue"><input id="pvalue" name="pvalue" class="input" autocomplete="off" value={v.pvalue ?? editing?.value ?? ''} /></FormField>
+            <FormField label="Apply method" for="apply">
+              <select id="apply" name="apply" class="select">{APPLY.map((m) => <option value={m} selected={(v.apply ?? editing?.method ?? 'pending-reboot') === m}>{m}</option>)}</select>
+            </FormField>
+          </div>
+          <button class="btn btn-primary" type="submit">Save parameter</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</Console>

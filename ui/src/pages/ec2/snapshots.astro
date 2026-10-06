@@ -1,0 +1,31 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import { DescribeSnapshotsCommand, DeleteSnapshotCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, plural } from '../../lib/format';
+import { stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'snapshot' }, (s) => ec2.send(new DeleteSnapshotCommand({ SnapshotId: s }))),
+});
+if (post.response) return post.response;
+const res = await load(async () => ((await ec2.send(new DescribeSnapshotsCommand({ OwnerIds: [ctx.account] }))).Snapshots ?? []).map((s) => ({ id: s.SnapshotId, volume: s.VolumeId, size: s.VolumeSize, state: s.State, started: s.StartTime, description: s.Description })));
+---
+<Console title="Snapshots" crumbs={[{ label: 'Snapshots' }]} error={post.error}>
+  <PageHeader title="Snapshots" description="Point-in-time copies of your volumes. Create them from the Volumes page." />
+  <DataTable title="Snapshots" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="id" pageSize={25} filter="Filter snapshots" emptyTitle="No snapshots" emptyText="You don't own any snapshots."
+    columns={[
+      { key: 'id', label: 'Snapshot ID', mono: true }, { key: 'volume', label: 'Volume ID', mono: true }, { key: 'size', label: 'Size', render: (r) => `${r.size} GiB`, sort: (r) => r.size },
+      { key: 'state', label: 'State', render: (r) => stateStatus(r.state) }, { key: 'started', label: 'Started', nowrap: true, render: (r) => dateTime(r.started), sort: (r) => new Date(r.started ?? 0).getTime() }, { key: 'description', label: 'Description' },
+    ]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected snapshots will be permanently deleted." data-confirm-title="Delete snapshots?" data-confirm-ok="Delete">Delete</button>
+  </DataTable>
+</Console>

@@ -1,0 +1,53 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import DataTable from '../../../components/DataTable.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Icon from '../../../components/Icon.astro';
+import { DeregisterTaskDefinitionCommand, DeleteTaskDefinitionsCommand } from '@aws-sdk/client-ecs';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { load } from '../../../lib/errors';
+import { listTaskDefinitions, tdShort } from '../../../lib/ecs';
+import { stateStatus } from '../../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ecs = aws.ecs(ctx);
+const status = Astro.url.searchParams.get('status') === 'inactive' ? 'INACTIVE' : 'ACTIVE';
+
+const post = await handlePost(Astro, {
+  deregister: (f) => bulk(strs(f, 'id'), { verb: 'Deregistered', noun: 'task definition revision' }, (id) => ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: id }))),
+  delete: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'task definition revision' }, (id) => ecs.send(new DeleteTaskDefinitionsCommand({ taskDefinitions: [id] }))),
+});
+if (post.response) return post.response;
+
+const res = await load(async () => (await listTaskDefinitions(ctx, status)).map((a) => {
+  const id = tdShort(a);
+  const [family, rev] = id.split(':');
+  return { id, family, revision: Number(rev), status };
+}).sort((a, b) => a.family.localeCompare(b.family) || b.revision - a.revision));
+---
+<Console title="Task definitions" crumbs={[{ label: 'Task definitions' }]} error={post.error}>
+  <PageHeader title="Task definitions" description="A task definition is a blueprint that describes the containers that make up your application." />
+  <div class="card mb-5"><Tabs tabs={[{ id: 'active', label: 'Active' }, { id: 'inactive', label: 'Inactive' }]} active={status === 'ACTIVE' ? 'active' : 'inactive'} param="status" /></div>
+  <DataTable
+    title="Task definition revisions" rows={res.data ?? []} error={res.error} select="multi" nameKey="id" pageSize={25}
+    filter="Search task definitions" emptyTitle="No task definitions" emptyText={`There are no ${status.toLowerCase()} task definitions.`}
+    columns={[
+      { key: 'family', label: 'Family', href: (r) => `/ecs/task-definitions/${encodeURIComponent(r.id)}` },
+      { key: 'revision', label: 'Revision' },
+      { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/ecs/task-definitions/{id}" data-min="1" data-max="1">View</a>
+      {status === 'ACTIVE'
+        ? <button class="btn btn-normal" name="intent" value="deregister" data-min="1" data-confirm="The selected revisions will be marked INACTIVE. New tasks can no longer be started from them." data-confirm-title="Deregister revisions?" data-confirm-ok="Deregister">Deregister</button>
+        : <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected inactive revisions will be permanently deleted." data-confirm-title="Delete revisions?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>}
+      <a class="btn btn-primary" href="/ecs/task-definitions/register"><Icon name="plus" size={16} /> Register task definition</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/ecs/task-definitions/register">Register task definition</a>
+  </DataTable>
+</Console>

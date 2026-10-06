@@ -1,0 +1,9 @@
+---
+import Icon from './Icon.astro';
+interface Props { id?: string; label?: string }
+const { id = 'actions-menu', label = 'Actions' } = Astro.props;
+---
+<div class="relative">
+  <button type="button" class="btn btn-normal" data-menu-toggle={id} aria-haspopup="menu" aria-expanded="false" aria-controls={id}>{label} <Icon name="chevron-down" size={14} /></button>
+  <div id={id} role="menu" class="menu right-0 top-full mt-1"><slot /></div>
+</div>

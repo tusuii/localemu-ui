@@ -1,0 +1,81 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Details from '../../../components/Details.astro';
+import Flash from '../../../components/Flash.astro';
+import FormField from '../../../components/FormField.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  DescribeSecurityGroupsCommand, DeleteSecurityGroupCommand, AuthorizeSecurityGroupIngressCommand, AuthorizeSecurityGroupEgressCommand,
+  RevokeSecurityGroupIngressCommand, RevokeSecurityGroupEgressCommand,
+} from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { badge, copyable } from '../../../lib/html';
+import { PROTOCOLS, flattenRules, portRange, ruleToPermission } from '../../../lib/ec2';
+
+const id = Astro.params.id!;
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const addRule = (egress: boolean) => async (f: FormData) => {
+  const protocol = str(f, 'protocol') || 'tcp';
+  const src = required(f, 'source', 'Source');
+  const from = intOf(f, 'from', 'From port'); const to = intOf(f, 'to', 'To port');
+  if (protocol !== '-1' && protocol !== 'icmp' && from === undefined) throw new UserError('Enter a port or port range.');
+  const perm: any = { IpProtocol: protocol };
+  if (protocol !== '-1') { perm.FromPort = from ?? -1; perm.ToPort = to ?? from ?? -1; }
+  if (/^sg-/.test(src)) perm.UserIdGroupPairs = [{ GroupId: src }];
+  else if (src.includes(':')) perm.Ipv6Ranges = [{ CidrIpv6: src, Description: str(f, 'desc') || undefined }];
+  else perm.IpRanges = [{ CidrIp: src, Description: str(f, 'desc') || undefined }];
+  if (egress) await ec2.send(new AuthorizeSecurityGroupEgressCommand({ GroupId: id, IpPermissions: [perm] }));
+  else await ec2.send(new AuthorizeSecurityGroupIngressCommand({ GroupId: id, IpPermissions: [perm] }));
+  return egress ? 'Outbound rule added.' : 'Inbound rule added.';
+};
+const post = await handlePost(Astro, {
+  addIngress: addRule(false), addEgress: addRule(true),
+  revokeIngress: async (f) => { await ec2.send(new RevokeSecurityGroupIngressCommand({ GroupId: id, IpPermissions: [ruleToPermission(required(f, 'rule'))] })); return 'Inbound rule removed.'; },
+  revokeEgress: async (f) => { await ec2.send(new RevokeSecurityGroupEgressCommand({ GroupId: id, IpPermissions: [ruleToPermission(required(f, 'rule'))] })); return 'Outbound rule removed.'; },
+  delete: async () => { await ec2.send(new DeleteSecurityGroupCommand({ GroupId: id })); return { message: `Deleted security group ${id}.`, redirect: '/ec2/security-groups' }; },
+});
+if (post.response) return post.response;
+
+const r = await load(async () => ((await ec2.send(new DescribeSecurityGroupsCommand({ GroupIds: [id] }))).SecurityGroups ?? [])[0]);
+if (r.error && /NotFound/i.test(r.error)) return new Response(`Security group "${id}" does not exist`, { status: 404 });
+const g = r.data;
+const inbound = flattenRules(g?.IpPermissions); const outbound = flattenRules(g?.IpPermissionsEgress);
+---
+<Console title={g?.GroupName ?? id} crumbs={[{ label: 'Security groups', href: '/ec2/security-groups' }, { label: id }]} error={post.error}>
+  <PageHeader title={g?.GroupName ?? id} description={id}>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="This security group will be deleted." data-confirm-title="Delete security group?" data-confirm-name={id} data-confirm-ok="Delete"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {r.error && <Flash type="error" text="Couldn't load the security group" detail={r.error} dismissible={false} />}
+  {g && <Card class="mb-4" title="Details"><Details items={[{ label: 'Name', value: g.GroupName }, { label: 'ID', value: copyable(id) }, { label: 'VPC', value: g.VpcId }, { label: 'Owner', value: g.OwnerId }, { label: 'Description', value: g.Description, wide: true }]} /></Card>}
+
+  {g && [
+    { title: 'Inbound rules', rows: inbound, revoke: 'revokeIngress', add: 'addIngress', label: 'Source' },
+    { title: 'Outbound rules', rows: outbound, revoke: 'revokeEgress', add: 'addEgress', label: 'Destination' },
+  ].map((sec) => (
+    <Card class="mb-4" title={sec.title} count={sec.rows.length}>
+      {sec.rows.length === 0 ? <p class="text-muted">No rules.</p> : (
+        <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Type</th><th>Protocol</th><th>Port range</th><th>{sec.label}</th><th>Description</th><th class="w-24"></th></tr></thead><tbody>
+          {sec.rows.map((x) => (
+            <tr><td>{badge(x.protocol === '-1' ? 'All traffic' : (PROTOCOLS[x.protocol] ?? x.protocol).toString())}</td><td>{PROTOCOLS[x.protocol] ?? x.protocol}</td><td>{portRange(x)}</td><td class="font-mono text-[13px]">{x.source}</td><td>{x.description ?? '-'}</td>
+              <td><form method="post"><input type="hidden" name="intent" value={sec.revoke} /><input type="hidden" name="rule" value={x.id} /><button class="btn btn-danger btn-sm" data-confirm="This rule will be removed." data-confirm-title="Delete rule?" data-confirm-list="false" data-confirm-ok="Delete rule">Delete</button></form></td></tr>
+          ))}
+        </tbody></table></div>
+      )}
+      <details class="mt-4"><summary class="cursor-pointer font-bold text-link">Add rule</summary>
+        <form method="post" class="mt-3 grid items-end gap-3 sm:grid-cols-2 lg:grid-cols-6"><input type="hidden" name="intent" value={sec.add} />
+          <FormField label="Protocol" for={`p-${sec.add}`} class="!mb-0"><select id={`p-${sec.add}`} name="protocol" class="select"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option><option value="-1">All traffic</option></select></FormField>
+          <FormField label="From port" for={`f-${sec.add}`} class="!mb-0"><input id={`f-${sec.add}`} name="from" type="number" min="-1" max="65535" class="input" placeholder="22" /></FormField>
+          <FormField label="To port" for={`t-${sec.add}`} class="!mb-0"><input id={`t-${sec.add}`} name="to" type="number" min="-1" max="65535" class="input" placeholder="same" /></FormField>
+          <FormField label={`${sec.label} (CIDR or sg-…)`} for={`s-${sec.add}`} class="!mb-0 lg:col-span-2"><input id={`s-${sec.add}`} name="source" class="input font-mono" required placeholder="0.0.0.0/0" /></FormField>
+          <button class="btn btn-primary" type="submit">Add rule</button>
+        </form>
+      </details>
+    </Card>
+  ))}
+</Console>

@@ -1,0 +1,108 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import DataTable from '../../components/DataTable.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import {
+  DescribeLogGroupsCommand, DescribeLogStreamsCommand, FilterLogEventsCommand, PutLogEventsCommand, CreateLogStreamCommand,
+  PutRetentionPolicyCommand, DeleteRetentionPolicyCommand, DeleteLogGroupCommand, DeleteLogStreamCommand,
+} from '@aws-sdk/client-cloudwatch-logs';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load } from '../../lib/errors';
+import { bytes, dateTime, plural, shortDateTime } from '../../lib/format';
+
+const group = Astro.url.searchParams.get('group');
+if (!group) return Astro.redirect('/logs');
+const ctx = getCtx(Astro.cookies);
+const logs = aws.logs(ctx);
+const sp = Astro.url.searchParams;
+const tab = ['events', 'streams', 'settings'].includes(sp.get('tab') ?? '') ? sp.get('tab')! : 'events';
+const here = (t: string) => `${Astro.url.pathname}?group=${encodeURIComponent(group)}&tab=${t}`;
+
+const post = await handlePost(Astro, {
+  put: async (f) => {
+    const stream = str(f, 'stream') || 'console';
+    await logs.send(new CreateLogStreamCommand({ logGroupName: group, logStreamName: stream })).catch((e) => { if (!/ResourceAlreadyExists/.test(String(e?.name))) throw e; });
+    await logs.send(new PutLogEventsCommand({ logGroupName: group, logStreamName: stream, logEvents: [{ timestamp: Date.now(), message: required(f, 'message', 'Message') }] }));
+    return { message: 'Log event written.', redirect: here('events') };
+  },
+  retention: async (f) => {
+    const d = intOf(f, 'days', 'Retention');
+    if (d) await logs.send(new PutRetentionPolicyCommand({ logGroupName: group, retentionInDays: d })); else await logs.send(new DeleteRetentionPolicyCommand({ logGroupName: group }));
+    return 'Retention updated.';
+  },
+  deleteStreams: async (f) => ({ ...(await bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'log stream' }, (s) => logs.send(new DeleteLogStreamCommand({ logGroupName: group, logStreamName: s })))), redirect: here('streams') }),
+  delete: async () => { await logs.send(new DeleteLogGroupCommand({ logGroupName: group })); return { message: `Deleted log group ${group}.`, redirect: '/logs' }; },
+});
+if (post.response) return post.response;
+
+const g = await load(async () => ((await logs.send(new DescribeLogGroupsCommand({ logGroupNamePrefix: group }))).logGroups ?? []).find((x) => x.logGroupName === group));
+if (!g.error && !g.data) return new Response(`Log group "${group}" does not exist`, { status: 404 });
+
+const range = sp.get('range') ?? '1h';
+const ms = { '15m': 15 * 60e3, '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, all: 0 }[range as '1h'] ?? 3600e3;
+const pattern = sp.get('q') ?? '';
+const stream = sp.get('stream') ?? '';
+const events = tab === 'events' ? await load(async () => {
+  const r = await logs.send(new FilterLogEventsCommand({ logGroupName: group, filterPattern: pattern || undefined, logStreamNames: stream ? [stream] : undefined, startTime: ms ? Date.now() - ms : undefined, limit: 500 }));
+  return (r.events ?? []).sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+}) : undefined;
+const streams = tab === 'streams' ? await load(async () => ((await logs.send(new DescribeLogStreamsCommand({ logGroupName: group, orderBy: 'LastEventTime', descending: true }))).logStreams ?? []).map((s) => ({ id: s.logStreamName, name: s.logStreamName, last: s.lastEventTimestamp, first: s.firstEventTimestamp, bytes: s.storedBytes }))) : undefined;
+const tabs = [{ id: 'events', label: 'Log events' }, { id: 'streams', label: 'Log streams' }, { id: 'settings', label: 'Settings' }];
+---
+<Console title={group} crumbs={[{ label: 'Log groups', href: '/logs' }, { label: group }]} error={post.error}>
+  <PageHeader title={group} />
+  {g.error && <Flash type="error" text="Couldn't load the log group" detail={g.error} dismissible={false} />}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    {tab === 'events' && (
+      <div>
+        <form method="get" class="flex flex-wrap items-end gap-3 border-b border-line p-5" data-no-busy>
+          <input type="hidden" name="group" value={group} />
+          <div class="min-w-[260px] flex-1"><label class="field-label" for="q">Filter pattern</label><input id="q" name="q" class="input font-mono" placeholder='ERROR, "timed out", { $.level = "warn" }' value={pattern} /></div>
+          <div><label class="field-label" for="stream">Log stream</label><input id="stream" name="stream" class="input" placeholder="all streams" value={stream} /></div>
+          <div><label class="field-label" for="range">Time range</label><select id="range" name="range" class="select">{[['15m', 'Last 15 minutes'], ['1h', 'Last hour'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['all', 'All time']].map(([k, l]) => <option value={k} selected={range === k}>{l}</option>)}</select></div>
+          <button class="btn btn-primary" type="submit"><Icon name="search" size={14} /> Search</button>
+          <label class="ml-auto flex items-center gap-2 pb-1.5 text-muted" data-autorefresh data-interval="4000"><input type="checkbox" class="checkbox" /> Live refresh</label>
+        </form>
+        {events?.error ? <div class="p-5"><Flash type="error" text="Couldn't read log events" detail={events.error} dismissible={false} /></div> : (events?.data ?? []).length === 0 ? (
+          <div class="empty"><h3>No events</h3><p>No log events match. Write one below, or widen the time range.</p></div>
+        ) : (
+          <div class="tbl-wrap"><table class="tbl"><thead><tr><th class="w-56">Timestamp</th><th>Message</th><th class="w-56">Stream</th></tr></thead><tbody>
+            {events!.data!.map((e) => <tr><td class="nowrap font-mono text-[12.5px] text-muted">{shortDateTime(e.timestamp)}</td><td><pre class="whitespace-pre-wrap break-words font-mono text-[12.5px]">{e.message?.replace(/\n$/, '')}</pre></td><td class="truncate font-mono text-[12.5px] text-muted" title={e.logStreamName}><a href={`?group=${encodeURIComponent(group)}&stream=${encodeURIComponent(e.logStreamName ?? '')}`}>{e.logStreamName}</a></td></tr>)}
+          </tbody></table></div>
+        )}
+        <form method="post" class="flex flex-wrap items-end gap-3 border-t border-line p-5"><input type="hidden" name="intent" value="put" />
+          <div class="min-w-[260px] flex-1"><label class="field-label" for="message">Write a test log event</label><input id="message" name="message" class="input font-mono" required autocomplete="off" /></div>
+          <div><label class="field-label" for="pstream">Stream</label><input id="pstream" name="stream" class="input" value="console" /></div>
+          <button class="btn btn-normal" type="submit">Write event</button></form>
+      </div>
+    )}
+    {tab === 'streams' && (
+      <DataTable title="Log streams" rows={streams?.data ?? []} error={streams?.error} bare select="multi" nameKey="name" id="streams" pageSize={25} emptyTitle="No log streams" emptyText="Streams appear when something writes to this group."
+        columns={[
+          { key: 'name', label: 'Log stream', href: (r) => `?group=${encodeURIComponent(group)}&tab=events&range=all&stream=${encodeURIComponent(r.name)}` },
+          { key: 'last', label: 'Last event time', nowrap: true, render: (r) => (r.last ? dateTime(r.last) : '-'), sort: (r) => r.last ?? 0 },
+          { key: 'first', label: 'First event time', nowrap: true, render: (r) => (r.first ? dateTime(r.first) : '-'), sort: (r) => r.first ?? 0 },
+          { key: 'bytes', label: 'Stored bytes', render: (r) => bytes(r.bytes ?? 0) },
+        ]}>
+        <button slot="actions" class="btn btn-normal" name="intent" value="deleteStreams" data-min="1" data-confirm="The selected log streams will be permanently deleted." data-confirm-title="Delete log streams?" data-confirm-ok="Delete">Delete</button>
+      </DataTable>
+    )}
+    {tab === 'settings' && (
+      <div class="space-y-6 p-5">
+        <form method="post" class="flex max-w-lg items-end gap-2"><input type="hidden" name="intent" value="retention" />
+          <div class="flex-1"><label class="field-label" for="days">Retention (days)</label>
+            <select id="days" name="days" class="select"><option value="">Never expire</option>{[1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653].map((d) => <option value={d} selected={g.data?.retentionInDays === d}>{d}</option>)}</select></div>
+          <button class="btn btn-normal" type="submit">Save</button></form>
+        <div class="border-t border-line pt-5"><h3 class="card-title mb-3 text-danger">Delete log group</h3>
+          <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The log group and all of its data will be permanently deleted." data-confirm-title="Delete log group?" data-confirm-name={group} data-confirm-ok="Delete"><Icon name="trash-2" size={16} /> Delete</button></form></div>
+      </div>
+    )}
+  </div>
+</Console>

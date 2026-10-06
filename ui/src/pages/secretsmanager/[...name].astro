@@ -1,0 +1,131 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Tabs from '../../components/Tabs.astro';
+import Details from '../../components/Details.astro';
+import FormField from '../../components/FormField.astro';
+import JsonView from '../../components/JsonView.astro';
+import Flash from '../../components/Flash.astro';
+import Icon from '../../components/Icon.astro';
+import {
+  DescribeSecretCommand, GetSecretValueCommand, PutSecretValueCommand, DeleteSecretCommand, RestoreSecretCommand,
+  UpdateSecretCommand, GetResourcePolicyCommand, ListSecretVersionIdsCommand,
+} from '@aws-sdk/client-secrets-manager';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str } from '../../lib/action';
+import { load, soft } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge, copyable, tagList } from '../../lib/html';
+
+const name = Astro.params.name!;
+if (!name) return Astro.redirect('/secretsmanager');
+const ctx = getCtx(Astro.cookies);
+const sm = aws.secrets(ctx);
+const tab = ['overview', 'value', 'versions', 'permissions'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'overview';
+const here = (t?: string) => `${Astro.url.pathname}${t ? `?tab=${t}` : ''}`;
+
+const post = await handlePost(Astro, {
+  reveal: async () => {
+    const r = await sm.send(new GetSecretValueCommand({ SecretId: name }));
+    return { stay: true, data: { value: r.SecretString ?? (r.SecretBinary ? Buffer.from(r.SecretBinary).toString('base64') : ''), binary: !r.SecretString && !!r.SecretBinary, version: r.VersionId, stages: r.VersionStages } };
+  },
+  putValue: async (f) => {
+    await sm.send(new PutSecretValueCommand({ SecretId: name, SecretString: required(f, 'value', 'Secret value') }));
+    return { message: 'New secret version stored.', redirect: here('value') };
+  },
+  describe: async (f) => { await sm.send(new UpdateSecretCommand({ SecretId: name, Description: str(f, 'description') })); return 'Description updated.'; },
+  delete: async (f) => {
+    const force = str(f, 'force') === '1';
+    await sm.send(new DeleteSecretCommand({ SecretId: name, ...(force ? { ForceDeleteWithoutRecovery: true } : { RecoveryWindowInDays: Math.min(Math.max(intOf(f, 'days', 'Recovery window') ?? 7, 7), 30) }) }));
+    return { message: force ? `Permanently deleted "${name}".` : `Secret "${name}" scheduled for deletion.`, redirect: force ? '/secretsmanager' : here() };
+  },
+  restore: async () => { await sm.send(new RestoreSecretCommand({ SecretId: name })); return { message: 'Deletion cancelled.', redirect: here() }; },
+});
+if (post.response) return post.response;
+
+const d = await load(() => sm.send(new DescribeSecretCommand({ SecretId: name })));
+if (d.error && /ResourceNotFound|can't find/i.test(d.error)) return new Response(`Secret "${name}" does not exist`, { status: 404 });
+const s = d.data;
+const revealed = post.result?.data as { value: string; binary: boolean; version?: string; stages?: string[] } | undefined;
+const versions = tab === 'versions' ? await load(async () => (await sm.send(new ListSecretVersionIdsCommand({ SecretId: name, IncludeDeprecated: true }))).Versions ?? []) : undefined;
+const policy = tab === 'permissions' ? await soft(() => sm.send(new GetResourcePolicyCommand({ SecretId: name }))) : undefined;
+const tabs = [{ id: 'overview', label: 'Overview' }, { id: 'value', label: 'Secret value' }, { id: 'versions', label: 'Versions' }, { id: 'permissions', label: 'Resource permissions' }];
+const prettyValue = (v: string) => { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v; } };
+---
+<Console title={name} crumbs={[{ label: 'Secrets', href: '/secretsmanager' }, { label: name }]} error={post.error}>
+  <PageHeader title={name} badge={s?.DeletedDate ? 'Scheduled for deletion' : undefined} />
+  {s?.DeletedDate && (
+    <Flash type="warning" class="mb-3" dismissible={false} text="This secret is scheduled for deletion" detail={`It will be permanently deleted on ${dateTime(s.DeletedDate)}.`}>
+      <form method="post" class="mt-2"><input type="hidden" name="intent" value="restore" /><button class="btn btn-normal btn-sm">Cancel deletion</button></form>
+    </Flash>
+  )}
+  {d.error && <Flash type="error" text="Couldn't load the secret" detail={d.error} dismissible={false} />}
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'overview' && s && (
+      <div class="space-y-6 p-5">
+        <Details items={[
+          { label: 'Secret name', value: s.Name }, { label: 'Created', value: dateTime(s.CreatedDate) }, { label: 'Last changed', value: dateTime(s.LastChangedDate) },
+          { label: 'Last accessed', value: s.LastAccessedDate ? dateTime(s.LastAccessedDate) : 'Never' }, { label: 'Rotation', value: s.RotationEnabled ? badge('Enabled', 'green') : badge('Off') }, { label: 'Encryption key', value: s.KmsKeyId ?? 'aws/secretsmanager (default)' },
+          { label: 'Secret ARN', value: copyable(s.ARN ?? ''), wide: true }, { label: 'Tags', value: tagList(s.Tags), wide: true },
+        ]} />
+        <form method="post" class="flex max-w-2xl items-end gap-2 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="describe" />
+          <div class="flex-1"><label class="field-label" for="description">Description</label><input id="description" name="description" class="input" value={s.Description ?? ''} /></div>
+          <button class="btn btn-normal" type="submit">Update</button>
+        </form>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3 text-danger">Delete secret</h3>
+          <form method="post" class="flex flex-wrap items-end gap-3">
+            <input type="hidden" name="intent" value="delete" />
+            <div><label class="field-label" for="days">Recovery window (days)</label><input id="days" name="days" type="number" min="7" max="30" value="7" class="input !w-32" /></div>
+            <label class="flex items-center gap-2 pb-1.5"><input type="checkbox" class="checkbox" name="force" value="1" /> Delete immediately, no recovery</label>
+            <button class="btn btn-danger" data-confirm="The secret will be deleted. With a recovery window you can restore it until the window ends." data-confirm-title="Delete secret?" data-confirm-name={name} data-confirm-ok="Delete secret"><Icon name="trash-2" size={16} /> Delete</button>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {tab === 'value' && (
+      <div class="space-y-6 p-5">
+        <section>
+          <h3 class="card-title mb-1">Retrieve secret value</h3>
+          <p class="card-desc mb-3">Reading a secret is recorded as an access in its history.</p>
+          {revealed ? (
+            <div class="space-y-2">
+              <pre class="code-block max-h-96" id="secret-value">{revealed.binary ? `(binary, base64) ${revealed.value}` : prettyValue(revealed.value)}</pre>
+              <div class="flex items-center gap-3 text-muted"><button type="button" class="btn btn-normal btn-sm" data-copy={revealed.value}><Icon name="copy" size={14} /> Copy</button><span>Version {revealed.version} · {revealed.stages?.join(', ')}</span><a href={here('value')} class="ml-auto">Hide</a></div>
+            </div>
+          ) : (
+            <form method="post"><input type="hidden" name="intent" value="reveal" /><button class="btn btn-normal" type="submit"><Icon name="eye" size={16} /> Retrieve secret value</button></form>
+          )}
+        </section>
+        <form method="post" class="space-y-1 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="putValue" />
+          <h3 class="card-title mb-3">Store a new version</h3>
+          <FormField label="New secret value" for="value"><textarea id="value" name="value" class="textarea code-area" rows="6" required data-code autocomplete="off" spellcheck="false">{post.values.value ?? ''}</textarea></FormField>
+          <button class="btn btn-primary" type="submit">Save new version</button>
+        </form>
+      </div>
+    )}
+
+    {tab === 'versions' && (
+      <div class="p-5">
+        {versions?.error ? <Flash type="error" text="Couldn't list versions" detail={versions.error} dismissible={false} /> : (
+          <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Version ID</th><th>Staging labels</th><th>Created</th><th>Last accessed</th></tr></thead><tbody>
+            {(versions?.data ?? []).map((x: any) => <tr><td class="font-mono text-[13px]">{x.VersionId}</td><td>{(x.VersionStages ?? []).map((l: string) => badge(l, l === 'AWSCURRENT' ? 'green' : 'soft'))}</td><td class="nowrap">{dateTime(x.CreatedDate)}</td><td class="nowrap">{x.LastAccessedDate ? dateTime(x.LastAccessedDate) : '-'}</td></tr>)}
+          </tbody></table></div>
+        )}
+      </div>
+    )}
+
+    {tab === 'permissions' && (
+      <div class="p-5">
+        {(policy?.value as any)?.ResourcePolicy ? <JsonView value={(policy!.value as any).ResourcePolicy} /> : <p class="text-muted">{policy?.error ?? 'No resource policy is attached to this secret.'}</p>}
+      </div>
+    )}
+  </div>
+</Console>

@@ -1,0 +1,257 @@
+# LocalEmu Console
+
+An AWS-console style web UI for [LocalEmu](../README.md): see everything that exists on your local
+server and make changes from the browser, with the look and feel of the real console (top bar with a
+Services menu, service side navigation, breadcrumbs, filterable tables with selection and an
+**Actions** toolbar, confirmation dialogs, a flashbar, light and dark themes).
+
+Built with **Astro 7** (server-rendered) and **Tailwind CSS 4**. No client-side framework: pages are
+rendered on the server and every action is a plain form post, with a small script on top for
+filtering, sorting, paging, menus and dialogs.
+
+| | |
+|---|---|
+| ![Console home](docs/screenshots/home.png) | ![S3 objects](docs/screenshots/s3-objects.png) |
+| ![DynamoDB in dark mode](docs/screenshots/dynamodb-items.png) | ![Services menu](docs/screenshots/services-menu.png) |
+
+## Quick start
+
+### With Docker Compose (next to LocalEmu)
+
+From the repository root:
+
+```bash
+docker compose up --build
+```
+
+Console: <http://localhost:4321> · LocalEmu gateway: <http://localhost:4566>
+
+### From source
+
+You need Node.js 22.12 or newer and a running LocalEmu (`pip install localemu && localemu start`).
+
+```bash
+cd ui
+npm ci
+npm run dev                    # http://localhost:4321
+
+# or a production build
+npm run build && npm start
+```
+
+Shortcuts from the repository root: `make ui-dev`, `make ui-build`, `make ui-start`.
+
+If LocalEmu is not on `http://localhost:4566`, set `LOCALEMU_ENDPOINT` (see below).
+
+## What you can do
+
+| Area | Capabilities |
+|---|---|
+| **Console Home** | Resource counts for the current account and region, LocalEmu health, recently visited services, recent API calls |
+| **S3** | Create / empty / delete buckets; browse objects and folders; upload; download; view and edit text objects; pre-signed URLs; folder and multi-file upload, zip download, server-side paging and prefix search; versioning, bucket policy, CORS; editors for lifecycle rules, event notifications and static website hosting |
+| **DynamoDB** | Create / delete tables; scan and query (with sort-key conditions and index selection); server-side paging; filters; create, edit and delete items as plain JSON or DynamoDB JSON; import (JSON, JSON Lines, CSV) and export (JSON, CSV); table overview and indexes |
+| **SQS** | Standard and FIFO queues with dead-letter queue; send, poll (peek or consume) and delete messages; edit settings; purge; delete |
+| **SNS** | Topics (standard / FIFO); subscriptions (SQS, Lambda, HTTP(S), email…); publish with attributes; delete |
+| **Lambda** | Create from inline code or a zip; browse and edit code in the browser; deploy; test events with logs; configuration and environment; trigger editors (event source mappings, function URL, resource policy); versions; layers |
+| **EC2** | Launch, start, stop, reboot, terminate instances; AMIs; volumes and snapshots; security groups with rule editing; key pairs (private key shown once); Elastic IPs; VPCs, subnets, internet gateways, route tables with a route and association editor |
+| **IAM** | Users (access keys, groups), roles (trust policy presets), groups, customer and AWS managed policies (versions, attached entities), inline policies; cascade delete |
+| **Secrets Manager** | Create, reveal on demand, new versions, recovery window or immediate deletion, restore |
+| **Systems Manager** | Parameter Store with String / StringList / SecureString and history |
+| **KMS** | Create keys with alias, enable / disable, schedule or cancel deletion, key policy, rotation, encrypt and decrypt |
+| **CloudWatch** | Logs: groups, streams, filter-pattern search, live refresh, write test events, retention · Alarms · Metrics (list and publish) |
+| **EventBridge** | Buses, rules (pattern or schedule), targets, send custom events |
+| **Step Functions** | State machines, edit definition, start executions, execution history |
+| **CloudFormation** | Create / update / delete stacks (template from file, URL or paste, with validation), change sets, outputs, resources, events, template |
+| **Kinesis · Route 53** | Streams with put/read records · hosted zones and record sets |
+| **CloudTrail** | Event history of every API call LocalEmu served, with request details |
+| **API Gateway** | REST, HTTP and WebSocket APIs: resources, methods and integrations, routes, deployments and stages, API keys and usage plans |
+| **RDS** | DB instances and clusters (create, start/stop/reboot, modify, delete), snapshots with restore, subnet groups, parameter groups |
+| **ECS · ECR** | Clusters, services, tasks and task definitions · repositories, images, repository and lifecycle policies |
+| **Cognito · ACM** | User pools with users, groups and app clients · request / import / inspect certificates |
+| **ELB · Athena · Glue** | Load balancers, listeners, rules and target groups · SQL query editor, history, workgroups · data catalog databases and tables, crawlers, jobs |
+| **Everything else** | All 130+ services get a tile in the Services menu; those without a purpose-built console open a generic read-only resource browser with their emulation tier (live / metadata / stub) and a getting-started command |
+
+Handy details: **Alt+S** searches services and resources, **Alt+C** opens CloudShell, **?** shows all shortcuts, **/** focuses the table filter, the top bar switches
+**region** and **account** (LocalEmu keeps separate state per account and region, so any 12-digit
+number is a fresh account), and the moon icon toggles dark mode.
+
+## Console features
+
+* **Auto-refresh.** Every list page gets an *Auto-refresh* selector (Off / 5s / 15s / 30s, remembered per page in
+  `localStorage`). The page is re-fetched in the background and only the table rows, the count and `[data-live]`
+  regions are swapped, so selection, filter text, sort, page and scroll survive. It pauses while the tab is hidden or a
+  dialog is open. Opt a table out with `<DataTable live={false}>` (or `data-no-live` on the `<form data-table>`);
+  mark other stat values with `data-live="key"`. Implemented generically in `src/scripts/live.ts`.
+* **CloudShell** (terminal icon in the top bar, **Alt+C**). A bottom-docked, resizable, collapsible panel whose open
+  state and height persist. Type `aws s3 ls`, `aws sqs list-queues`, `aws sqs send-message --queue-url X --message-body hi`,
+  `aws dynamodb list-tables --region us-east-1`, `aws <service> help`, `aws <service> <op> help`; Tab completes services,
+  operations and flags, Up/Down recalls history, `clear` clears. `POST /api/shell` maps `aws <service> <operation>` onto
+  the `<Operation>Command` of the matching `@aws-sdk/client-*` package (registry in `src/lib/shell.ts`), converts
+  `--kebab-flags` to input members (JSON, `Key=Value` shorthand, repeated list values, `--cli-input-json`), and prints
+  JSON (`--output text`, a JMESPath subset in `--query`). `aws s3 ls/mb/rb/rm/cp/mv` are built in (`cp` between buckets,
+  `cp s3://b/k -` prints an object, `cp - s3://b/k --body "text"` uploads inline text).
+  *Security:* SDK calls only, always to the configured LocalEmu endpoint (a different `--endpoint-url` is rejected), with the
+  account and region chosen in the top bar; no shell, no process spawning, no filesystem (`file://` values are refused);
+  the endpoint requires a same-origin JSON request with the `X-LEMU-Console` header. Limits: first page of results (no
+  auto-pagination), no streaming bodies from/to disk. Add new SDK packages to the registry in `src/lib/shell.ts`
+  (`tests/e2e/shell.mjs` fails when a `client-*` dependency is missing).
+* **Global search** (**Alt+S**). Typing 2+ characters searches services and resources across ~30 resource types (S3, DynamoDB,
+  SQS, SNS, Lambda, Secrets, SSM, KMS aliases, IAM, EC2/VPC/SG, log groups, EventBridge, Step Functions, Kinesis,
+  CloudFormation, Route 53, RDS, ECS, ECR, Cognito, ACM, ELB, Glue) via `GET /api/search?q=`, grouped in the dropdown, with
+  a full `/search?q=` page. Listings are fetched in parallel with timeouts and cached for a few seconds per account and
+  region; a slow or failing service is reported without blocking the rest.
+* **Show CLI.** Put `data-cli="aws sqs create-queue --queue-name {name}"` on a `<form>` (or a button inside one) and a
+  *Show CLI* popover with *Copy as CLI* appears next to the submit button, filled live from the form fields. `{field}` is
+  the value (or `<field>` while empty); `{field|--flag}` adds `--flag value` only when non-empty (a flag ending in `=` is
+  glued to the value). `--endpoint-url` (from `<meta name="lemu-endpoint">`) and `--region` are appended. The main create
+  forms (S3, DynamoDB, SQS, SNS, Secrets Manager, SSM, KMS, IAM users and roles, EventBridge bus and rule, Kinesis,
+  CloudFormation, Lambda) are annotated.
+* **Keyboard and accessibility.** `?` lists the shortcuts: **Alt+S** search, **/** table filter, **Alt+C** CloudShell,
+  `g` then `h` / `s` / `a` / `3` / `q` / `d` / `l` / `e` / `i` to jump around, **Esc** closes menus and dialogs. Dialogs are
+  modal with labels and return focus to the opener; menus have `aria-expanded`/`aria-controls`, `menu`/`menuitem` roles,
+  arrow-key navigation and return focus on Esc; tables have captions, keyboard-sortable headers with `aria-sort` and an
+  announced filter-result count; there is a skip link, landmarks and visible focus rings. `node scripts/contrast.mjs`
+  checks the design tokens of both themes against WCAG AA, and `tests/e2e/a11y.mjs` runs axe-core (devDependency) on
+  representative pages in light and dark.
+
+## Configuration
+
+Environment variables of the console server:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LOCALEMU_ENDPOINT` | `http://localhost:4566` | Where the console *server* reaches LocalEmu |
+| `LOCALEMU_PUBLIC_ENDPOINT` | same as above | How your *browser* reaches LocalEmu (used for pre-signed URLs and links) |
+| `LOCALEMU_DEFAULT_REGION` | `us-east-1` | Region until you pick one in the top bar |
+| `LOCALEMU_DEFAULT_ACCOUNT` | `000000000000` | Account until you pick one in the top bar |
+| `HOST` / `PORT` | `localhost` / `4321` | Bind address of the production server (`npm start`) |
+
+See [`.env.example`](.env.example).
+
+### Dashboard API access
+
+Home, Event history and the generic service pages read LocalEmu's own dashboard API
+(`/_localemu/api/*`), which LocalEmu only serves to loopback callers. When the console runs in a
+container (or on another host) start LocalEmu with `DASHBOARD_API_OPEN=1`; the provided
+`docker-compose.yml` does this. Without it everything else still works, and those widgets explain
+what is missing.
+
+## How it works
+
+```
+Browser ──HTML / form posts──▶ Astro server ──AWS SDK v3 (SigV4)──▶ LocalEmu gateway :4566
+```
+
+* The console server talks to LocalEmu with the regular AWS SDK for JavaScript, so it exercises the
+  same protocols as your own code. The selected account id is used as the access key id, which is
+  how LocalEmu separates accounts.
+* No CORS, no credentials in the browser, no API layer to keep in sync: pages call the SDK in their
+  frontmatter and render the result.
+* Mutations follow Post/Redirect/Get (`src/lib/action.ts`): a page declares handlers per `intent`,
+  success becomes a flash message after a redirect, failure re-renders the page with the error and
+  what you typed.
+* `DataTable.astro` renders rows on the server; `src/scripts/console.ts` adds filtering, sorting,
+  paging, row selection and action enabling on top. Buttons with `data-confirm` open the confirm
+  dialog (optionally asking you to type a word first).
+
+```
+src/
+  layouts/Console.astro        top bar, side nav, flashbar, confirm dialog
+  components/                  DataTable, Card, Tabs, Details, FormField, PermissionsPanel …
+  lib/                         aws.ts (SDK clients), action.ts (forms), services.ts (catalog), helpers per service
+  pages/<service>/…            one folder per service console
+  scripts/console.ts           progressive enhancement
+  styles/global.css            design tokens (light/dark) and component classes
+tests/e2e/                     Playwright flows that drive the real UI against a real LocalEmu
+```
+
+### Adding a service console
+
+1. Add an entry to `CONSOLES` in `src/lib/services.ts` (name, icon, category, `href`, `nav`).
+2. Create `src/pages/<service>/index.astro` with a `handlePost` block and a `DataTable`
+   (copy `src/pages/sqs/index.astro` as a template), plus `create.astro` and a detail page.
+3. Add an SDK client factory to `src/lib/aws.ts` and `npm i @aws-sdk/client-<service>`.
+
+## Security notes
+
+* **There is no login.** The console can do anything LocalEmu can, so keep it on loopback (the
+  default for `npm run dev`, `npm start` and the compose file). Only change `HOST` deliberately.
+* Cross-origin form posts are rejected (Astro `checkOrigin`), so other web pages can't drive the
+  console through your browser.
+* S3 downloads are served from a CSP sandbox and anything that isn't a plain image or text file is
+  forced to download, so an uploaded HTML file can't run script on the console's origin.
+* Secret values and decrypted parameters are only fetched when you ask for them.
+
+## Known limitations
+
+* Lambda updates, deletion and invocation need LocalEmu to reach a Docker daemon; without it
+  functions end up in the `Failed` state and the console shows the reason.
+* EC2 instances are API metadata unless LocalEmu has Docker (then each is a real container).
+* S3, DynamoDB, Lambda, SQS and SNS lists page on the server; other lists show the first page (up to a few hundred items) with client-side filtering and paging.
+* Athena queries need LocalEmu's SQL engine to be able to fetch its extensions; offline they end in `Failed` and the console shows the reason.
+* Glue crawler and job edit forms need `UpdateCrawler` / `UpdateJob`, which LocalEmu doesn't implement yet; the console says so instead of failing.
+* Not covered: Cognito SMS MFA, ELB rule condition types beyond path and host, weighted multi-target-group forwarding, replication filters beyond a prefix.
+
+## Prebuilt image
+
+Tagged releases publish a multi-arch (amd64/arm64) image to GitHub Container Registry:
+
+```bash
+docker run --rm -p 127.0.0.1:4321:4321 \
+  -e LOCALEMU_ENDPOINT=http://host.docker.internal:4566 \
+  ghcr.io/tusuii/localemu-console:latest
+```
+
+In the root `docker-compose.yml`, uncomment the `image:` line of the `console` service to use it
+instead of building `ui/` locally.
+
+## Development
+
+```bash
+npm run dev            # dev server with hot reload
+npm run check          # type-check .astro and .ts files
+npm run build          # production build into dist/ (self-contained, no node_modules needed)
+npm test               # unit tests (Vitest); also: npm run test:unit, npm run test:coverage
+npm run test:e2e       # browser flows against a real LocalEmu, see below
+npm run test:visual    # screenshot comparison, see below
+```
+
+### Unit tests
+
+`tests/unit` covers the pure helpers in `src/lib` (formatting, HTML escaping and JSON highlighting,
+service catalog, paging tokens, form helpers and open-redirect protection, request context parsing,
+S3/SQS/DynamoDB/EC2/IAM/Lambda helpers). Vitest handles the `?raw` icon imports natively, so nothing
+is mocked except a tiny cookie jar. They need no server: `npm run test:coverage` prints coverage.
+
+### Visual regression tests
+
+`tests/visual/run.mjs` screenshots a fixed set of pages (home, services menu, S3, DynamoDB, SQS, IAM,
+EC2, settings; light, dark and a mobile viewport) and compares them with the PNGs committed in
+`tests/visual/baseline/` using pixelmatch. It needs a running console and LocalEmu, seeds its own
+resources under account `111111111111`, normalises timestamps, ids and IPs, and hides the activity feed
+and uptime so runs are repeatable.
+
+```bash
+CHROMIUM_PATH=/path/to/chrome npm run test:visual          # compare; diffs go to tests/visual/diff/
+npm run test:visual -- s3                                  # only shots whose name contains "s3"
+npm run test:visual -- --update                            # regenerate baselines
+```
+
+**When you change the UI on purpose, regenerate the baselines** (`npm run test:visual -- --update`)
+and commit the new PNGs. Baselines are rendered with the Chromium build in CI/Playwright; fonts differ
+slightly between platforms, so tune `THRESHOLD` / `MAX_DIFF_PIXELS` if you compare on another OS.
+
+### End-to-end tests
+
+`tests/e2e` drives the real UI in Chromium against a real LocalEmu: every flow creates, changes and
+deletes resources and asserts on what the page shows.
+
+```bash
+localemu start &                       # a throwaway instance
+npm run dev &
+npx playwright-core install chromium   # or: export CHROMIUM_PATH=/path/to/chrome
+npm run test:e2e                       # all files; or: node tests/e2e/run.mjs dynamodb
+```
+
+Set `BASE=http://localhost:4400` to test a production server, and `E2E_LAMBDA=1` to include the
+Lambda flow (needs Docker for LocalEmu).

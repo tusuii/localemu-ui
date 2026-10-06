@@ -1,0 +1,58 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { ListSecretsCommand, DeleteSecretCommand, RestoreSecretCommand } from '@aws-sdk/client-secrets-manager';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs, intOf, str } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, plural } from '../../lib/format';
+import { badge } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const sm = aws.secrets(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) => {
+    const force = str(f, 'force') === '1';
+    const days = Math.min(Math.max(intOf(f, 'days', 'Recovery window') ?? 7, 7), 30);
+    return bulk(strs(f, 'id'), { verb: force ? 'Permanently deleted' : 'Scheduled for deletion:', noun: 'secret', tail: force ? '' : `Recovery window is ${days} days.` },
+      (id) => sm.send(new DeleteSecretCommand({ SecretId: id, ...(force ? { ForceDeleteWithoutRecovery: true } : { RecoveryWindowInDays: days }) })));
+  },
+  restore: async (f) => {
+    return bulk(strs(f, 'id'), { verb: 'Restored', noun: 'secret' }, (id) => sm.send(new RestoreSecretCommand({ SecretId: id })));
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const out: any[] = []; let token: string | undefined;
+  do { const r = await sm.send(new ListSecretsCommand({ NextToken: token, IncludePlannedDeletion: true })); out.push(...(r.SecretList ?? [])); token = r.NextToken; } while (token && out.length < 1000);
+  return out.map((s) => ({ id: s.Name, name: s.Name, description: s.Description, changed: s.LastChangedDate, accessed: s.LastAccessedDate, rotation: !!s.RotationEnabled, deleted: s.DeletedDate }));
+});
+const rows = (res.data ?? []).sort((a: any, b: any) => a.name.localeCompare(b.name));
+---
+<Console title="Secrets" crumbs={[{ label: 'Secrets' }]} error={post.error}>
+  <PageHeader title="Secrets" description="Store, rotate and retrieve database credentials, API keys and other secrets." />
+  <DataTable
+    title="Secrets" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Filter secrets by name, description…" emptyTitle="No secrets" emptyText="You haven't stored any secrets in this region."
+    columns={[
+      { key: 'name', label: 'Secret name', href: (r) => `/secretsmanager/${r.name.split('/').map(encodeURIComponent).join('/')}`, render: (r) => r.deleted ? `${r.name}` : r.name },
+      { key: 'description', label: 'Description' },
+      { key: 'changed', label: 'Last changed', nowrap: true, render: (r) => dateTime(r.changed), sort: (r) => new Date(r.changed ?? 0).getTime() },
+      { key: 'rotation', label: 'Rotation', render: (r) => (r.rotation ? badge('Enabled', 'green') : badge('Off')) },
+      { key: 'deleted', label: 'Status', render: (r) => (r.deleted ? badge('Scheduled for deletion', 'red') : badge('Active', 'green')), sort: (r) => (r.deleted ? 1 : 0) },
+    ]}
+  >
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="restore" data-min="1">Cancel deletion</button>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected secrets will be scheduled for deletion after a 7 day recovery window." data-confirm-title="Delete secrets?" data-confirm-ok="Schedule deletion">Delete</button>
+      <a class="btn btn-primary" href="/secretsmanager/create"><Icon name="plus" size={16} /> Store a new secret</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/secretsmanager/create">Store a new secret</a>
+  </DataTable>
+</Console>

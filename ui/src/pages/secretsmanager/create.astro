@@ -1,0 +1,39 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateSecretCommand } from '@aws-sdk/client-secrets-manager';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Secret name');
+    if (!/^[A-Za-z0-9/_+=.@-]{1,512}$/.test(name)) throw new UserError('Secret names may contain letters, numbers and /_+=.@-');
+    const value = String(f.get('value') ?? '');
+    if (!value) throw new UserError('Enter a secret value.');
+    const tags = str(f, 'tags').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => { const i = l.indexOf('='); return { Key: i < 0 ? l : l.slice(0, i), Value: i < 0 ? '' : l.slice(i + 1) }; });
+    await aws.secrets(ctx).send(new CreateSecretCommand({ Name: name, SecretString: value, Description: str(f, 'description') || undefined, Tags: tags.length ? tags : undefined }));
+    return { message: `Secret "${name}" stored.`, redirect: `/secretsmanager/${name.split('/').map(encodeURIComponent).join('/')}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Store a new secret" crumbs={[{ label: 'Secrets', href: '/secretsmanager' }, { label: 'Store a new secret' }]} error={post.error}>
+  <PageHeader title="Store a new secret" />
+  <form data-cli="aws secretsmanager create-secret --name {name} --secret-string {value} {description|--description}" method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Secret">
+      <FormField label="Secret name" for="name" hint="Use / to organise, e.g. prod/db/password."><input id="name" name="name" class="input font-mono" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Secret value" for="value" description={'Plaintext, or JSON such as {"username":"admin","password":"…"}.'}><textarea id="value" name="value" class="textarea code-area" rows="8" required data-code spellcheck="false" autocomplete="off">{v.value ?? ''}</textarea></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+      <FormField label="Tags" for="tags" optional hint="One key=value per line."><textarea id="tags" name="tags" class="textarea code-area" rows="3" data-code>{v.tags ?? ''}</textarea></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/secretsmanager">Cancel</a><button class="btn btn-primary" type="submit">Store secret</button></div>
+  </form>
+</Console>

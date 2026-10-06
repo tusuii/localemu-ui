@@ -1,0 +1,43 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import Details from '../../components/Details.astro';
+import JsonView from '../../components/JsonView.astro';
+import Flash from '../../components/Flash.astro';
+import { getCloudTrailEvent } from '../../lib/localemu';
+import { load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge, copyable, status } from '../../lib/html';
+
+const { id = '' } = Astro.params;
+const res = await load(() => getCloudTrailEvent(id));
+const ev = (res.data ?? {}) as Record<string, any>;
+const e = (ev.event ?? ev) as Record<string, any>;
+const failed = (e.responseCode ?? 200) >= 400 || e.errorCode;
+---
+<Console title={e.eventName ?? 'Event'} crumbs={[{ label: 'Event history', href: '/activity' }, { label: e.eventName ?? id }]}>
+  <PageHeader title={e.eventName ?? 'Event'} description={id} />
+  {res.error ? <Flash type="error" text="Could not load the event" detail={res.error} dismissible={false} /> : (
+    <div class="space-y-4">
+      <Card title="Event record">
+        <Details items={[
+          { label: 'Event time', value: dateTime(e.eventTime) },
+          { label: 'Event source', value: e.eventSource },
+          { label: 'Event name', value: e.eventName },
+          { label: 'Status', value: failed ? status('error', `${e.responseCode ?? ''} ${e.errorCode ?? ''}`) : status('success', e.responseCode ?? 200) },
+          { label: 'AWS region', value: e.awsRegion },
+          { label: 'Account', value: e.accountId },
+          { label: 'Source IP', value: e.sourceIPAddress },
+          { label: 'Read-only', value: badge(String(!!e.readOnly), e.readOnly ? 'soft' : 'orange') },
+          { label: 'Request ID', value: copyable(e.requestId ?? id) },
+          { label: 'User agent', value: e.userAgent, wide: true },
+        ]} />
+      </Card>
+      {e.requestParameters && <Card title="Request parameters"><JsonView value={e.requestParameters} /></Card>}
+      {e.responseElements && <Card title="Response elements"><JsonView value={e.responseElements} /></Card>}
+      {e.errorMessage && <Card title="Error"><pre class="code-block">{e.errorMessage}</pre></Card>}
+      <Card title="Raw event"><JsonView value={ev} maxHeight="520px" /></Card>
+    </div>
+  )}
+</Console>

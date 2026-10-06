@@ -1,0 +1,213 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import DataTable from '../../../components/DataTable.astro';
+import FormField from '../../../components/FormField.astro';
+import TagsPanel from '../../../components/TagsPanel.astro';
+import {
+  DescribeClustersCommand, ListServicesCommand, DescribeServicesCommand, CreateServiceCommand, UpdateServiceCommand, DeleteServiceCommand,
+  ListTasksCommand, DescribeTasksCommand, RunTaskCommand, StopTaskCommand, ListContainerInstancesCommand, ListTagsForResourceCommand, TagResourceCommand, UntagResourceCommand, DescribeContainerInstancesCommand, DeleteClusterCommand,
+} from '@aws-sdk/client-ecs';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load } from '../../../lib/errors';
+import { dateTime, num } from '../../../lib/format';
+import { badge, mono, stateStatus } from '../../../lib/html';
+import { guard } from '../../../lib/unsupported';
+import { awsvpc, ecsTagRows, lastSeg, listTaskDefinitions, networkChoices, tdShort } from '../../../lib/ecs';
+
+const name = Astro.params.cluster!;
+const ctx = getCtx(Astro.cookies);
+const ecs = aws.ecs(ctx);
+const tabId = Astro.url.searchParams.get('tab') ?? '';
+const tab = ['services', 'tasks', 'infrastructure', 'tags'].includes(tabId) ? tabId : 'services';
+const to = (t: string) => `${Astro.url.pathname}?tab=${t}`;
+
+const cl = await load(async () => (await ecs.send(new DescribeClustersCommand({ clusters: [name], include: ['STATISTICS'] }))).clusters?.[0]);
+const cluster = cl.data;
+if (!cl.error && (!cluster || cluster.status === 'INACTIVE')) return new Response(`Cluster "${name}" does not exist`, { status: 404 });
+
+const clusterArn = cluster?.clusterArn ?? `arn:aws:ecs:${ctx.region}:${ctx.account}:cluster/${name}`;
+
+async function network(f: FormData, launch: string) {
+  if (launch !== 'FARGATE') return undefined;
+  return awsvpc(strs(f, 'subnet'), strs(f, 'sg'), await networkChoices(ctx));
+}
+
+const post = await handlePost(Astro, {
+  deleteCluster: async () => { await ecs.send(new DeleteClusterCommand({ cluster: name })); return { message: `Deleted cluster "${name}".`, redirect: '/ecs' }; },
+  createService: async (f) => {
+    const svc = required(f, 'serviceName', 'Service name');
+    if (!/^[A-Za-z0-9_-]{1,255}$/.test(svc)) throw new UserError('Service names use letters, numbers, hyphens and underscores.');
+    const launch = str(f, 'launchType') || 'EC2';
+    await ecs.send(new CreateServiceCommand({
+      cluster: name, serviceName: svc, taskDefinition: required(f, 'taskDefinition', 'Task definition'),
+      desiredCount: intOf(f, 'desired', 'Desired count') ?? 1, launchType: launch as 'EC2', networkConfiguration: await network(f, launch),
+    }));
+    return { message: `Service ${svc} created.`, redirect: to('services') };
+  },
+  updateService: async (f) => {
+    const svc = required(f, 'service', 'Service');
+    await ecs.send(new UpdateServiceCommand({ cluster: name, service: svc, desiredCount: intOf(f, 'desired', 'Desired count'), taskDefinition: str(f, 'taskDefinition') || undefined }));
+    return { message: `Service ${svc} updated.`, redirect: to('services') };
+  },
+  addTag: async (f) => {
+    await guard('TagResource', () => ecs.send(new TagResourceCommand({ resourceArn: clusterArn, tags: [{ key: required(f, 'key', 'Tag key'), value: str(f, 'value') }] })));
+    return { message: 'Tag added.', redirect: to('tags') };
+  },
+  removeTag: async (f) => {
+    const r = await bulk(strs(f, 'id'), { verb: 'Removed', noun: 'tag' }, (k) => guard('UntagResource', () => ecs.send(new UntagResourceCommand({ resourceArn: clusterArn, tagKeys: [k] }))));
+    return { ...r, redirect: to('tags') };
+  },
+  deleteService: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'service' }, (s) => ecs.send(new DeleteServiceCommand({ cluster: name, service: s, force: true }))),
+  runTask: async (f) => {
+    const launch = str(f, 'launchType') || 'EC2';
+    const r = await ecs.send(new RunTaskCommand({
+      cluster: name, taskDefinition: required(f, 'taskDefinition', 'Task definition'), count: intOf(f, 'count', 'Count') ?? 1,
+      launchType: launch as 'EC2', networkConfiguration: await network(f, launch),
+    }));
+    if (!r.tasks?.length && r.failures?.length) throw new UserError(`Could not run the task: ${r.failures.map((x) => x.reason ?? x.detail).join('; ')}`);
+    return { message: `Started ${r.tasks?.length ?? 0} task(s).`, redirect: to('tasks') };
+  },
+  stopTask: (f) => bulk(strs(f, 'id'), { verb: 'Stopped', noun: 'task' }, (t) => ecs.send(new StopTaskCommand({ cluster: name, task: t, reason: 'Stopped from the LocalEmu console' }))),
+});
+if (post.response) return post.response;
+
+const services = tab === 'services' ? await load(async () => {
+  const arns = (await ecs.send(new ListServicesCommand({ cluster: name, maxResults: 100 }))).serviceArns ?? [];
+  if (!arns.length) return [];
+  const d = await ecs.send(new DescribeServicesCommand({ cluster: name, services: arns.slice(0, 10) }));
+  const rest = arns.length > 10 ? (await ecs.send(new DescribeServicesCommand({ cluster: name, services: arns.slice(10, 20) }))).services ?? [] : [];
+  return [...(d.services ?? []), ...rest].filter((s) => s.status !== 'INACTIVE').map((s) => ({
+    id: s.serviceName!, status: s.status, desired: s.desiredCount ?? 0, running: s.runningCount ?? 0, pending: s.pendingCount ?? 0,
+    td: tdShort(s.taskDefinition), launch: s.launchType ?? '-', created: s.createdAt,
+  })).sort((a, b) => a.id.localeCompare(b.id));
+}) : null;
+
+const tasks = tab === 'tasks' ? await load(async () => {
+  const arns = new Set<string>();
+  for (const st of ['RUNNING', 'STOPPED'] as const) for (const a of (await ecs.send(new ListTasksCommand({ cluster: name, desiredStatus: st, maxResults: 100 }))).taskArns ?? []) arns.add(a);
+  const list = [...arns];
+  if (!list.length) return [];
+  const d = await ecs.send(new DescribeTasksCommand({ cluster: name, tasks: list.slice(0, 100) }));
+  return (d.tasks ?? []).map((t) => ({
+    id: lastSeg(t.taskArn), status: t.lastStatus, desired: t.desiredStatus, td: tdShort(t.taskDefinitionArn), launch: t.launchType ?? '-', started: t.startedAt ?? t.createdAt, reason: t.stoppedReason,
+  }));
+}) : null;
+
+const infra = tab === 'infrastructure' ? await load(async () => {
+  const arns = (await ecs.send(new ListContainerInstancesCommand({ cluster: name }))).containerInstanceArns ?? [];
+  if (!arns.length) return [];
+  const d = await ecs.send(new DescribeContainerInstancesCommand({ cluster: name, containerInstances: arns.slice(0, 100) }));
+  return (d.containerInstances ?? []).map((c) => ({ id: lastSeg(c.containerInstanceArn), ec2: c.ec2InstanceId, status: c.status, running: c.runningTasksCount ?? 0, agent: c.agentConnected ? 'Connected' : 'Disconnected' }));
+}) : null;
+
+const tags = tab === 'tags' ? await load(async () => ecsTagRows((await guard('ListTagsForResource', () => ecs.send(new ListTagsForResourceCommand({ resourceArn: clusterArn })))).tags)) : null;
+
+const tdArns = tab === 'services' || tab === 'tasks' ? await load(async () => (await listTaskDefinitions(ctx)).map(tdShort).sort()) : null;
+const tds = tdArns?.data ?? [];
+const net = tab === 'services' || tab === 'tasks' ? await networkChoices(ctx) : { subnets: [], groups: [] };
+const v = post.values;
+const tabs = [{ id: 'services', label: 'Services' }, { id: 'tasks', label: 'Tasks' }, { id: 'infrastructure', label: 'Infrastructure' }, { id: 'tags', label: 'Tags' }];
+---
+<Console title={name} crumbs={[{ label: 'Clusters', href: '/ecs' }, { label: name }]} error={post.error ?? cl.error}>
+  <PageHeader title={name} badge={cluster?.status}>
+    <form method="post"><button class="btn btn-danger" name="intent" value="deleteCluster" data-confirm="The cluster will be deleted. It must have no services or running tasks." data-confirm-title="Delete cluster?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete cluster">Delete cluster</button></form>
+  </PageHeader>
+  <div class="mb-4 grid gap-3 sm:grid-cols-4">
+    <div class="card p-4"><div class="kv-label">Services</div><div class="text-[28px] font-bold leading-9">{num(cluster?.activeServicesCount ?? 0)}</div></div>
+    <div class="card p-4"><div class="kv-label">Running tasks</div><div class="text-[28px] font-bold leading-9">{num(cluster?.runningTasksCount ?? 0)}</div></div>
+    <div class="card p-4"><div class="kv-label">Pending tasks</div><div class="text-[28px] font-bold leading-9">{num(cluster?.pendingTasksCount ?? 0)}</div></div>
+    <div class="card p-4"><div class="kv-label">Container instances</div><div class="text-[28px] font-bold leading-9">{num(cluster?.registeredContainerInstancesCount ?? 0)}</div></div>
+  </div>
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'services' && (
+      <div class="space-y-6 p-5">
+        <DataTable title="Services" bare id="services" select="multi" nameKey="id" rows={services?.data ?? []} error={services?.error} pageSize={15} filter="Search services"
+          emptyTitle="No services" emptyText="Create a service to keep a desired number of tasks running."
+          columns={[
+            { key: 'id', label: 'Service name', href: (r) => `/ecs/${encodeURIComponent(name)}/services/${encodeURIComponent(r.id)}` }, { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
+            { key: 'td', label: 'Task definition', mono: true }, { key: 'launch', label: 'Launch type' },
+            { key: 'desired', label: 'Desired' }, { key: 'running', label: 'Running' }, { key: 'pending', label: 'Pending' },
+            { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created) },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteService" data-min="1" data-confirm="The selected services will be deleted and their tasks stopped." data-confirm-title="Delete services?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        <div class="grid gap-6 border-t border-line pt-5 xl:grid-cols-2">
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="createService" />
+            <h3 class="card-title mb-3">Create service</h3>
+            <FormField label="Service name" for="serviceName"><input id="serviceName" name="serviceName" class="input" required autocomplete="off" value={v.serviceName ?? ''} /></FormField>
+            <FormField label="Task definition" for="taskDefinition"><select id="taskDefinition" name="taskDefinition" class="select">{tds.map((t) => <option value={t} selected={v.taskDefinition === t}>{t}</option>)}</select></FormField>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <FormField label="Desired tasks" for="desired"><input id="desired" name="desired" type="number" min="0" class="input" value={v.desired ?? '1'} /></FormField>
+              <FormField label="Launch type" for="launchType"><select id="launchType" name="launchType" class="select"><option value="EC2" selected={v.launchType !== 'FARGATE'}>EC2</option><option value="FARGATE" selected={v.launchType === 'FARGATE'}>Fargate</option></select></FormField>
+            </div>
+            <div data-show-when="launchType:FARGATE" hidden>
+              <FormField label="Subnet" for="subnet" hint="Defaults to the first subnet."><select id="subnet" name="subnet" class="select"><option value="">Default</option>{net.subnets.map((s) => <option value={s.id}>{s.label}</option>)}</select></FormField>
+              <FormField label="Security group" for="sg" hint="Defaults to the default security group."><select id="sg" name="sg" class="select"><option value="">Default</option>{net.groups.map((s) => <option value={s.id}>{s.label}</option>)}</select></FormField>
+            </div>
+            <button class="btn btn-primary" type="submit" disabled={!tds.length}>Create service</button>
+            {!tds.length && <p class="field-hint">Register a task definition first.</p>}
+          </form>
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="updateService" />
+            <h3 class="card-title mb-3">Update service</h3>
+            <FormField label="Service" for="service"><select id="service" name="service" class="select">{(services?.data ?? []).map((s) => <option value={s.id}>{s.id}</option>)}</select></FormField>
+            <FormField label="Desired tasks" for="u-desired"><input id="u-desired" name="desired" type="number" min="0" class="input !w-40" value="1" /></FormField>
+            <FormField label="Task definition" for="u-td" optional><select id="u-td" name="taskDefinition" class="select"><option value="">Keep current</option>{tds.map((t) => <option value={t}>{t}</option>)}</select></FormField>
+            <button class="btn btn-primary" type="submit" disabled={!(services?.data ?? []).length}>Update service</button>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {tab === 'tasks' && (
+      <div class="space-y-6 p-5">
+        <DataTable title="Tasks" bare id="tasks" select="multi" nameKey="id" rows={tasks?.data ?? []} error={tasks?.error} pageSize={15} filter="Search tasks"
+          emptyTitle="No tasks" emptyText="Run a task from a task definition."
+          columns={[
+            { key: 'id', label: 'Task ID', mono: true }, { key: 'status', label: 'Last status', render: (r) => stateStatus(r.status, { stopping: 'stopped', deprovisioning: 'stopped' }) },
+            { key: 'desired', label: 'Desired status', render: (r) => badge(r.desired) }, { key: 'td', label: 'Task definition', mono: true }, { key: 'launch', label: 'Launch type' },
+            { key: 'started', label: 'Started', nowrap: true, render: (r) => dateTime(r.started) }, { key: 'reason', label: 'Stopped reason' },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="stopTask" data-min="1" data-confirm="The selected tasks will be stopped." data-confirm-title="Stop tasks?" data-confirm-ok="Stop">Stop</button>
+        </DataTable>
+        <form method="post" class="max-w-2xl space-y-1 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="runTask" />
+          <h3 class="card-title mb-3">Run task</h3>
+          <div class="grid gap-4 sm:grid-cols-3">
+            <FormField label="Task definition" for="r-td"><select id="r-td" name="taskDefinition" class="select">{tds.map((t) => <option value={t}>{t}</option>)}</select></FormField>
+            <FormField label="Launch type" for="r-launch"><select id="r-launch" name="launchType" class="select"><option value="EC2">EC2</option><option value="FARGATE" selected={v.launchType === 'FARGATE'}>Fargate</option></select></FormField>
+            <FormField label="Number of tasks" for="r-count"><input id="r-count" name="count" type="number" min="1" max="10" class="input" value="1" /></FormField>
+          </div>
+          <div data-show-when="launchType:FARGATE" hidden class="grid gap-4 sm:grid-cols-2">
+            <FormField label="Subnet" for="r-subnet"><select id="r-subnet" name="subnet" class="select"><option value="">Default</option>{net.subnets.map((s) => <option value={s.id}>{s.label}</option>)}</select></FormField>
+            <FormField label="Security group" for="r-sg"><select id="r-sg" name="sg" class="select"><option value="">Default</option>{net.groups.map((s) => <option value={s.id}>{s.label}</option>)}</select></FormField>
+          </div>
+          <button class="btn btn-primary" type="submit" disabled={!tds.length}>Run task</button>
+        </form>
+      </div>
+    )}
+
+    {tab === 'tags' && <div class="p-5"><TagsPanel tags={tags?.data ?? []} error={tags?.error} /></div>}
+
+    {tab === 'infrastructure' && (
+      <div class="p-5">
+        <DataTable title="Container instances" bare id="instances" nameKey="id" rows={infra?.data ?? []} error={infra?.error} pageSize={15} filter={false}
+          emptyTitle="No container instances" emptyText="Fargate tasks don't need container instances. EC2 launch type needs instances running the ECS agent."
+          columns={[
+            { key: 'id', label: 'Container instance', mono: true }, { key: 'ec2', label: 'EC2 instance', render: (r) => (r.ec2 ? mono(r.ec2) : '') },
+            { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) }, { key: 'agent', label: 'Agent' }, { key: 'running', label: 'Running tasks' },
+          ]} />
+      </div>
+    )}
+  </div>
+</Console>

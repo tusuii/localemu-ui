@@ -1,0 +1,63 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { ListClustersCommand, DescribeClustersCommand, DeleteClusterCommand } from '@aws-sdk/client-ecs';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load } from '../../lib/errors';
+import { num } from '../../lib/format';
+import { stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ecs = aws.ecs(ctx);
+
+const post = await handlePost(Astro, {
+  delete: (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'cluster' }, (id) => ecs.send(new DeleteClusterCommand({ cluster: id }))),
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const arns: string[] = [];
+  let token: string | undefined;
+  do {
+    const r = await ecs.send(new ListClustersCommand({ nextToken: token, maxResults: 100 }));
+    arns.push(...(r.clusterArns ?? []));
+    token = r.nextToken;
+  } while (token && arns.length < 500);
+  const out = [];
+  for (let i = 0; i < arns.length; i += 100) {
+    const d = await ecs.send(new DescribeClustersCommand({ clusters: arns.slice(i, i + 100), include: ['STATISTICS'] }));
+    out.push(...(d.clusters ?? []));
+  }
+  // Deleted clusters linger as INACTIVE; the real console stops showing them.
+  return out.filter((c) => c.status !== 'INACTIVE').map((c) => ({
+    id: c.clusterName!, status: c.status, services: c.activeServicesCount ?? 0, running: c.runningTasksCount ?? 0, pending: c.pendingTasksCount ?? 0, instances: c.registeredContainerInstancesCount ?? 0,
+  })).sort((a, b) => a.id.localeCompare(b.id));
+});
+---
+<Console title="Clusters" crumbs={[{ label: 'Clusters' }]} error={post.error}>
+  <PageHeader title="Clusters" description="An Amazon ECS cluster is a logical grouping of tasks, services and container instances." />
+  <DataTable
+    title="Clusters" rows={res.data ?? []} error={res.error} select="multi" nameKey="id" pageSize={25}
+    filter="Search clusters" emptyTitle="No clusters" emptyText="You don't have any ECS clusters in this region."
+    columns={[
+      { key: 'id', label: 'Cluster', href: (r) => `/ecs/${encodeURIComponent(r.id)}` },
+      { key: 'status', label: 'Status', render: (r) => stateStatus(r.status) },
+      { key: 'services', label: 'Services', render: (r) => num(r.services) },
+      { key: 'running', label: 'Running tasks', render: (r) => num(r.running) },
+      { key: 'pending', label: 'Pending tasks', render: (r) => num(r.pending) },
+      { key: 'instances', label: 'Container instances', render: (r) => num(r.instances) },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/ecs/{id}" data-min="1" data-max="1">View</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected clusters will be deleted. Clusters with services or tasks must be emptied first." data-confirm-title="Delete clusters?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/ecs/create"><Icon name="plus" size={16} /> Create cluster</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/ecs/create">Create cluster</a>
+  </DataTable>
+</Console>

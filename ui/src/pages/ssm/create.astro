@@ -1,0 +1,41 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { PutParameterCommand } from '@aws-sdk/client-ssm';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str } from '../../lib/action';
+import { UserError } from '../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Name');
+    if (!/^[A-Za-z0-9_.\-/]{1,1011}$/.test(name)) throw new UserError('Parameter names may contain letters, numbers and ._-/');
+    const value = String(f.get('value') ?? '');
+    if (value === '') throw new UserError('Enter a value.');
+    await aws.ssm(ctx).send(new PutParameterCommand({ Name: name, Value: value, Type: str(f, 'type') as never, Description: str(f, 'description') || undefined, Tier: (str(f, 'tier') || 'Standard') as never, Overwrite: false }));
+    return { message: `Parameter ${name} created.`, redirect: `/ssm/parameter?name=${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create parameter" crumbs={[{ label: 'Parameter Store', href: '/ssm' }, { label: 'Create parameter' }]} error={post.error}>
+  <PageHeader title="Create parameter" />
+  <form data-cli="aws ssm put-parameter --name {name} --type {type} --value {value} {description|--description}" method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Parameter details">
+      <FormField label="Name" for="name" hint="Use slashes for hierarchy, e.g. /myapp/prod/db_url."><input id="name" name="name" class="input font-mono" required autofocus autocomplete="off" placeholder="/path/to/parameter" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Tier" for="tier"><select id="tier" name="tier" class="select"><option value="Standard" selected={v.tier !== 'Advanced'}>Standard</option><option value="Advanced" selected={v.tier === 'Advanced'}>Advanced</option></select></FormField>
+        <FormField label="Type" for="type"><select id="type" name="type" class="select"><option value="String" selected={(v.type ?? 'String') === 'String'}>String</option><option value="StringList" selected={v.type === 'StringList'}>StringList</option><option value="SecureString" selected={v.type === 'SecureString'}>SecureString</option></select></FormField>
+      </div>
+      <FormField label="Value" for="value"><textarea id="value" name="value" class="textarea code-area" rows="5" required data-code autocomplete="off">{v.value ?? ''}</textarea></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/ssm">Cancel</a><button class="btn btn-primary" type="submit">Create parameter</button></div>
+  </form>
+</Console>

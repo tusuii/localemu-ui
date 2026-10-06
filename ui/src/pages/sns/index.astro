@@ -1,0 +1,61 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import Pager from '../../components/Pager.astro';
+import { pageLinks, pageState } from '../../lib/paging';
+import { ListTopicsCommand, GetTopicAttributesCommand, DeleteTopicCommand } from '@aws-sdk/client-sns';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { num, plural, arnName } from '../../lib/format';
+import { badge, mono } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const sns = aws.sns(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) => {
+    return bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'topic' }, (arn) => sns.send(new DeleteTopicCommand({ TopicArn: arn })), arnName);
+  },
+});
+if (post.response) return post.response;
+
+const state = pageState(Astro.url);
+let nextToken: string | undefined;
+const res = await load(async () => {
+  const r = await sns.send(new ListTopicsCommand({ NextToken: state.token as string | undefined }));
+  const arns = (r.Topics ?? []).map((t) => t.TopicArn!);
+  nextToken = r.NextToken;
+  return Promise.all(arns.map(async (arn) => {
+    const a = (await sns.send(new GetTopicAttributesCommand({ TopicArn: arn })).catch(() => ({ Attributes: {} as Record<string, string> }))).Attributes ?? {};
+    return { id: arn, name: arnName(arn), arn, fifo: a.FifoTopic === 'true', confirmed: Number(a.SubscriptionsConfirmed ?? 0), pending: Number(a.SubscriptionsPending ?? 0) };
+  }));
+});
+const links = pageLinks(Astro.url, state, nextToken);
+const rows = (res.data ?? []).sort((a, b) => a.name.localeCompare(b.name));
+---
+<Console title="Topics" crumbs={[{ label: 'Topics' }]} error={post.error}>
+  <PageHeader title="Topics" description="Publish messages to a topic and fan them out to every subscriber." />
+  <DataTable
+    title="Topics" rows={rows} error={res.error} select="multi" nameKey="name" pageSize={25}
+    filter="Search topics" emptyTitle="No topics" emptyText="To get started, create a topic."
+    columns={[
+      { key: 'name', label: 'Name', href: (r) => `/sns/${encodeURIComponent(r.name)}` },
+      { key: 'type', label: 'Type', render: (r) => badge(r.fifo ? 'FIFO' : 'Standard', r.fifo ? 'blue' : 'soft'), sort: (r) => (r.fifo ? 1 : 0) },
+      { key: 'confirmed', label: 'Subscriptions', render: (r) => `${num(r.confirmed)}${r.pending ? ` (+${r.pending} pending)` : ''}` },
+      { key: 'arn', label: 'ARN', render: (r) => mono(r.arn) },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/sns/{name}?tab=publish" data-min="1" data-max="1">Publish message</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected topics and their subscriptions will be permanently deleted." data-confirm-title="Delete topics?" data-confirm-type="delete me" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/sns/create"><Icon name="plus" size={16} /> Create topic</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/sns/create">Create topic</a>
+  </DataTable>
+  {!res.error && (rows.length > 0 || links.index > 0) && <div class="card -mt-3 rounded-t-none"><Pager links={links} count={rows.length} noun="topics" /></div>}
+</Console>

@@ -10,3 +10,8 @@ tests/aws/**/.terraform
 target/
 htmlcov/
 .coverage
+
+# the web console has its own image (ui/Dockerfile)
+ui/node_modules
+ui/dist
+ui/.astro

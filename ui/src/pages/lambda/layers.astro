@@ -1,0 +1,24 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import { ListLayersCommand } from '@aws-sdk/client-lambda';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const res = await load(async () => (await aws.lambda(ctx).send(new ListLayersCommand({}))).Layers ?? []);
+const rows = (res.data ?? []).map((l) => ({ id: l.LayerName, name: l.LayerName, version: l.LatestMatchingVersion?.Version, runtimes: l.LatestMatchingVersion?.CompatibleRuntimes ?? [], created: l.LatestMatchingVersion?.CreatedDate, arn: l.LayerArn }));
+---
+<Console title="Layers" crumbs={[{ label: 'Layers' }]}>
+  <PageHeader title="Layers" description="Layers package libraries and other dependencies that functions can share." />
+  <DataTable title="Layers" rows={rows} error={res.error} pageSize={25} emptyTitle="No layers" emptyText="Publish a layer with the AWS CLI: aws lambda publish-layer-version"
+    columns={[
+      { key: 'name', label: 'Name' }, { key: 'version', label: 'Latest version' },
+      { key: 'runtimes', label: 'Compatible runtimes', render: (r) => (r.runtimes.length ? r.runtimes.map((x: string) => badge(x)) : '-'), sort: (r) => r.runtimes.join() },
+      { key: 'created', label: 'Created', render: (r) => dateTime(r.created) }, { key: 'arn', label: 'ARN', mono: true },
+    ]} />
+</Console>

@@ -1,0 +1,87 @@
+---
+import Console from '../../layouts/Console.astro';
+import Card from '../../components/Card.astro';
+import DataTable from '../../components/DataTable.astro';
+import Flash from '../../components/Flash.astro';
+import ServiceTile from '../../components/ServiceTile.astro';
+import Icon from '../../components/Icon.astro';
+import { getSnapshot } from '../../lib/catalog';
+import { dashboardResources } from '../../lib/localemu';
+import { load } from '../../lib/errors';
+import { ENDPOINT } from '../../lib/config';
+import { badge, mono } from '../../lib/html';
+import { consoleFor } from '../../lib/services';
+
+const { name = '' } = Astro.params;
+const own = consoleFor(name);
+if (own?.href && own.href !== Astro.url.pathname) return Astro.redirect(own.href);
+
+const snap = await getSnapshot();
+const entry = snap.catalog.find((c) => c.id === name);
+if (!entry) return new Response('Unknown service', { status: 404 });
+const spec = snap.registry?.find((r) => r.name === name);
+const state = snap.health?.services?.[name];
+
+const res = await load(() => dashboardResources(name));
+const payload = res.data as { resources?: Record<string, unknown>[] | null; error?: string | null; total?: number } | undefined;
+const rows = (payload?.resources ?? []).map((r, i) => ({ __id: String(i), ...r }));
+const keys: string[] = [];
+for (const r of rows) for (const k of Object.keys(r)) if (k !== '__id' && !keys.includes(k)) keys.push(k);
+const cell = (v: unknown) => {
+  if (v === null || v === undefined || v === '') return '-';
+  if (typeof v === 'object') { const s = JSON.stringify(v); return mono(s.length > 90 ? s.slice(0, 87) + '…' : s); }
+  if (typeof v === 'boolean') return badge(String(v), v ? 'green' : 'soft');
+  return String(v);
+};
+const columns = keys.slice(0, 9).map((k) => ({ key: k, label: k.replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()), render: (r: any) => cell(r[k]) }));
+const tierText = { live: 'Live emulation', metadata: 'Metadata only', not_emulated: 'Stub' } as const;
+const tierColor = { live: 'green', metadata: 'blue', not_emulated: 'grey' } as const;
+---
+<Console title={entry.name} sidebar={false} crumbs={[{ label: 'All services', href: '/services' }, { label: entry.name }]}>
+  <div class="flex items-start gap-4 pb-2 pt-2">
+    <ServiceTile icon={entry.icon} category={entry.category} size={48} />
+    <div class="min-w-0 flex-1">
+      <h1 class="text-[28px] leading-9">{entry.name} {spec && <span class={`badge badge-${tierColor[spec.tier]} align-middle`}>{tierText[spec.tier]}</span>}</h1>
+      <p class="text-muted">{entry.description}</p>
+    </div>
+  </div>
+
+  <div class="mb-4 mt-2 space-y-3">
+    {spec?.banner && <Flash type="info" text={spec.banner} dismissible={false} />}
+    {state && state !== 'available' && state !== 'running' && <Flash type="warning" text={`Service state: ${state}`} dismissible={false} />}
+  </div>
+
+  <div class="grid gap-4 xl:grid-cols-3">
+    <div class="xl:col-span-2">
+      {res.error ? (
+        <Card title="Resources">
+          <Flash type="warning" dismissible={false} text="The resource browser is unavailable" detail={`${res.error}. The dashboard API is restricted to loopback callers; set DASHBOARD_API_OPEN=1 on LocalEmu if the console runs on another host.`} />
+        </Card>
+      ) : payload?.error ? (
+        <Card title="Resources"><p class="text-muted">LocalEmu could not list {entry.name} resources: {payload.error}</p></Card>
+      ) : (
+        <DataTable
+          title="Resources" rows={rows} columns={columns} idKey="__id" pageSize={25}
+          count={payload?.total ?? rows.length}
+          emptyTitle={`No ${entry.name} resources`} emptyText="Nothing has been created in this service yet."
+          description="Read-only view from LocalEmu's dashboard API."
+        />
+      )}
+    </div>
+
+    <div class="space-y-4">
+      <Card title="Get started">
+        {spec?.empty_state ? <pre class="code-block">{spec.empty_state}</pre> : <p class="text-muted">Use any AWS SDK or CLI against <code>{ENDPOINT}</code> to create {entry.name} resources.</p>}
+        {spec?.empty_state && <button type="button" class="btn btn-normal btn-sm mt-3" data-copy={spec.empty_state}><Icon name="copy" size={14} /> Copy</button>}
+      </Card>
+      <Card title="About">
+        <dl class="space-y-2">
+          <div class="flex justify-between gap-3"><dt class="text-muted">Service ID</dt><dd class="font-mono">{entry.id}</dd></div>
+          <div class="flex justify-between gap-3"><dt class="text-muted">Category</dt><dd>{entry.category}</dd></div>
+          <div class="flex justify-between gap-3"><dt class="text-muted">State</dt><dd>{state ?? 'unknown'}</dd></div>
+        </dl>
+        <p class="mt-3 text-[13px] text-muted">This service does not have a purpose-built console yet. You can still manage it with the AWS CLI or any SDK.</p>
+      </Card>
+    </div>
+  </div>
+</Console>

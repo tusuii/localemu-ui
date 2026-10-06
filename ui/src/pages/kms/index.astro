@@ -1,0 +1,65 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { ListKeysCommand, DescribeKeyCommand, ListAliasesCommand, ScheduleKeyDeletionCommand, CancelKeyDeletionCommand, EnableKeyCommand, DisableKeyCommand } from '@aws-sdk/client-kms';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { dateTime, plural } from '../../lib/format';
+import { badge, mono, stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const kms = aws.kms(ctx);
+
+const each = (f: FormData, verb: string, fn: (id: string) => Promise<unknown>, tail?: string) => bulk(strs(f, 'id'), { verb, noun: 'key', tail }, fn);
+const post = await handlePost(Astro, {
+  enable: (f) => each(f, 'Enabled', (id) => kms.send(new EnableKeyCommand({ KeyId: id }))),
+  disable: (f) => each(f, 'Disabled', (id) => kms.send(new DisableKeyCommand({ KeyId: id }))),
+  cancel: (f) => each(f, 'Cancelled deletion of', (id) => kms.send(new CancelKeyDeletionCommand({ KeyId: id }))),
+  schedule: async (f) => {
+    const days = Math.min(Math.max(intOf(f, 'days', 'Waiting period') ?? 7, 7), 30);
+    return each(f, 'Scheduled for deletion:', (id) => kms.send(new ScheduleKeyDeletionCommand({ KeyId: id, PendingWindowInDays: days })), `Deletion happens in ${days} days.`);
+  },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const ids: string[] = []; let marker: string | undefined;
+  do { const r = await kms.send(new ListKeysCommand({ Marker: marker })); ids.push(...(r.Keys ?? []).map((k) => k.KeyId!)); marker = r.Truncated ? r.NextMarker : undefined; } while (marker && ids.length < 500);
+  const aliases = new Map<string, string[]>();
+  let am: string | undefined;
+  do { const r = await kms.send(new ListAliasesCommand({ Marker: am })); for (const a of r.Aliases ?? []) if (a.TargetKeyId) aliases.set(a.TargetKeyId, [...(aliases.get(a.TargetKeyId) ?? []), a.AliasName!]); am = r.Truncated ? r.NextMarker : undefined; } while (am);
+  return Promise.all(ids.map(async (id) => {
+    const m = (await kms.send(new DescribeKeyCommand({ KeyId: id })).catch(() => undefined))?.KeyMetadata;
+    return { id, aliases: (aliases.get(id) ?? []).map((a) => a.replace(/^alias\//, '')).join(', '), state: m?.KeyState, spec: m?.KeySpec ?? m?.CustomerMasterKeySpec, usage: m?.KeyUsage, created: m?.CreationDate, manager: m?.KeyManager, enabled: m?.Enabled };
+  }));
+});
+const rows = (res.data ?? []).sort((a: any, b: any) => (a.aliases || 'zz').localeCompare(b.aliases || 'zz'));
+---
+<Console title="Customer managed keys" crumbs={[{ label: 'Customer managed keys' }]} error={post.error}>
+  <PageHeader title="Customer managed keys" description="Create and control the cryptographic keys that protect your data." />
+  <DataTable
+    title="Keys" rows={rows} error={res.error} select="multi" nameKey="aliases" pageSize={25}
+    filter="Filter keys" emptyTitle="No keys" emptyText="You haven't created any KMS keys in this region."
+    columns={[
+      { key: 'aliases', label: 'Aliases', href: (r) => `/kms/${encodeURIComponent(r.id)}`, render: (r) => r.aliases || '-' },
+      { key: 'id', label: 'Key ID', render: (r) => mono(r.id) },
+      { key: 'state', label: 'Status', render: (r) => stateStatus(r.state, { enabled: 'success', pendingdeletion: 'error', pendingimport: 'info' }) },
+      { key: 'spec', label: 'Key spec' }, { key: 'usage', label: 'Key usage' },
+      { key: 'manager', label: 'Manager', render: (r) => badge(r.manager === 'AWS' ? 'AWS' : 'Customer') },
+      { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => new Date(r.created ?? 0).getTime() },
+    ]}
+  >
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="enable" data-min="1">Enable</button>
+      <button class="btn btn-normal" name="intent" value="disable" data-min="1" data-confirm="Disabled keys can't be used for cryptographic operations until re-enabled." data-confirm-title="Disable keys?" data-confirm-ok="Disable" data-confirm-style="primary">Disable</button>
+      <button class="btn btn-normal" name="intent" value="schedule" data-min="1" data-confirm="The keys will be deleted after a 7 day waiting period. Anything encrypted with them becomes unrecoverable." data-confirm-title="Schedule key deletion?" data-confirm-ok="Schedule deletion">Schedule deletion</button>
+      <a class="btn btn-primary" href="/kms/create"><Icon name="plus" size={16} /> Create key</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/kms/create">Create key</a>
+  </DataTable>
+</Console>

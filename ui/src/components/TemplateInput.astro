@@ -1,0 +1,21 @@
+---
+import FormField from './FormField.astro';
+interface Props { body?: string; rows?: number; url?: string; required?: boolean }
+const { body = '', rows = 22, url = '', required = false } = Astro.props;
+---
+<div class="space-y-3" data-template-input>
+  <div class="grid gap-4 md:grid-cols-2">
+    <FormField label="Upload a template file" for="templateFile" optional hint="JSON or YAML, up to 1 MB. Replaces the pasted text on submit."><input id="templateFile" type="file" name="templateFile" accept=".json,.yaml,.yml,.template,.txt,application/json" class="input !py-1.5" /></FormField>
+    <FormField label="Or a template URL" for="templateUrl" optional hint="http(s) URL, e.g. a pre-signed S3 link."><input id="templateUrl" name="templateUrl" class="input font-mono" placeholder="https://..." value={url} /></FormField>
+  </div>
+  <FormField label="Or paste the template" for="template"><textarea id="template" name="template" class="textarea code-area" rows={rows} data-code spellcheck="false" required={required}>{body}</textarea></FormField>
+</div>
+<script is:inline>
+  document.querySelectorAll('[data-template-input] input[type=file]').forEach(function (inp) {
+    inp.addEventListener('change', function () {
+      var f = inp.files && inp.files[0]; if (!f || f.size > 1048576) return;
+      var ta = inp.closest('[data-template-input]').querySelector('textarea');
+      f.text().then(function (t) { if (ta) { ta.value = t; ta.dispatchEvent(new Event('input', { bubbles: true })); } });
+    });
+  });
+</script>

@@ -1,0 +1,52 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { CreateWorkGroupCommand } from '@aws-sdk/client-athena';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str } from '../../../lib/action';
+import { UserError } from '../../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const athena = aws.athena(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Workgroup name');
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(name)) throw new UserError('Names are letters, numbers, periods, hyphens and underscores.');
+    const out = str(f, 'output');
+    if (out && !out.startsWith('s3://')) throw new UserError('The query result location must start with s3://.');
+    await athena.send(new CreateWorkGroupCommand({
+      Name: name, Description: str(f, 'description') || undefined,
+      Configuration: {
+        ResultConfiguration: out ? { OutputLocation: out } : undefined,
+        EnforceWorkGroupConfiguration: str(f, 'enforce') === '1',
+        PublishCloudWatchMetricsEnabled: str(f, 'metrics') === '1',
+        BytesScannedCutoffPerQuery: intOf(f, 'cutoff', 'Data usage limit'),
+      },
+    }));
+    return { message: `Workgroup ${name} created successfully.`, redirect: `/athena/workgroups/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create workgroup" crumbs={[{ label: 'Workgroups', href: '/athena/workgroups' }, { label: 'Create workgroup' }]} error={post.error}>
+  <PageHeader title="Create workgroup" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Workgroup details">
+      <FormField label="Workgroup name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="128" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+    </Card>
+    <Card title="Query results">
+      <FormField label="Query result location" for="output" optional hint="An S3 path such as s3://my-bucket/athena/."><input id="output" name="output" class="input" placeholder="s3://my-bucket/athena/" value={v.output ?? ''} /></FormField>
+      <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="enforce" value="1" checked={v.enforce === '1'} /> Override client-side settings</label>
+      <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="metrics" value="1" checked={v.metrics === '1'} /> Publish query metrics to CloudWatch</label>
+      <FormField label="Per-query data usage limit (bytes)" for="cutoff" optional hint="Minimum 10000000 (10 MB)."><input id="cutoff" name="cutoff" type="number" min="10000000" class="input" value={v.cutoff ?? ''} /></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/athena/workgroups">Cancel</a><button class="btn btn-primary" type="submit">Create workgroup</button></div>
+  </form>
+</Console>

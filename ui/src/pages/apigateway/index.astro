@@ -1,0 +1,69 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Icon from '../../components/Icon.astro';
+import { GetRestApisCommand, DeleteRestApiCommand } from '@aws-sdk/client-api-gateway';
+import { GetApisCommand, DeleteApiCommand } from '@aws-sdk/client-apigatewayv2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { load } from '../../lib/errors';
+import { dateTime } from '../../lib/format';
+import { badge } from '../../lib/html';
+import type { ApiRow } from '../../lib/apigateway';
+
+const ctx = getCtx(Astro.cookies);
+const v1 = aws.apigw(ctx);
+const v2 = aws.apigwv2(ctx);
+
+const post = await handlePost(Astro, {
+  delete: async (f) =>
+    bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'API' }, async (key) => {
+      const [kind, id] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
+      if (kind === 'rest') await v1.send(new DeleteRestApiCommand({ restApiId: id }));
+      else await v2.send(new DeleteApiCommand({ ApiId: id }));
+    }),
+});
+if (post.response) return post.response;
+
+const res = await load(async () => {
+  const rows: ApiRow[] = [];
+  const errs: string[] = [];
+  try {
+    const r = await v1.send(new GetRestApisCommand({ limit: 500 }));
+    for (const a of r.items ?? []) rows.push({ id: a.id!, key: `rest:${a.id}`, kind: 'rest', name: a.name ?? a.id!, type: 'REST', description: a.description, created: a.createdDate, endpoint: (a.endpointConfiguration?.types ?? []).join(', ') });
+  } catch (e) { errs.push(String(e)); }
+  try {
+    const r = await v2.send(new GetApisCommand({}));
+    for (const a of r.Items ?? []) rows.push({ id: a.ApiId!, key: `v2:${a.ApiId}`, kind: 'v2', name: a.Name ?? a.ApiId!, type: a.ProtocolType === 'WEBSOCKET' ? 'WebSocket' : 'HTTP', description: a.Description, created: a.CreatedDate, endpoint: 'Regional' });
+  } catch (e) { errs.push(String(e)); }
+  if (errs.length === 2) throw new Error(errs[0]);
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+});
+const rows = res.data ?? [];
+---
+<Console title="APIs" crumbs={[{ label: 'APIs' }]} error={post.error}>
+  <PageHeader title="APIs" description="Create, publish and manage REST, HTTP and WebSocket APIs." />
+  <DataTable
+    title="APIs" rows={rows} error={res.error} select="multi" idKey="key" nameKey="name" pageSize={25}
+    filter="Search APIs" emptyTitle="No APIs" emptyText="You don't have any APIs in this region."
+    columns={[
+      { key: 'name', label: 'Name', href: (r) => `/apigateway/${r.id}` },
+      { key: 'id', label: 'API ID', mono: true },
+      { key: 'type', label: 'Type', render: (r) => badge(r.type, r.type === 'REST' ? 'blue' : r.type === 'HTTP' ? 'green' : 'orange') },
+      { key: 'description', label: 'Description' },
+      { key: 'endpoint', label: 'Endpoint type' },
+      { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+    ]}
+  >
+    <Fragment slot="actions">
+      <a class="btn btn-normal" data-href-template="/apigateway/{id}" data-min="1" data-max="1">View</a>
+      <a class="btn btn-normal" href="/apigateway/keys">API keys and usage plans</a>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected APIs, including their resources, stages and deployments, will be permanently deleted." data-confirm-title="Delete APIs?" data-confirm-type="delete" data-confirm-ok="Delete">Delete</button>
+      <a class="btn btn-primary" href="/apigateway/create"><Icon name="plus" size={16} /> Create API</a>
+    </Fragment>
+    <a slot="empty" class="btn btn-primary" href="/apigateway/create">Create API</a>
+  </DataTable>
+</Console>

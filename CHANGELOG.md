@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### LocalEmu Console: an AWS-console style web UI (`ui/`)
+
+A new standalone web console built with Astro 7 and Tailwind CSS 4 that talks to LocalEmu through the
+regular AWS SDK. It mirrors the look and workflow of the AWS console (Services menu and search,
+per-service navigation, breadcrumbs, selectable tables with an Actions toolbar, confirmation
+dialogs, flashbar, light and dark themes) and lets you inspect and change resources:
+
+- Consoles for S3 (object browser, upload/download/edit), DynamoDB (scan/query, item editor), SQS, SNS,
+  Lambda (inline editor, test events), EC2 and VPC networking, IAM, Secrets Manager, Systems Manager
+  Parameter Store, KMS, CloudWatch (logs, alarms, metrics), EventBridge, Step Functions,
+  CloudFormation, Kinesis, Route 53 and CloudTrail event history.
+- Region and account switching (LocalEmu keeps per-account, per-region state).
+- A generic resource browser for every other service, with its emulation tier (live / metadata / stub).
+- `docker-compose.yml` gains a `console` service on `127.0.0.1:4321`, and the `localemu` service sets
+  `DASHBOARD_API_OPEN=1` (host port stays bound to loopback) so the console container can read the
+  dashboard API. `make ui-dev`, `ui-build` and `ui-start` run the console from source.
+- Browser end-to-end tests in `ui/tests/e2e`.
+
 ## 1.2.0
 
 EC2 access end-to-end (SSM shell, SSH, EC2 Instance Connect, SSM port-forwarding), snapshot honesty, ENI-level live security-group re-apply, EC2 multi-NIC, Cognito User Pool Lambda triggers, and a full excision of every external URL from the code base.

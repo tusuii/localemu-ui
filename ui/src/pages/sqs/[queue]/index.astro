@@ -1,0 +1,199 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import FormField from '../../../components/FormField.astro';
+import JsonView from '../../../components/JsonView.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  GetQueueUrlCommand, GetQueueAttributesCommand, SendMessageCommand, ReceiveMessageCommand, DeleteMessageCommand,
+  PurgeQueueCommand, DeleteQueueCommand, SetQueueAttributesCommand, type Message,
+} from '@aws-sdk/client-sqs';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, jsonOf, required, str } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { dateTime, num, plural, shortDateTime } from '../../../lib/format';
+import { copyable, badge } from '../../../lib/html';
+import { epoch, isFifo, retention, secs } from '../../../lib/sqs';
+
+const name = Astro.params.queue!;
+const ctx = getCtx(Astro.cookies);
+const sqs = aws.sqs(ctx);
+const tab = ['send', 'details', 'settings'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'send';
+const fifo = isFifo(name);
+
+const urlRes = await load(async () => (await sqs.send(new GetQueueUrlCommand({ QueueName: name }))).QueueUrl!);
+if (urlRes.error && /NonExistentQueue|does not exist/i.test(urlRes.error)) return new Response(`Queue "${name}" does not exist`, { status: 404 });
+const url = urlRes.data!;
+
+const post = await handlePost(Astro, {
+  send: async (f) => {
+    const attrsText = str(f, 'attrs');
+    const attrs = attrsText ? jsonOf<Record<string, string>>(f, 'attrs', 'Message attributes') : {};
+    const MessageAttributes = Object.fromEntries(Object.entries(attrs).map(([k, v]) => [k, typeof v === 'number' ? { DataType: 'Number', StringValue: String(v) } : { DataType: 'String', StringValue: String(v) }]));
+    // FIFO queues need a dedup id unless content-based deduplication is on; generate one for convenience.
+    let dedup = fifo ? str(f, 'dedup') : '';
+    if (fifo && !dedup) {
+      const q = (await sqs.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ['ContentBasedDeduplication'] }))).Attributes;
+      if (q?.ContentBasedDeduplication !== 'true') dedup = crypto.randomUUID();
+    }
+    const r = await sqs.send(new SendMessageCommand({
+      QueueUrl: url, MessageBody: required(f, 'body', 'Message body'),
+      DelaySeconds: fifo ? undefined : intOf(f, 'delay', 'Delivery delay'),
+      MessageGroupId: fifo ? (str(f, 'group') || 'default') : undefined,
+      MessageDeduplicationId: dedup || undefined,
+      MessageAttributes: Object.keys(MessageAttributes).length ? MessageAttributes : undefined,
+    }));
+    return { message: 'Message sent.', detail: `Message ID: ${r.MessageId}`, redirect: Astro.url.pathname };
+  },
+  poll: async (f) => {
+    const r = await sqs.send(new ReceiveMessageCommand({
+      QueueUrl: url, MaxNumberOfMessages: Math.min(Math.max(intOf(f, 'max', 'Maximum messages') ?? 10, 1), 10),
+      WaitTimeSeconds: Math.min(Math.max(intOf(f, 'wait', 'Wait time') ?? 0, 0), 20),
+      VisibilityTimeout: intOf(f, 'visibility', 'Visibility timeout') ?? 30,
+      AttributeNames: ['All'], MessageAttributeNames: ['All'],
+    }));
+    return { stay: true, message: `Received ${plural(r.Messages?.length ?? 0, 'message')}.`, data: r.Messages ?? [] };
+  },
+  deleteMessage: async (f) => {
+    await sqs.send(new DeleteMessageCommand({ QueueUrl: url, ReceiptHandle: required(f, 'handle', 'Receipt handle') }));
+    return { message: 'Message deleted.', redirect: Astro.url.pathname };
+  },
+  purge: async () => { await sqs.send(new PurgeQueueCommand({ QueueUrl: url })); return 'Queue purged. It can take up to 60 seconds for messages to disappear.'; },
+  delete: async () => { await sqs.send(new DeleteQueueCommand({ QueueUrl: url })); return { message: `Deleted queue "${name}".`, redirect: '/sqs' }; },
+  settings: async (f) => {
+    const attrs: Record<string, string> = {};
+    const set = (k: string, key: string, label: string) => { const n = intOf(f, key, label); if (n !== undefined) attrs[k] = String(n); };
+    set('VisibilityTimeout', 'visibility', 'Visibility timeout'); set('MessageRetentionPeriod', 'retention', 'Retention period');
+    set('DelaySeconds', 'delay', 'Delivery delay'); set('MaximumMessageSize', 'maxsize', 'Maximum message size'); set('ReceiveMessageWaitTimeSeconds', 'wait', 'Receive wait time');
+    if (!Object.keys(attrs).length) throw new UserError('Nothing to update.');
+    await sqs.send(new SetQueueAttributesCommand({ QueueUrl: url, Attributes: attrs }));
+    return 'Queue settings updated.';
+  },
+});
+if (post.response) return post.response;
+
+const received = (post.result?.data ?? undefined) as Message[] | undefined;
+const attrsRes = await load(async () => (await sqs.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ['All'] }))).Attributes ?? {});
+const a = attrsRes.data ?? {};
+const tabs = [{ id: 'send', label: 'Send and receive messages' }, { id: 'details', label: 'Details' }, { id: 'settings', label: 'Settings' }];
+const pretty = (s: string) => { try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; } };
+const v = post.values;
+---
+<Console title={name} crumbs={[{ label: 'Queues', href: '/sqs' }, { label: name }]} error={post.error} notice={post.result?.message ? { text: post.result.message } : null}>
+  <PageHeader title={name} badge={fifo ? 'FIFO' : 'Standard'} />
+
+  <div class="mb-4 grid gap-3 sm:grid-cols-3">
+    <div class="card p-4"><div class="kv-label">Messages available</div><div class="text-[28px] font-bold leading-9">{num(a.ApproximateNumberOfMessages ?? 0)}</div></div>
+    <div class="card p-4"><div class="kv-label">Messages in flight</div><div class="text-[28px] font-bold leading-9">{num(a.ApproximateNumberOfMessagesNotVisible ?? 0)}</div></div>
+    <div class="card p-4"><div class="kv-label">Messages delayed</div><div class="text-[28px] font-bold leading-9">{num(a.ApproximateNumberOfMessagesDelayed ?? 0)}</div></div>
+  </div>
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'send' && (
+      <div class="grid gap-6 p-5 xl:grid-cols-2">
+        <section>
+          <h3 class="card-title mb-3">Send message</h3>
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="send" />
+            <FormField label="Message body" for="body"><textarea id="body" name="body" class="textarea code-area" rows="7" required placeholder="Enter the message body">{v.body ?? ''}</textarea></FormField>
+            {!fifo && <FormField label="Delivery delay (seconds)" for="delay" optional><input id="delay" name="delay" type="number" min="0" max="900" class="input !w-40" value={v.delay ?? ''} /></FormField>}
+            {fifo && (
+              <div class="grid gap-4 sm:grid-cols-2">
+                <FormField label="Message group ID" for="group" hint="Required for FIFO queues."><input id="group" name="group" class="input" value={v.group ?? 'default'} /></FormField>
+                <FormField label="Deduplication ID" for="dedup" optional hint="Generated automatically when left blank."><input id="dedup" name="dedup" class="input" value={v.dedup ?? ''} /></FormField>
+              </div>
+            )}
+            <details class="mb-4"><summary class="cursor-pointer font-bold text-link">Message attributes</summary>
+              <div class="mt-2"><textarea name="attrs" class="textarea code-area" rows="3" data-json data-code placeholder={'{ "attempt": 1, "source": "console" }'}>{v.attrs ?? ''}</textarea><p class="field-hint">A JSON object. Numbers become Number attributes, everything else String.</p></div>
+            </details>
+            <button class="btn btn-primary" type="submit"><Icon name="send" size={16} /> Send message</button>
+          </form>
+        </section>
+
+        <section>
+          <h3 class="card-title mb-3">Receive messages</h3>
+          <form method="post" class="space-y-1">
+            <input type="hidden" name="intent" value="poll" />
+            <div class="grid gap-4 sm:grid-cols-3">
+              <FormField label="Maximum" for="max"><input id="max" name="max" type="number" min="1" max="10" class="input" value={v.max ?? '10'} /></FormField>
+              <FormField label="Wait time (s)" for="pwait"><input id="pwait" name="wait" type="number" min="0" max="20" class="input" value={v.wait ?? '0'} /></FormField>
+              <FormField label="Visibility (s)" for="pvis" hint="0 peeks without hiding."><input id="pvis" name="visibility" type="number" min="0" class="input" value={v.visibility ?? '30'} /></FormField>
+            </div>
+            <button class="btn btn-normal" type="submit"><Icon name="inbox" size={16} /> Poll for messages</button>
+          </form>
+
+          {received && (
+            <div class="mt-5">
+              {received.length === 0 ? <p class="text-muted">No messages were available.</p> : (
+                <ul class="space-y-3">
+                  {received.map((m) => (
+                    <li class="rounded-lg border border-line p-3">
+                      <div class="flex flex-wrap items-center justify-between gap-2">
+                        <code class="text-[12px]">{m.MessageId}</code>
+                        <span class="flex items-center gap-2 text-[12px] text-muted">
+                          {m.Attributes?.SentTimestamp && <span>sent {shortDateTime(new Date(Number(m.Attributes.SentTimestamp)))}</span>}
+                          {badge(`received ${m.Attributes?.ApproximateReceiveCount ?? 1}×`)}
+                        </span>
+                      </div>
+                      <pre class="code-block mt-2 max-h-48">{pretty(m.Body ?? '')}</pre>
+                      {m.MessageAttributes && Object.keys(m.MessageAttributes).length > 0 && <details class="mt-2"><summary class="cursor-pointer text-link">Attributes</summary><JsonView value={m.MessageAttributes} maxHeight="160px" /></details>}
+                      <form method="post" class="mt-2"><input type="hidden" name="intent" value="deleteMessage" /><input type="hidden" name="handle" value={m.ReceiptHandle} />
+                        <button class="btn btn-danger btn-sm" type="submit"><Icon name="trash-2" size={14} /> Delete message</button></form>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+    )}
+
+    {tab === 'details' && (
+      <div class="space-y-5 p-5">
+        {attrsRes.error ? <Flash type="error" text="Couldn't load queue attributes" detail={attrsRes.error} dismissible={false} /> : (
+          <>
+            <Details items={[
+              { label: 'Name', value: name }, { label: 'Type', value: fifo ? 'FIFO' : 'Standard' },
+              { label: 'Created', value: dateTime(epoch(a.CreatedTimestamp)) }, { label: 'Last updated', value: dateTime(epoch(a.LastModifiedTimestamp)) },
+              { label: 'Visibility timeout', value: secs(a.VisibilityTimeout) }, { label: 'Message retention', value: retention(a.MessageRetentionPeriod) },
+              { label: 'Delivery delay', value: secs(a.DelaySeconds) }, { label: 'Maximum message size', value: a.MaximumMessageSize ? `${Number(a.MaximumMessageSize) / 1024} KiB` : undefined },
+              { label: 'Receive message wait time', value: secs(a.ReceiveMessageWaitTimeSeconds) }, { label: 'Content-based deduplication', value: fifo ? (a.ContentBasedDeduplication === 'true' ? 'Enabled' : 'Disabled') : undefined },
+              { label: 'ARN', value: copyable(a.QueueArn ?? ''), wide: true }, { label: 'URL', value: copyable(url), wide: true },
+            ]} />
+            {a.RedrivePolicy && <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Dead-letter queue (redrive policy)</h3><JsonView value={JSON.parse(a.RedrivePolicy)} maxHeight="160px" /></div>}
+            {a.Policy && <div class="border-t border-line pt-4"><h3 class="card-title mb-2">Access policy</h3><JsonView value={JSON.parse(a.Policy)} /></div>}
+            <div class="border-t border-line pt-4"><h3 class="card-title mb-2">All attributes</h3><JsonView value={a} maxHeight="320px" /></div>
+          </>
+        )}
+      </div>
+    )}
+
+    {tab === 'settings' && (
+      <div class="space-y-6 p-5">
+        <form method="post" class="grid max-w-3xl gap-4 sm:grid-cols-2">
+          <input type="hidden" name="intent" value="settings" />
+          <FormField label="Visibility timeout (seconds)" for="s-vis"><input id="s-vis" name="visibility" type="number" min="0" max="43200" class="input" value={a.VisibilityTimeout ?? ''} /></FormField>
+          <FormField label="Message retention (seconds)" for="s-ret"><input id="s-ret" name="retention" type="number" min="60" max="1209600" class="input" value={a.MessageRetentionPeriod ?? ''} /></FormField>
+          <FormField label="Delivery delay (seconds)" for="s-del"><input id="s-del" name="delay" type="number" min="0" max="900" class="input" value={a.DelaySeconds ?? ''} /></FormField>
+          <FormField label="Maximum message size (bytes)" for="s-max"><input id="s-max" name="maxsize" type="number" min="1024" max="262144" class="input" value={a.MaximumMessageSize ?? ''} /></FormField>
+          <FormField label="Receive wait time (seconds)" for="s-wait"><input id="s-wait" name="wait" type="number" min="0" max="20" class="input" value={a.ReceiveMessageWaitTimeSeconds ?? ''} /></FormField>
+          <div class="sm:col-span-2"><button class="btn btn-primary" type="submit">Save changes</button></div>
+        </form>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-1 text-danger">Danger zone</h3>
+          <form method="post" class="mt-3 flex flex-wrap gap-2">
+            <button class="btn btn-danger" name="intent" value="purge" data-confirm="All messages in this queue will be deleted." data-confirm-title="Purge queue?" data-confirm-name={name} data-confirm-type="purge" data-confirm-ok="Purge">Purge queue</button>
+            <button class="btn btn-danger" name="intent" value="delete" data-confirm="The queue and its messages will be permanently deleted." data-confirm-title="Delete queue?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete queue">Delete queue</button>
+          </form>
+        </div>
+      </div>
+    )}
+  </div>
+</Console>

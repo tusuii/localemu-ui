@@ -1,0 +1,25 @@
+---
+interface Props {
+  title?: string;
+  count?: number | string;
+  description?: string;
+  /** Remove body padding (tables, tabs). */
+  flush?: boolean;
+  id?: string;
+  class?: string;
+}
+const { title, count, description, flush = false, id, class: cls = '' } = Astro.props;
+const hasActions = Astro.slots.has('actions');
+---
+<section id={id} class:list={['card', cls]}>
+  {(title || hasActions) && (
+    <header class="card-header">
+      <div class="min-w-0">
+        {title && <h2 class="card-title">{title}{count !== undefined && <span class="count"> ({count})</span>}</h2>}
+        {description && <p class="card-desc">{description}</p>}
+      </div>
+      {hasActions && <div class="flex flex-wrap items-center justify-end gap-2"><slot name="actions" /></div>}
+    </header>
+  )}
+  <div class={flush ? '' : 'card-body'}><slot /></div>
+</section>

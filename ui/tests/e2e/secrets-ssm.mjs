@@ -1,0 +1,41 @@
+import { start } from './lib.mjs';
+const t = await start(); const { p } = t;
+// ---- Secrets
+await t.go('/secretsmanager/create');
+await p.fill('#name', 'ui/db/password'); await p.fill('#value', '{"user":"admin","pw":"s3cret"}'); await p.fill('#description', 'db creds');
+await t.submit('button:has-text("Store secret")');
+t.ok(p.url().endsWith('/secretsmanager/ui/db/password'), 'secret create + nested route: ' + p.url());
+t.ok(!(await p.innerText('main')).includes('s3cret'), 'secret value not leaked on overview');
+await t.go('/secretsmanager/ui/db/password?tab=value');
+await p.click('button:has-text("Retrieve secret value")'); await p.waitForLoadState('load');
+t.ok((await p.innerText('#secret-value')).includes('s3cret'), 'reveal shows value');
+await p.fill('#value', 'rotated-value'); await t.submit('button:has-text("Save new version")');
+t.ok((await t.flash()).includes('New secret version'), 'put value: ' + await t.flash());
+await t.go('/secretsmanager/ui/db/password?tab=versions');
+t.ok((await p.locator('tbody tr').count()) >= 2, 'versions listed');
+await t.go('/secretsmanager');
+await t.confirmAction('ui/db/password', 'Delete', null);
+t.ok((await t.flash()).includes('scheduled') || (await t.flash()).includes('Scheduled'), 'secret scheduled for deletion: ' + await t.flash());
+await t.go('/secretsmanager/ui/db/password');
+await p.check('input[name=force]'); await p.click('button:has-text("Delete")'); await p.waitForSelector('#confirm-dialog[open]');
+await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd-ok]')]);
+t.ok(p.url().endsWith('/secretsmanager'), 'force delete returns to list');
+
+// ---- SSM
+await t.go('/ssm/create');
+await p.fill('#name', '/ui/test/flag'); await p.fill('#value', 'on'); await p.fill('#description', 'feature flag');
+await t.submit('button:has-text("Create parameter")');
+t.ok(p.url().includes('/ssm/parameter?name=%2Fui%2Ftest%2Fflag'), 'ssm create');
+await p.fill('#value', 'off'); await t.submit('button:has-text("Save changes")');
+t.ok((await t.flash()).includes('updated'), 'ssm update: ' + await t.flash());
+t.ok((await p.locator('tbody tr').count()) >= 2, 'history has versions');
+await t.go('/ssm/create'); await p.fill('#name', '/ui/test/secret'); await p.selectOption('#type', 'SecureString'); await p.fill('#value', 'hunter2'); await t.submit('button:has-text("Create parameter")');
+t.ok((await p.inputValue('#value')) === 'hunter2', 'securestring decrypts for display');
+await t.go('/ssm');
+t.ok((await p.locator('tr[data-row]:has-text("/ui/test")').count()) === 2, 'both params listed');
+await p.locator('tr[data-row]:has-text("/ui/test") [data-row-select]').first().check();
+await p.locator('tr[data-row]:has-text("/ui/test") [data-row-select]').nth(1).check();
+await p.click('form[data-table] button:has-text("Delete")'); await p.waitForSelector('#confirm-dialog[open]');
+await Promise.all([p.waitForNavigation({ waitUntil: 'load' }), p.click('[data-cd-ok]')]);
+t.ok((await p.locator('tr[data-row]:has-text("/ui/test")').count()) === 0, 'params deleted');
+await t.done();

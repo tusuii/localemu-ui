@@ -1,0 +1,35 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { CreateSecurityGroupCommand, DescribeVpcsCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str } from '../../../lib/action';
+import { load } from '../../../lib/errors';
+import { nameOf } from '../../../lib/ec2';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const r = await ec2.send(new CreateSecurityGroupCommand({ GroupName: required(f, 'name', 'Name'), Description: required(f, 'description', 'Description'), VpcId: str(f, 'vpc') || undefined }));
+    return { message: `Security group ${r.GroupId} created.`, redirect: `/ec2/security-groups/${r.GroupId}` };
+  },
+});
+if (post.response) return post.response;
+const vpcs = await load(async () => (await ec2.send(new DescribeVpcsCommand({}))).Vpcs ?? []);
+const v = post.values;
+---
+<Console title="Create security group" crumbs={[{ label: 'Security groups', href: '/ec2/security-groups' }, { label: 'Create' }]} error={post.error}>
+  <PageHeader title="Create security group" />
+  <form method="post" class="max-w-3xl space-y-4"><input type="hidden" name="intent" value="create" />
+    <Card title="Basic details">
+      <FormField label="Security group name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Description" for="description"><input id="description" name="description" class="input" required value={v.description ?? ''} /></FormField>
+      <FormField label="VPC" for="vpc"><select id="vpc" name="vpc" class="select"><option value="">Default VPC</option>{(vpcs.data ?? []).map((x) => <option value={x.VpcId} selected={v.vpc === x.VpcId}>{x.VpcId}{nameOf(x.Tags) ? ` (${nameOf(x.Tags)})` : ''} · {x.CidrBlock}{x.IsDefault ? ' · default' : ''}</option>)}</select></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/ec2/security-groups">Cancel</a><button class="btn btn-primary" type="submit">Create security group</button></div>
+  </form>
+</Console>

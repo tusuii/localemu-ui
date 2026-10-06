@@ -1,0 +1,397 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import DataTable from '../../../components/DataTable.astro';
+import FormField from '../../../components/FormField.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  DescribeUserPoolCommand, DeleteUserPoolCommand, ListUsersCommand, AdminCreateUserCommand, AdminConfirmSignUpCommand,
+  AdminEnableUserCommand, AdminDisableUserCommand, AdminResetUserPasswordCommand, AdminDeleteUserCommand, AdminSetUserPasswordCommand,
+  ListGroupsCommand, CreateGroupCommand, DeleteGroupCommand, ListUsersInGroupCommand, AdminAddUserToGroupCommand, AdminRemoveUserFromGroupCommand,
+  ListUserPoolClientsCommand, DescribeUserPoolClientCommand, CreateUserPoolClientCommand, DeleteUserPoolClientCommand,
+  UpdateUserPoolClientCommand, UpdateUserPoolCommand, GetUserPoolMfaConfigCommand, SetUserPoolMfaConfigCommand, AddCustomAttributesCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../../lib/action';
+import { UserError, load, soft } from '../../../lib/errors';
+import { dateTime, plural } from '../../../lib/format';
+import { badge, copyable, esc, mono, raw, stateStatus } from '../../../lib/html';
+import {
+  ATTR_TYPES, AUTH_FLOWS, OAUTH_FLOWS, OAUTH_SCOPES, TOKEN_UNITS, attr, clientToForm, clientUpdateInput, customAttributeFromForm, describeUsernameMode, listAll,
+  passwordPolicyUpdateInput, supported,
+} from '../../../lib/cognito';
+
+const poolId = Astro.params.pool!;
+const ctx = getCtx(Astro.cookies);
+const cognito = aws.cognito(ctx);
+const TABS = ['users', 'groups', 'clients', 'properties'];
+const tab = TABS.includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'users';
+const group = Astro.url.searchParams.get('group') ?? '';
+const editClient = Astro.url.searchParams.get('client') ?? '';
+const here = (t = tab, extra = '') => `${Astro.url.pathname}?tab=${t}${extra}`;
+const sel = (f: FormData, what: string) => { const ids = strs(f, 'id'); if (!ids.length) throw new UserError(`Select at least one ${what}.`); return ids; };
+
+const poolRes = await load(async () => (await cognito.send(new DescribeUserPoolCommand({ UserPoolId: poolId }))).UserPool!);
+if (poolRes.error && /NotFound|does not exist/i.test(poolRes.error)) return new Response(`User pool "${poolId}" does not exist`, { status: 404 });
+const pool = poolRes.data;
+
+const post = await handlePost(Astro, {
+  createUser: async (f) => {
+    const username = required(f, 'username', 'User name');
+    const email = str(f, 'email');
+    const temp = str(f, 'temp');
+    const attrs = email ? [{ Name: 'email', Value: email }, ...(str(f, 'emailVerified') === '1' ? [{ Name: 'email_verified', Value: 'true' }] : [])] : [];
+    await cognito.send(new AdminCreateUserCommand({
+      UserPoolId: poolId, Username: username, TemporaryPassword: temp || undefined, UserAttributes: attrs.length ? attrs : undefined,
+      MessageAction: str(f, 'suppress') === '1' ? 'SUPPRESS' : undefined,
+    }));
+    return { message: `User ${username} created.`, redirect: here('users') };
+  },
+  confirm: async (f) => { const ids = sel(f, 'user'); for (const u of ids) await cognito.send(new AdminConfirmSignUpCommand({ UserPoolId: poolId, Username: u })); return { message: `Confirmed ${plural(ids.length, 'user')}.`, redirect: here('users') }; },
+  enable: async (f) => { const ids = sel(f, 'user'); for (const u of ids) await cognito.send(new AdminEnableUserCommand({ UserPoolId: poolId, Username: u })); return { message: `Enabled ${plural(ids.length, 'user')}.`, redirect: here('users') }; },
+  disable: async (f) => { const ids = sel(f, 'user'); for (const u of ids) await cognito.send(new AdminDisableUserCommand({ UserPoolId: poolId, Username: u })); return { message: `Disabled ${plural(ids.length, 'user')}.`, redirect: here('users') }; },
+  resetPassword: async (f) => {
+    const ids = sel(f, 'user');
+    for (const u of ids) await cognito.send(new AdminResetUserPasswordCommand({ UserPoolId: poolId, Username: u }));
+    return { message: `Password reset requested for ${plural(ids.length, 'user')}.`, redirect: here('users') };
+  },
+  deleteUser: async (f) => { const ids = sel(f, 'user'); for (const u of ids) await cognito.send(new AdminDeleteUserCommand({ UserPoolId: poolId, Username: u })); return { message: `Deleted ${plural(ids.length, 'user')}.`, redirect: here('users') }; },
+  setPassword: async (f) => {
+    const u = required(f, 'username', 'User');
+    await cognito.send(new AdminSetUserPasswordCommand({ UserPoolId: poolId, Username: u, Password: required(f, 'password', 'Password'), Permanent: true }));
+    return { message: 'Permanent password set.', redirect: here('users') };
+  },
+  createGroup: async (f) => {
+    const name = required(f, 'name', 'Group name');
+    await cognito.send(new CreateGroupCommand({ UserPoolId: poolId, GroupName: name, Description: str(f, 'description') || undefined, Precedence: intOf(f, 'precedence', 'Precedence') }));
+    return { message: `Group ${name} created.`, redirect: here('groups') };
+  },
+  deleteGroup: async (f) => { const ids = sel(f, 'group'); for (const g of ids) await cognito.send(new DeleteGroupCommand({ UserPoolId: poolId, GroupName: g })); return { message: `Deleted ${plural(ids.length, 'group')}.`, redirect: here('groups') }; },
+  addMember: async (f) => {
+    const g = required(f, 'group', 'Group');
+    await cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: poolId, GroupName: g, Username: required(f, 'username', 'User') }));
+    return { message: 'User added to group.', redirect: here('groups', `&group=${encodeURIComponent(g)}`) };
+  },
+  removeMember: async (f) => {
+    const g = required(f, 'group', 'Group'); const ids = sel(f, 'member');
+    for (const u of ids) await cognito.send(new AdminRemoveUserFromGroupCommand({ UserPoolId: poolId, GroupName: g, Username: u }));
+    return { message: `Removed ${plural(ids.length, 'user')} from the group.`, redirect: here('groups', `&group=${encodeURIComponent(g)}`) };
+  },
+  createClient: async (f) => {
+    const name = required(f, 'name', 'App client name');
+    const flows = strs(f, 'flows');
+    const r = await cognito.send(new CreateUserPoolClientCommand({
+      UserPoolId: poolId, ClientName: name, GenerateSecret: str(f, 'secret') === '1',
+      ExplicitAuthFlows: flows.length ? (flows as never) : undefined,
+    }));
+    return { message: `App client ${name} created.`, detail: `Client ID: ${r.UserPoolClient?.ClientId}`, redirect: here('clients') };
+  },
+  updateClient: async (f) => {
+    const id = required(f, 'clientId', 'App client');
+    const cur = (await cognito.send(new DescribeUserPoolClientCommand({ UserPoolId: poolId, ClientId: id }))).UserPoolClient;
+    if (!cur) throw new UserError('App client not found.');
+    const input = clientUpdateInput(poolId, cur as Record<string, any>, f);
+    await supported('editing app clients', () => cognito.send(new UpdateUserPoolClientCommand(input as never)));
+    return { message: `App client ${input.ClientName} updated.`, redirect: here('clients') };
+  },
+  updatePolicy: async (f) => {
+    const input = passwordPolicyUpdateInput(poolId, (pool ?? {}) as Record<string, any>, f);
+    await supported('editing the password policy', () => cognito.send(new UpdateUserPoolCommand(input as never)));
+    return { message: 'Password policy updated.', redirect: here('properties') };
+  },
+  setMfa: async (f) => {
+    const mode = str(f, 'mfa');
+    if (!['OFF', 'OPTIONAL', 'ON'].includes(mode)) throw new UserError('Choose an MFA setting.');
+    const totp = str(f, 'totp') === '1';
+    if (mode !== 'OFF' && !totp) throw new UserError('Enable authenticator apps (TOTP) to turn on MFA; SMS MFA is not configurable here.');
+    await supported('multi-factor authentication settings', () => cognito.send(new SetUserPoolMfaConfigCommand({
+      UserPoolId: poolId, MfaConfiguration: mode as never, SoftwareTokenMfaConfiguration: { Enabled: totp },
+    })));
+    return { message: `Multi-factor authentication set to ${mode}.`, redirect: here('properties') };
+  },
+  addAttribute: async (f) => {
+    const a = customAttributeFromForm(f);
+    await supported('adding custom attributes', () => cognito.send(new AddCustomAttributesCommand({ UserPoolId: poolId, CustomAttributes: [a as never] })));
+    return { message: `Custom attribute custom:${a.Name} added.`, redirect: here('properties') };
+  },
+  deleteClient: async (f) => { const ids = sel(f, 'app client'); for (const c of ids) await cognito.send(new DeleteUserPoolClientCommand({ UserPoolId: poolId, ClientId: c })); return { message: `Deleted ${plural(ids.length, 'app client')}.`, redirect: here('clients') }; },
+  deletePool: async () => { await cognito.send(new DeleteUserPoolCommand({ UserPoolId: poolId })); return { message: `Deleted user pool "${pool?.Name ?? poolId}".`, redirect: '/cognito-idp' }; },
+});
+if (post.response) return post.response;
+
+const users = tab === 'users' || (tab === 'groups' && group) ? await load(async () => (await listAll(async (t) => {
+  const r = await cognito.send(new ListUsersCommand({ UserPoolId: poolId, Limit: 60, PaginationToken: t }));
+  return { items: r.Users ?? [], next: r.PaginationToken };
+})).map((u) => ({ id: u.Username!, username: u.Username!, email: attr(u.Attributes, 'email') ?? '', status: u.UserStatus, enabled: u.Enabled !== false, created: u.UserCreateDate }))) : undefined;
+const groups = tab === 'groups' ? await load(async () => (await listAll(async (t) => {
+  const r = await cognito.send(new ListGroupsCommand({ UserPoolId: poolId, Limit: 60, NextToken: t }));
+  return { items: r.Groups ?? [], next: r.NextToken };
+})).map((g) => ({ id: g.GroupName!, name: g.GroupName!, description: g.Description, precedence: g.Precedence, created: g.CreationDate }))) : undefined;
+const members = tab === 'groups' && group ? await load(async () => (await listAll(async (t) => {
+  const r = await cognito.send(new ListUsersInGroupCommand({ UserPoolId: poolId, GroupName: group, Limit: 60, NextToken: t }));
+  return { items: r.Users ?? [], next: r.NextToken };
+})).map((u) => ({ id: u.Username!, username: u.Username!, email: attr(u.Attributes, 'email') ?? '', status: u.UserStatus }))) : undefined;
+const clients = tab === 'clients' ? await load(async () => {
+  const list = await listAll(async (t) => {
+    const r = await cognito.send(new ListUserPoolClientsCommand({ UserPoolId: poolId, MaxResults: 60, NextToken: t }));
+    return { items: r.UserPoolClients ?? [], next: r.NextToken };
+  });
+  return Promise.all(list.map(async (c) => {
+    const d = (await cognito.send(new DescribeUserPoolClientCommand({ UserPoolId: poolId, ClientId: c.ClientId! })).catch(() => undefined))?.UserPoolClient;
+    return { id: c.ClientId!, name: c.ClientName ?? c.ClientId!, secret: d?.ClientSecret, flows: d?.ExplicitAuthFlows ?? [], created: d?.CreationDate, detail: d };
+  }));
+}) : undefined;
+
+const mfa = tab === 'properties' ? await soft(() => cognito.send(new GetUserPoolMfaConfigCommand({ UserPoolId: poolId }))) : undefined;
+const mfaMode = (mfa?.value as any)?.MfaConfiguration ?? pool?.MfaConfiguration ?? 'OFF';
+const mfaTotp = (mfa?.value as any)?.SoftwareTokenMfaConfiguration?.Enabled === true;
+const editing = clients?.data?.find((c) => c.id === editClient);
+const cf: Record<string, string> = post.intent === 'updateClient' ? post.values : clientToForm(editing?.detail);
+const editFlows = new Set<string>(editing?.detail?.ExplicitAuthFlows ?? []);
+const editOauth = new Set<string>(editing?.detail?.AllowedOAuthFlows ?? []);
+const editScopes = editing?.detail?.AllowedOAuthScopes ?? [];
+const v = post.values;
+const poolName = pool?.Name ?? poolId;
+const tabs = [
+  { id: 'users', label: 'Users', count: pool?.EstimatedNumberOfUsers },
+  { id: 'groups', label: 'Groups' },
+  { id: 'clients', label: 'App clients' },
+  { id: 'properties', label: 'Properties' },
+];
+const pp = pool?.Policies?.PasswordPolicy;
+const userOptions = (users?.data ?? []).map((u) => ({ value: u.username, label: u.email ? `${u.email} (${u.username})` : u.username }));
+const memberNames = new Set((members?.data ?? []).map((m) => m.username));
+const secretCell = (s?: string) => (s ? raw(`<details><summary class="cursor-pointer text-link">Show secret</summary><code class="break-all text-[13px]">${esc(s)}</code></details>`) : '-');
+---
+<Console title={poolName} crumbs={[{ label: 'User pools', href: '/cognito-idp' }, { label: poolName }]} error={post.error ?? poolRes.error}>
+  <PageHeader title={poolName} description={`User pool ID: ${poolId}`} />
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'users' && (
+      <div class="space-y-5 p-5">
+        <DataTable title="Users" rows={users?.data ?? []} error={users?.error} bare select="multi" idKey="id" nameKey="username" id="users" pageSize={15}
+          emptyTitle="No users" emptyText="Create a user to get started."
+          columns={[
+            { key: 'username', label: 'User name', mono: true },
+            { key: 'email', label: 'Email address' },
+            { key: 'status', label: 'Confirmation status', render: (r) => stateStatus(r.status, { confirmed: 'success', force_change_password: 'warning', reset_required: 'warning', unconfirmed: 'pending' }) },
+            { key: 'enabled', label: 'Enabled', render: (r) => (r.enabled ? badge('Enabled', 'green') : badge('Disabled', 'grey')) },
+            { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+          ]}>
+          <Fragment slot="actions">
+            <button class="btn btn-normal" name="intent" value="confirm" data-min="1">Confirm</button>
+            <button class="btn btn-normal" name="intent" value="enable" data-min="1">Enable</button>
+            <button class="btn btn-normal" name="intent" value="disable" data-min="1" data-confirm="The selected users will not be able to sign in." data-confirm-title="Disable users?" data-confirm-ok="Disable">Disable</button>
+            <button class="btn btn-normal" name="intent" value="resetPassword" data-min="1" data-confirm="The selected users must reset their password before they can sign in again." data-confirm-title="Reset passwords?" data-confirm-ok="Reset password" data-confirm-style="primary">Reset password</button>
+            <button class="btn btn-normal" name="intent" value="deleteUser" data-min="1" data-confirm="The selected users will be permanently deleted." data-confirm-title="Delete users?" data-confirm-ok="Delete">Delete</button>
+          </Fragment>
+        </DataTable>
+
+        <div class="grid gap-6 border-t border-line pt-5 lg:grid-cols-2">
+          <form method="post">
+            <input type="hidden" name="intent" value="createUser" />
+            <h3 class="card-title mb-3">Create user</h3>
+            <FormField label="User name" for="username" hint="Use an email address when the pool signs users in with email."><input id="username" name="username" class="input" required autocomplete="off" value={v.username ?? ''} /></FormField>
+            <FormField label="Email address" for="email" optional><input id="email" name="email" type="email" class="input" autocomplete="off" value={v.email ?? ''} /></FormField>
+            <FormField label="Temporary password" for="temp" optional hint="Generated automatically when left blank."><input id="temp" name="temp" type="text" class="input" autocomplete="off" value={v.temp ?? ''} /></FormField>
+            <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="emailVerified" value="1" /> Mark email address as verified</label>
+            <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="suppress" value="1" checked /> Don't send an invitation message</label>
+            <button class="btn btn-primary" type="submit">Create user</button>
+          </form>
+          <form method="post">
+            <input type="hidden" name="intent" value="setPassword" />
+            <h3 class="card-title mb-3">Set permanent password</h3>
+            <FormField label="User" for="pwuser"><select id="pwuser" name="username" class="select" required>{userOptions.map((o) => <option value={o.value}>{o.label}</option>)}</select></FormField>
+            <FormField label="New password" for="password"><input id="password" name="password" type="text" class="input" autocomplete="off" required /></FormField>
+            <button class="btn btn-normal" type="submit" disabled={!userOptions.length}>Set password</button>
+          </form>
+        </div>
+      </div>
+    )}
+
+    {tab === 'groups' && (
+      <div class="space-y-5 p-5">
+        <DataTable title="Groups" rows={groups?.data ?? []} error={groups?.error} bare select="multi" idKey="id" nameKey="name" id="groups" pageSize={15}
+          emptyTitle="No groups" emptyText="Groups let you manage permissions for sets of users."
+          columns={[
+            { key: 'name', label: 'Group name', href: (r) => here('groups', `&group=${encodeURIComponent(r.name)}`) },
+            { key: 'description', label: 'Description' },
+            { key: 'precedence', label: 'Precedence' },
+            { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created), sort: (r) => r.created?.getTime() ?? 0 },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteGroup" data-min="1" data-confirm="The selected groups will be deleted. Their members are not deleted." data-confirm-title="Delete groups?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        <form method="post" class="border-t border-line pt-5">
+          <input type="hidden" name="intent" value="createGroup" />
+          <h3 class="card-title mb-3">Create group</h3>
+          <div class="grid gap-4 md:grid-cols-[1fr_1fr_140px_auto] md:items-end">
+            <FormField label="Group name" for="gname" class="!mb-0"><input id="gname" name="name" class="input" required autocomplete="off" value={v.name ?? ''} /></FormField>
+            <FormField label="Description" for="gdesc" optional class="!mb-0"><input id="gdesc" name="description" class="input" autocomplete="off" /></FormField>
+            <FormField label="Precedence" for="gprec" optional class="!mb-0"><input id="gprec" name="precedence" type="number" min="0" class="input" /></FormField>
+            <button class="btn btn-primary" type="submit">Create group</button>
+          </div>
+        </form>
+
+        {group && (
+          <div class="space-y-4 border-t border-line pt-5">
+            <DataTable title={`Members of ${group}`} rows={members?.data ?? []} error={members?.error} bare select="multi" idKey="id" nameKey="username" id="members" pageSize={15}
+              emptyTitle="No members" emptyText="Add users to this group below."
+              columns={[
+                { key: 'username', label: 'User name', mono: true },
+                { key: 'email', label: 'Email address' },
+                { key: 'status', label: 'Status', render: (r) => stateStatus(r.status, { confirmed: 'success', force_change_password: 'warning' }) },
+              ]}>
+              <Fragment slot="actions">
+                <input type="hidden" name="group" value={group} />
+                <button class="btn btn-normal" name="intent" value="removeMember" data-min="1" data-confirm="The selected users will be removed from the group." data-confirm-title="Remove users from group?" data-confirm-ok="Remove">Remove users</button>
+              </Fragment>
+            </DataTable>
+            <form method="post" class="flex flex-wrap items-end gap-3">
+              <input type="hidden" name="intent" value="addMember" />
+              <input type="hidden" name="group" value={group} />
+              <FormField label="Add user to group" for="addm" class="!mb-0 min-w-[280px]"><select id="addm" name="username" class="select" required>{userOptions.filter((o) => !memberNames.has(o.value)).map((o) => <option value={o.value}>{o.label}</option>)}</select></FormField>
+              <button class="btn btn-normal" type="submit">Add user</button>
+            </form>
+          </div>
+        )}
+      </div>
+    )}
+
+    {tab === 'clients' && (
+      <div class="space-y-5 p-5">
+        <DataTable title="App clients" rows={clients?.data ?? []} error={clients?.error} bare select="multi" idKey="id" nameKey="name" id="clients" pageSize={15}
+          emptyTitle="No app clients" emptyText="App clients let your applications call the user pool's APIs."
+          columns={[
+            { key: 'name', label: 'App client name', href: (r) => here('clients', `&client=${encodeURIComponent(r.id)}`) + '#client-edit' },
+            { key: 'id', label: 'Client ID', render: (r) => copyable(r.id) },
+            { key: 'secret', label: 'Client secret', render: (r) => secretCell(r.secret), sort: (r) => (r.secret ? 1 : 0) },
+            { key: 'flows', label: 'Auth flows', render: (r) => (r.flows.length ? r.flows.map((x: string) => badge(x.replace('ALLOW_', ''))) : '-') },
+          ]}>
+          <button slot="actions" class="btn btn-normal" name="intent" value="deleteClient" data-min="1" data-confirm="The selected app clients will be deleted. Applications using them will no longer be able to authenticate." data-confirm-title="Delete app clients?" data-confirm-ok="Delete">Delete</button>
+        </DataTable>
+
+        {editClient && (editing ? (
+          <form method="post" id="client-edit" class="border-t border-line pt-5" data-client-edit>
+            <input type="hidden" name="intent" value="updateClient" />
+            <input type="hidden" name="clientId" value={editClient} />
+            <h3 class="card-title mb-3">Edit app client {editing.name}</h3>
+            <div class="max-w-2xl">
+              <FormField label="App client name" for="ecname"><input id="ecname" name="name" class="input" required autocomplete="off" value={cf.name ?? ''} /></FormField>
+              <p class="field-label">Authentication flows</p>
+              <div class="mb-4 space-y-1.5">
+                {AUTH_FLOWS.map(([val, label]) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="flows" value={val} checked={editFlows.has(val)} /> {label}</label>)}
+              </div>
+              <div class="mb-4 grid gap-3 sm:grid-cols-3">
+                {[['access', 'Access token validity', 'accessUnit'], ['idToken', 'ID token validity', 'idTokenUnit'], ['refresh', 'Refresh token validity', 'refreshUnit']].map(([k, label, u]) => (
+                  <FormField label={label} for={`ec-${k}`} class="!mb-0">
+                    <div class="flex gap-2"><input id={`ec-${k}`} name={k} type="number" min="1" class="input" value={cf[k] ?? ''} /><select name={u} class="select" aria-label={`${label} unit`}>{TOKEN_UNITS.map((x) => <option value={x} selected={cf[u] === x}>{x}</option>)}</select></div>
+                  </FormField>
+                ))}
+              </div>
+              <FormField label="Allowed callback URLs" for="eccb" optional hint="One per line."><textarea id="eccb" name="callbackUrls" class="input" rows="3">{cf.callbackUrls ?? ''}</textarea></FormField>
+              <FormField label="Allowed sign-out URLs" for="eclo" optional hint="One per line."><textarea id="eclo" name="logoutUrls" class="input" rows="2">{cf.logoutUrls ?? ''}</textarea></FormField>
+              <p class="field-label">OAuth 2.0 grant types</p>
+              <div class="mb-4 space-y-1.5">
+                {OAUTH_FLOWS.map(([val, label]) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="oauthFlows" value={val} checked={editOauth.has(val)} /> {label}</label>)}
+              </div>
+              <p class="field-label">OpenID Connect scopes</p>
+              <div class="mb-4 flex flex-wrap gap-x-4 gap-y-1.5">
+                {OAUTH_SCOPES.map((sc) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="scopes" value={sc} checked={editScopes.includes(sc)} /> {sc}</label>)}
+              </div>
+              <FormField label="Custom scopes" for="ecsc" optional hint="Space or comma separated, e.g. api/read."><input id="ecsc" name="customScopes" class="input" autocomplete="off" value={editScopes.filter((sc: string) => !OAUTH_SCOPES.includes(sc)).join(' ')} /></FormField>
+              <div class="flex gap-2"><button class="btn btn-primary" type="submit">Save changes</button><a class="btn btn-normal" href={here('clients')}>Cancel</a></div>
+            </div>
+          </form>
+        ) : <p class="border-t border-line pt-5 text-muted">App client "{editClient}" was not found.</p>)}
+
+        <form method="post" class="border-t border-line pt-5">
+          <input type="hidden" name="intent" value="createClient" />
+          <h3 class="card-title mb-3">Create app client</h3>
+          <div class="max-w-2xl">
+            <FormField label="App client name" for="cname"><input id="cname" name="name" class="input" required autocomplete="off" value={v.name ?? ''} /></FormField>
+            <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="secret" value="1" /> Generate a client secret</label>
+            <p class="field-label">Authentication flows</p>
+            <div class="mb-4 space-y-1.5">
+              {AUTH_FLOWS.map(([val, label]) => <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="flows" value={val} checked={val !== 'ALLOW_CUSTOM_AUTH' && val !== 'ALLOW_ADMIN_USER_PASSWORD_AUTH'} /> {label}</label>)}
+            </div>
+            <button class="btn btn-primary" type="submit">Create app client</button>
+          </div>
+        </form>
+      </div>
+    )}
+
+    {tab === 'properties' && pool && (
+      <div class="space-y-5 p-5">
+        <Details items={[
+          { label: 'User pool name', value: pool.Name }, { label: 'User pool ID', value: copyable(pool.Id!) }, { label: 'Status', value: pool.Status ? stateStatus(pool.Status) : stateStatus('Active') },
+          { label: 'ARN', value: pool.Arn ? copyable(pool.Arn) : undefined, wide: true },
+          { label: 'Sign-in identifier', value: describeUsernameMode(pool) }, { label: 'Auto-verified attributes', value: (pool.AutoVerifiedAttributes ?? []).join(', ') || 'None' },
+          { label: 'Multi-factor authentication', value: pool.MfaConfiguration ?? 'OFF' }, { label: 'Estimated users', value: pool.EstimatedNumberOfUsers ?? 0 },
+          { label: 'Created', value: dateTime(pool.CreationDate) }, { label: 'Last modified', value: dateTime(pool.LastModifiedDate) },
+        ]} />
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Password policy</h3>
+          <Details items={[
+            { label: 'Minimum length', value: pp?.MinimumLength }, { label: 'Temporary password validity', value: pp?.TemporaryPasswordValidityDays !== undefined ? `${pp.TemporaryPasswordValidityDays} days` : undefined },
+            { label: 'Requires', value: [pp?.RequireLowercase && 'lowercase', pp?.RequireUppercase && 'uppercase', pp?.RequireNumbers && 'numbers', pp?.RequireSymbols && 'special characters'].filter(Boolean).join(', ') || 'Nothing' },
+          ]} />
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Edit password policy</h3>
+          <form method="post" class="max-w-2xl" data-policy-form>
+            <input type="hidden" name="intent" value="updatePolicy" />
+            <div class="grid gap-3 sm:grid-cols-2">
+              <FormField label="Minimum length" for="pp-min"><input id="pp-min" name="minLength" type="number" min="6" max="99" class="input" required value={v.minLength ?? String(pp?.MinimumLength ?? 8)} /></FormField>
+              <FormField label="Temporary password validity (days)" for="pp-days"><input id="pp-days" name="tempDays" type="number" min="0" max="365" class="input" value={v.tempDays ?? String(pp?.TemporaryPasswordValidityDays ?? 7)} /></FormField>
+            </div>
+            <div class="mb-4 grid gap-1.5 sm:grid-cols-2">
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="lower" value="1" checked={post.intent === 'updatePolicy' ? v.lower === '1' : pp?.RequireLowercase} /> Require lowercase letters</label>
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="upper" value="1" checked={post.intent === 'updatePolicy' ? v.upper === '1' : pp?.RequireUppercase} /> Require uppercase letters</label>
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="numbers" value="1" checked={post.intent === 'updatePolicy' ? v.numbers === '1' : pp?.RequireNumbers} /> Require numbers</label>
+              <label class="flex items-center gap-2"><input type="checkbox" class="checkbox" name="symbols" value="1" checked={post.intent === 'updatePolicy' ? v.symbols === '1' : pp?.RequireSymbols} /> Require special characters</label>
+            </div>
+            <button class="btn btn-normal" type="submit">Save password policy</button>
+          </form>
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Multi-factor authentication</h3>
+          {mfa?.error && <p class="mb-3 text-[13px] text-muted">Couldn't read the MFA configuration: {mfa.error}</p>}
+          <form method="post" class="max-w-2xl" data-mfa-form>
+            <input type="hidden" name="intent" value="setMfa" />
+            <FormField label="MFA enforcement" for="mfa-mode"><select id="mfa-mode" name="mfa" class="select">{[['OFF', 'No MFA'], ['OPTIONAL', 'Optional MFA'], ['ON', 'Require MFA']].map(([val, label]) => <option value={val} selected={mfaMode === val}>{label}</option>)}</select></FormField>
+            <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="totp" value="1" checked={mfaTotp} /> Authenticator apps (TOTP)</label>
+            <button class="btn btn-normal" type="submit">Save MFA settings</button>
+          </form>
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3">Add custom attribute</h3>
+          <form method="post" class="max-w-2xl" data-attr-form>
+            <input type="hidden" name="intent" value="addAttribute" />
+            <div class="grid gap-3 sm:grid-cols-2">
+              <FormField label="Name" for="at-name" hint="Saved as custom:<name>. Attributes cannot be removed or renamed later."><input id="at-name" name="attrName" class="input" required autocomplete="off" value={v.attrName ?? ''} /></FormField>
+              <FormField label="Type" for="at-type"><select id="at-type" name="attrType" class="select">{ATTR_TYPES.map((t) => <option value={t} selected={v.attrType === t}>{t}</option>)}</select></FormField>
+              <FormField label="Minimum" for="at-min" optional hint="String length or number value."><input id="at-min" name="attrMin" class="input" autocomplete="off" value={v.attrMin ?? ''} /></FormField>
+              <FormField label="Maximum" for="at-max" optional><input id="at-max" name="attrMax" class="input" autocomplete="off" value={v.attrMax ?? ''} /></FormField>
+            </div>
+            <label class="mb-4 flex items-center gap-2"><input type="checkbox" class="checkbox" name="attrMutable" value="1" checked /> Mutable (users and admins can change the value)</label>
+            <button class="btn btn-normal" type="submit">Add attribute</button>
+          </form>
+        </div>
+        <div class="border-t border-line pt-5">
+          <DataTable title="Attributes" bare filter={false} refresh={false} id="schema" pageSize={50} rows={(pool.SchemaAttributes ?? []).map((s) => ({ id: s.Name, name: s.Name, type: s.AttributeDataType, required: s.Required ? 'Yes' : 'No', mutable: s.Mutable ? 'Yes' : 'No' }))}
+            columns={[{ key: 'name', label: 'Name', render: (r) => mono(r.name) }, { key: 'type', label: 'Type' }, { key: 'required', label: 'Required' }, { key: 'mutable', label: 'Mutable' }]} />
+        </div>
+        <div class="border-t border-line pt-5">
+          <h3 class="card-title mb-3 text-danger">Danger zone</h3>
+          <form method="post"><input type="hidden" name="intent" value="deletePool" />
+            <button class="btn btn-danger" data-confirm="The user pool, its users, groups and app clients will be permanently deleted." data-confirm-title="Delete user pool?" data-confirm-name={poolName} data-confirm-type="delete" data-confirm-ok="Delete user pool"><Icon name="trash-2" size={16} /> Delete user pool</button></form>
+        </div>
+      </div>
+    )}
+  </div>
+</Console>

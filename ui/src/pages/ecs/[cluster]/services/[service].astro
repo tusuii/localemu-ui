@@ -1,0 +1,93 @@
+---
+import Console from '../../../../layouts/Console.astro';
+import PageHeader from '../../../../components/PageHeader.astro';
+import Tabs from '../../../../components/Tabs.astro';
+import Details from '../../../../components/Details.astro';
+import DataTable from '../../../../components/DataTable.astro';
+import TagsPanel from '../../../../components/TagsPanel.astro';
+import { DescribeServicesCommand, ListTagsForResourceCommand, TagResourceCommand, UntagResourceCommand } from '@aws-sdk/client-ecs';
+import { aws } from '../../../../lib/aws';
+import { getCtx } from '../../../../lib/context';
+import { handlePost, required, str, strs } from '../../../../lib/action';
+import { bulk } from '../../../../lib/bulk';
+import { load } from '../../../../lib/errors';
+import { dateTime } from '../../../../lib/format';
+import { copyable, stateStatus } from '../../../../lib/html';
+import { ecsTagRows, tdShort } from '../../../../lib/ecs';
+import { guard } from '../../../../lib/unsupported';
+
+const cluster = decodeURIComponent(Astro.params.cluster!);
+const svcName = decodeURIComponent(Astro.params.service!);
+const ctx = getCtx(Astro.cookies);
+const ecs = aws.ecs(ctx);
+const tabId = Astro.url.searchParams.get('tab') ?? '';
+const tab = ['deployments', 'events', 'tags'].includes(tabId) ? tabId : 'deployments';
+const to = (t: string) => `${Astro.url.pathname}?tab=${t}`;
+
+const res = await load(async () => {
+  const r = await ecs.send(new DescribeServicesCommand({ cluster, services: [svcName] }));
+  return { svc: r.services?.[0], failure: r.failures?.[0] };
+});
+const svc = res.data?.svc;
+if (!res.error && (!svc || svc.status === 'INACTIVE')) return new Response(`Service "${svcName}" does not exist in cluster "${cluster}"`, { status: 404 });
+const arn = svc?.serviceArn ?? `arn:aws:ecs:${ctx.region}:${ctx.account}:service/${cluster}/${svcName}`;
+
+const post = await handlePost(Astro, {
+  addTag: async (f) => {
+    await guard('TagResource', () => ecs.send(new TagResourceCommand({ resourceArn: arn, tags: [{ key: required(f, 'key', 'Tag key'), value: str(f, 'value') }] })));
+    return { message: 'Tag added.', redirect: to('tags') };
+  },
+  removeTag: async (f) => {
+    const r = await bulk(strs(f, 'id'), { verb: 'Removed', noun: 'tag' }, (k) => guard('UntagResource', () => ecs.send(new UntagResourceCommand({ resourceArn: arn, tagKeys: [k] }))));
+    return { ...r, redirect: to('tags') };
+  },
+});
+if (post.response) return post.response;
+
+const tags = tab === 'tags' ? await load(async () => ecsTagRows((await guard('ListTagsForResource', () => ecs.send(new ListTagsForResourceCommand({ resourceArn: arn })))).tags)) : null;
+const deployments = (svc?.deployments ?? []).map((d) => ({
+  id: d.id ?? '', status: d.status, rollout: d.rolloutState, td: tdShort(d.taskDefinition), desired: d.desiredCount ?? 0, running: d.runningCount ?? 0, pending: d.pendingCount ?? 0,
+  failed: d.failedTasks ?? 0, created: d.createdAt, updated: d.updatedAt,
+}));
+const events = (svc?.events ?? []).map((e, i) => ({ id: e.id ?? String(i), when: e.createdAt, message: e.message }));
+const tabs = [{ id: 'deployments', label: 'Deployments', count: deployments.length }, { id: 'events', label: 'Events', count: events.length }, { id: 'tags', label: 'Tags' }];
+---
+<Console title={svcName} crumbs={[{ label: 'Clusters', href: '/ecs' }, { label: cluster, href: `/ecs/${encodeURIComponent(cluster)}` }, { label: svcName }]} error={post.error ?? res.error ?? res.data?.failure?.reason}>
+  <PageHeader title={svcName} badge={svc?.status} />
+  {svc && (
+    <div class="mb-4 grid gap-3 sm:grid-cols-4">
+      <div class="card p-4"><div class="kv-label">Status</div><div class="text-[20px] font-bold leading-9">{stateStatus(svc.status)}</div></div>
+      <div class="card p-4"><div class="kv-label">Desired</div><div class="text-[28px] font-bold leading-9">{svc.desiredCount ?? 0}</div></div>
+      <div class="card p-4"><div class="kv-label">Running</div><div class="text-[28px] font-bold leading-9">{svc.runningCount ?? 0}</div></div>
+      <div class="card p-4"><div class="kv-label">Pending</div><div class="text-[28px] font-bold leading-9">{svc.pendingCount ?? 0}</div></div>
+    </div>
+  )}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    {tab === 'deployments' && svc && (
+      <div class="space-y-6 p-5">
+        <Details items={[
+          { label: 'Service name', value: svcName }, { label: 'Cluster', value: cluster }, { label: 'Task definition', value: tdShort(svc.taskDefinition) },
+          { label: 'Launch type', value: svc.launchType }, { label: 'Scheduling strategy', value: svc.schedulingStrategy }, { label: 'Created', value: dateTime(svc.createdAt) },
+          { label: 'ARN', value: copyable(arn), wide: true },
+        ]} />
+        <DataTable title="Deployments" bare id="deployments" nameKey="id" rows={deployments} pageSize={10} filter={false}
+          emptyTitle="No deployments" emptyText="This service has no deployments."
+          columns={[
+            { key: 'id', label: 'Deployment ID', mono: true }, { key: 'status', label: 'Status', render: (r) => stateStatus(r.status, { primary: 'success', active: 'progress', inactive: 'stopped' }) },
+            { key: 'rollout', label: 'Rollout state' }, { key: 'td', label: 'Task definition', mono: true },
+            { key: 'desired', label: 'Desired' }, { key: 'running', label: 'Running' }, { key: 'pending', label: 'Pending' }, { key: 'failed', label: 'Failed' },
+            { key: 'created', label: 'Created', nowrap: true, render: (r) => dateTime(r.created) },
+          ]} />
+      </div>
+    )}
+    {tab === 'events' && (
+      <div class="p-5">
+        <DataTable title="Service events" bare id="events" nameKey="id" rows={events} pageSize={25} filter="Search events"
+          emptyTitle="No events" emptyText="Service events appear here when the scheduler starts, stops or places tasks."
+          columns={[{ key: 'when', label: 'Time', nowrap: true, render: (r) => dateTime(r.when), sort: (r) => r.when?.getTime() ?? 0 }, { key: 'message', label: 'Message' }, { key: 'id', label: 'Event ID', mono: true }]} />
+      </div>
+    )}
+    {tab === 'tags' && <div class="p-5"><TagsPanel tags={tags?.data ?? []} error={tags?.error} /></div>}
+  </div>
+</Console>

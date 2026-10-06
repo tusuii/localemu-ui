@@ -1,0 +1,94 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Details from '../../../components/Details.astro';
+import FormField from '../../../components/FormField.astro';
+import Icon from '../../../components/Icon.astro';
+import { GetCrawlerCommand, GetDatabasesCommand, UpdateCrawlerCommand, StartCrawlerCommand, DeleteCrawlerCommand, StopCrawlerScheduleCommand } from '@aws-sdk/client-glue';
+import { ListRolesCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str } from '../../../lib/action';
+import { UserError, load, soft } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { copyable, raw, stateStatus } from '../../../lib/html';
+import { guard } from '../../../lib/unsupported';
+import { isNoSuch, roleName } from '../../../lib/glue';
+
+const name = decodeURIComponent(Astro.params.name!);
+const ctx = getCtx(Astro.cookies);
+const glue = aws.glue(ctx);
+
+const post = await handlePost(Astro, {
+  update: async (f) => {
+    const paths = str(f, 'paths').split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!paths.length) throw new UserError('Enter at least one S3 path.');
+    const bad = paths.find((x) => !x.startsWith('s3://'));
+    if (bad) throw new UserError(`"${bad}" is not an S3 path (it must start with s3://).`);
+    const schedule = str(f, 'schedule');
+    const cur = (await glue.send(new GetCrawlerCommand({ Name: name }))).Crawler!;
+    // Keep non-S3 targets (JDBC, DynamoDB...) as they are; only the S3 list is edited here.
+    const old = cur.Targets?.S3Targets ?? [];
+    const S3Targets = paths.map((Path) => old.find((t) => t.Path === Path) ?? { Path });
+    await guard('UpdateCrawler', () => glue.send(new UpdateCrawlerCommand({
+      Name: name, Role: required(f, 'role', 'IAM role'), DatabaseName: required(f, 'db', 'Target database'), Description: str(f, 'description'),
+      TablePrefix: str(f, 'prefix'), Targets: { ...(cur.Targets ?? {}), S3Targets }, Schedule: schedule || undefined,
+    })));
+    if (!schedule && cur.Schedule?.ScheduleExpression) await guard('StopCrawlerSchedule', () => glue.send(new StopCrawlerScheduleCommand({ CrawlerName: name })));
+    return { message: `Crawler ${name} updated.`, redirect: Astro.url.pathname };
+  },
+  run: async () => { await glue.send(new StartCrawlerCommand({ Name: name })); return 'Crawler started.'; },
+  delete: async () => { await glue.send(new DeleteCrawlerCommand({ Name: name })); return { message: `Deleted crawler "${name}".`, redirect: '/glue/crawlers' }; },
+});
+if (post.response) return post.response;
+
+const res = await load(async () => (await glue.send(new GetCrawlerCommand({ Name: name }))).Crawler!);
+if (isNoSuch(res.error) || (!res.error && !res.data?.Name)) return new Response(`Crawler "${name}" does not exist`, { status: 404 });
+const c = res.data;
+const dbs = await soft(async () => ((await glue.send(new GetDatabasesCommand({}))).DatabaseList ?? []).map((d) => d.Name!).sort());
+const roles = await soft(async () => ((await aws.iam(ctx).send(new ListRolesCommand({}))).Roles ?? []).map((r) => r.Arn!));
+const s3 = (c?.Targets?.S3Targets ?? []).map((t) => t.Path).filter(Boolean);
+const other = (c?.Targets?.JdbcTargets?.length ?? 0) + (c?.Targets?.DynamoDBTargets?.length ?? 0) + (c?.Targets?.CatalogTargets?.length ?? 0);
+const v = post.values;
+const dbList = [...new Set([c?.DatabaseName, ...(dbs.value ?? [])].filter(Boolean) as string[])];
+---
+<Console title={name} crumbs={[{ label: 'Crawlers', href: '/glue/crawlers' }, { label: name }]} error={post.error ?? res.error}>
+  <PageHeader title={name} badge={c?.State}>
+    <form method="post"><input type="hidden" name="intent" value="run" /><button class="btn btn-primary" type="submit"><Icon name="play" size={16} /> Run crawler</button></form>
+  </PageHeader>
+  {c && (
+    <div class="space-y-4">
+      <Card title="Crawler properties">
+        <Details items={[
+          { label: 'Name', value: c.Name }, { label: 'State', value: stateStatus(c.State, { ready: 'success', running: 'progress', stopping: 'progress' }) },
+          { label: 'Database', value: c.DatabaseName }, { label: 'IAM role', value: roleName(c.Role) },
+          { label: 'S3 targets', value: s3.length ? raw(s3.map((x) => copyable(x!).v).join(' ')) : undefined, wide: true },
+          { label: 'Schedule', value: c.Schedule?.ScheduleExpression ?? 'On demand' }, { label: 'Table prefix', value: c.TablePrefix },
+          { label: 'Description', value: c.Description }, { label: 'Created', value: dateTime(c.CreationTime) }, { label: 'Last updated', value: dateTime(c.LastUpdated) },
+        ]} />
+      </Card>
+      <Card title="Edit crawler" description={other ? `${other} non-S3 target(s) are kept unchanged.` : 'Changes the data sources, schedule, output and role.'}>
+        <form method="post" class="max-w-3xl space-y-1">
+          <input type="hidden" name="intent" value="update" />
+          <FormField label="Description" for="e-description" optional><input id="e-description" name="description" class="input" value={v.description ?? c.Description ?? ''} /></FormField>
+          <FormField label="S3 paths" for="e-paths" hint="One data source per line, starting with s3://."><textarea id="e-paths" name="paths" class="textarea code-area" rows="3" required>{v.paths ?? s3.join('\n')}</textarea></FormField>
+          <FormField label="IAM role" for="e-role">
+            <input id="e-role" name="role" class="input" list="roles" required autocomplete="off" value={v.role ?? c.Role ?? ''} />
+            <datalist id="roles">{(roles.value ?? []).map((r) => <option value={r} />)}</datalist>
+          </FormField>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <FormField label="Target database" for="e-db"><select id="e-db" name="db" class="select">{dbList.map((d) => <option value={d} selected={(v.db ?? c.DatabaseName) === d}>{d}</option>)}</select></FormField>
+            <FormField label="Table name prefix" for="e-prefix" optional><input id="e-prefix" name="prefix" class="input" value={v.prefix ?? c.TablePrefix ?? ''} /></FormField>
+          </div>
+          <FormField label="Schedule (cron expression)" for="e-schedule" optional hint="Leave blank to run on demand. Example: cron(0 12 * * ? *)"><input id="e-schedule" name="schedule" class="input" value={v.schedule ?? c.Schedule?.ScheduleExpression ?? ''} /></FormField>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </form>
+      </Card>
+      <Card title="Delete crawler">
+        <form method="post"><input type="hidden" name="intent" value="delete" />
+          <button class="btn btn-danger" data-confirm="The crawler will be permanently deleted. Tables it created are kept." data-confirm-title="Delete crawler?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete crawler"><Icon name="trash-2" size={16} /> Delete crawler</button></form>
+      </Card>
+    </div>
+  )}
+</Console>

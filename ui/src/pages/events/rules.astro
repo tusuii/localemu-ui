@@ -1,0 +1,73 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { ListRulesCommand, ListEventBusesCommand, PutRuleCommand, DeleteRuleCommand, EnableRuleCommand, DisableRuleCommand, ListTargetsByRuleCommand, RemoveTargetsCommand } from '@aws-sdk/client-eventbridge';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, jsonOf, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { plural } from '../../lib/format';
+import { badge, stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const eb = aws.events(ctx);
+const bus = Astro.url.searchParams.get('bus') ?? 'default';
+const sel = (f: FormData) => { const x = strs(f, 'id'); if (!x.length) throw new UserError('Select at least one rule.'); return x; };
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'Rule name');
+    const kind = str(f, 'kind');
+    const schedule = str(f, 'schedule');
+    if (kind === 'schedule' && !schedule) throw new UserError('Enter a schedule expression, e.g. rate(5 minutes).');
+    if (kind === 'pattern') jsonOf(f, 'pattern', 'Event pattern');
+    await eb.send(new PutRuleCommand({ Name: name, EventBusName: bus, State: 'ENABLED', Description: str(f, 'description') || undefined, ...(kind === 'schedule' ? { ScheduleExpression: schedule } : { EventPattern: str(f, 'pattern') }) }));
+    return { message: `Rule ${name} created.`, redirect: `/events/rule?bus=${encodeURIComponent(bus)}&name=${encodeURIComponent(name)}` };
+  },
+  enable: async (f) => bulk(sel(f), { verb: 'Enabled', noun: 'rule' }, (r) => eb.send(new EnableRuleCommand({ Name: r, EventBusName: bus }))),
+  disable: async (f) => bulk(sel(f), { verb: 'Disabled', noun: 'rule' }, (r) => eb.send(new DisableRuleCommand({ Name: r, EventBusName: bus }))),
+  delete: async (f) => {
+    return bulk(sel(f), { verb: 'Deleted', noun: 'rule' }, async (r) => {
+      const t = (await eb.send(new ListTargetsByRuleCommand({ Rule: r, EventBusName: bus }))).Targets ?? [];
+      if (t.length) await eb.send(new RemoveTargetsCommand({ Rule: r, EventBusName: bus, Ids: t.map((x) => x.Id!), Force: true }));
+      await eb.send(new DeleteRuleCommand({ Name: r, EventBusName: bus, Force: true }));
+    });
+  },
+});
+if (post.response) return post.response;
+const [buses, res] = await Promise.all([
+  load(async () => ((await eb.send(new ListEventBusesCommand({}))).EventBuses ?? []).map((b) => b.Name!)),
+  load(async () => ((await eb.send(new ListRulesCommand({ EventBusName: bus }))).Rules ?? []).map((r) => ({ id: r.Name, name: r.Name, state: r.State, schedule: r.ScheduleExpression, pattern: r.EventPattern, description: r.Description }))),
+]);
+const v = post.values;
+---
+<Console title="Rules" crumbs={[{ label: 'Rules' }]} error={post.error}>
+  <PageHeader title="Rules" description="Rules match incoming events and send them to targets.">
+    <form method="get" class="flex items-center gap-2" data-no-busy><label class="text-muted" for="bus">Event bus</label>
+      <select id="bus" name="bus" class="select !w-56" onchange="this.form.submit()">{(buses.data ?? [bus]).map((b) => <option value={b} selected={b === bus}>{b}</option>)}</select></form>
+  </PageHeader>
+  <DataTable title="Rules" rows={res.data ?? []} error={res.error} select="multi" nameKey="name" pageSize={25} filter="Find rules" emptyTitle="No rules" emptyText={`The ${bus} event bus has no rules.`}
+    columns={[
+      { key: 'name', label: 'Name', href: (r) => `/events/rule?bus=${encodeURIComponent(bus)}&name=${encodeURIComponent(r.name)}` }, { key: 'state', label: 'Status', render: (r) => stateStatus(r.state, { enabled: 'success', disabled: 'stopped' }) },
+      { key: 'type', label: 'Type', render: (r) => badge(r.schedule ? 'Schedule' : 'Event pattern', r.schedule ? 'blue' : 'soft'), sort: (r) => (r.schedule ? 1 : 0) },
+      { key: 'schedule', label: 'Schedule / pattern', render: (r) => r.schedule ?? (r.pattern ? r.pattern.replace(/\s+/g, ' ').slice(0, 80) : '-'), mono: true }, { key: 'description', label: 'Description' },
+    ]}>
+    <Fragment slot="actions">
+      <button class="btn btn-normal" name="intent" value="enable" data-min="1">Enable</button>
+      <button class="btn btn-normal" name="intent" value="disable" data-min="1">Disable</button>
+      <button class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected rules and their targets will be deleted." data-confirm-title="Delete rules?" data-confirm-ok="Delete">Delete</button>
+    </Fragment>
+  </DataTable>
+  <Card class="mt-4" title="Create rule" description={`On event bus "${bus}".`}>
+    <form data-cli="aws events put-rule --name {name} {bus|--event-bus-name|!default} {description|--description} {pattern|--event-pattern|?kind=pattern} {schedule|--schedule-expression|?kind=schedule}" method="post" class="space-y-1"><input type="hidden" name="intent" value="create" />
+      <div class="grid gap-4 sm:grid-cols-2"><FormField label="Name" for="name"><input id="name" name="name" class="input" required autocomplete="off" value={v.name ?? ''} /></FormField><FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField></div>
+      <div class="mb-3 flex gap-6"><label class="flex items-center gap-2"><input type="radio" class="radio" name="kind" value="pattern" checked={(v.kind ?? 'pattern') === 'pattern'} /> Event pattern</label><label class="flex items-center gap-2"><input type="radio" class="radio" name="kind" value="schedule" checked={v.kind === 'schedule'} /> Schedule</label></div>
+      <div data-show-when="kind:pattern"><textarea name="pattern" class="textarea code-area" rows="7" data-code data-json spellcheck="false">{v.pattern ?? '{\n  "source": ["my.app"],\n  "detail-type": ["order.created"]\n}'}</textarea></div>
+      <div data-show-when="kind:schedule" hidden><input name="schedule" class="input font-mono max-w-md" placeholder="rate(5 minutes)  or  cron(0 12 * * ? *)" value={v.schedule ?? ''} /></div>
+      <div class="pt-3"><button class="btn btn-primary" type="submit">Create rule</button></div>
+    </form>
+  </Card>
+</Console>

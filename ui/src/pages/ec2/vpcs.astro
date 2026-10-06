@@ -1,0 +1,46 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import DataTable from '../../components/DataTable.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { DescribeVpcsCommand, CreateVpcCommand, DeleteVpcCommand } from '@aws-sdk/client-ec2';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, required, str, strs } from '../../lib/action';
+import { bulk } from '../../lib/bulk';
+import { UserError, load } from '../../lib/errors';
+import { plural } from '../../lib/format';
+import { nameOf } from '../../lib/ec2';
+import { badge, stateStatus } from '../../lib/html';
+
+const ctx = getCtx(Astro.cookies);
+const ec2 = aws.ec2(ctx);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const r = await ec2.send(new CreateVpcCommand({ CidrBlock: required(f, 'cidr', 'IPv4 CIDR'), TagSpecifications: str(f, 'name') ? [{ ResourceType: 'vpc', Tags: [{ Key: 'Name', Value: str(f, 'name') }] }] : undefined }));
+    return `Created VPC ${r.Vpc?.VpcId}.`;
+  },
+  delete: async (f) => bulk(strs(f, 'id'), { verb: 'Deleted', noun: 'VPC' }, (v) => ec2.send(new DeleteVpcCommand({ VpcId: v }))),
+});
+if (post.response) return post.response;
+const res = await load(async () => ((await ec2.send(new DescribeVpcsCommand({}))).Vpcs ?? []).map((v) => ({ id: v.VpcId, name: nameOf(v.Tags) || '-', state: v.State, cidr: v.CidrBlock, dhcp: v.DhcpOptionsId, isDefault: v.IsDefault, tenancy: v.InstanceTenancy })));
+const v = post.values;
+---
+<Console title="Your VPCs" crumbs={[{ label: 'Your VPCs' }]} error={post.error}>
+  <PageHeader title="Your VPCs" />
+  <DataTable title="VPCs" rows={res.data ?? []} error={res.error} select="multi" idKey="id" nameKey="id" pageSize={25} filter="Filter VPCs" emptyTitle="No VPCs" emptyText="Create a VPC below."
+    columns={[
+      { key: 'name', label: 'Name' }, { key: 'id', label: 'VPC ID', mono: true }, { key: 'state', label: 'State', render: (r) => stateStatus(r.state) }, { key: 'cidr', label: 'IPv4 CIDR', mono: true },
+      { key: 'dhcp', label: 'DHCP option set', mono: true }, { key: 'tenancy', label: 'Tenancy' }, { key: 'isDefault', label: 'Default VPC', render: (r) => (r.isDefault ? badge('Yes', 'blue') : 'No'), sort: (r) => (r.isDefault ? 1 : 0) },
+    ]}>
+    <button slot="actions" class="btn btn-normal" name="intent" value="delete" data-min="1" data-confirm="The selected VPCs will be deleted. VPCs with resources inside can't be deleted." data-confirm-title="Delete VPCs?" data-confirm-ok="Delete">Delete</button>
+  </DataTable>
+  <Card class="mt-4" title="Create VPC">
+    <form method="post" class="grid items-end gap-4 sm:grid-cols-3"><input type="hidden" name="intent" value="create" />
+      <FormField label="Name" for="name" optional class="!mb-0"><input id="name" name="name" class="input" value={v.name ?? ''} /></FormField>
+      <FormField label="IPv4 CIDR block" for="cidr" class="!mb-0"><input id="cidr" name="cidr" class="input font-mono" required placeholder="10.0.0.0/16" value={v.cidr ?? ''} /></FormField>
+      <button class="btn btn-primary" type="submit">Create VPC</button>
+    </form>
+  </Card>
+</Console>

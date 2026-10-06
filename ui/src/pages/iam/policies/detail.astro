@@ -1,0 +1,80 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import Flash from '../../../components/Flash.astro';
+import JsonView from '../../../components/JsonView.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  GetPolicyCommand, GetPolicyVersionCommand, ListPolicyVersionsCommand, ListEntitiesForPolicyCommand, DeletePolicyCommand,
+  DeletePolicyVersionCommand, CreatePolicyVersionCommand, DetachUserPolicyCommand, DetachRolePolicyCommand, DetachGroupPolicyCommand,
+} from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, jsonOf, str } from '../../../lib/action';
+import { load } from '../../../lib/errors';
+import { dateTime } from '../../../lib/format';
+import { badge, copyable } from '../../../lib/html';
+import { decodeDoc } from '../../../lib/iam';
+
+const arn = Astro.url.searchParams.get('arn');
+if (!arn) return Astro.redirect('/iam/policies');
+const ctx = getCtx(Astro.cookies);
+const iam = aws.iam(ctx);
+const isAws = arn.includes(':aws:policy/');
+const tab = ['document', 'entities', 'versions'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'document';
+const here = (t: string) => `${Astro.url.pathname}?arn=${encodeURIComponent(arn)}&tab=${t}`;
+
+const post = await handlePost(Astro, {
+  newVersion: async (f) => { jsonOf(f, 'document', 'Policy document'); await iam.send(new CreatePolicyVersionCommand({ PolicyArn: arn, PolicyDocument: str(f, 'document'), SetAsDefault: true })); return { message: 'New policy version saved as default.', redirect: here('document') }; },
+  delete: async () => {
+    const e = await iam.send(new ListEntitiesForPolicyCommand({ PolicyArn: arn }));
+    for (const u of e.PolicyUsers ?? []) await iam.send(new DetachUserPolicyCommand({ UserName: u.UserName!, PolicyArn: arn }));
+    for (const r of e.PolicyRoles ?? []) await iam.send(new DetachRolePolicyCommand({ RoleName: r.RoleName!, PolicyArn: arn }));
+    for (const g of e.PolicyGroups ?? []) await iam.send(new DetachGroupPolicyCommand({ GroupName: g.GroupName!, PolicyArn: arn }));
+    for (const v of (await iam.send(new ListPolicyVersionsCommand({ PolicyArn: arn }))).Versions ?? []) if (!v.IsDefaultVersion) await iam.send(new DeletePolicyVersionCommand({ PolicyArn: arn, VersionId: v.VersionId! }));
+    await iam.send(new DeletePolicyCommand({ PolicyArn: arn }));
+    return { message: 'Policy deleted.', redirect: '/iam/policies' };
+  },
+});
+if (post.response) return post.response;
+
+const p = await load(async () => (await iam.send(new GetPolicyCommand({ PolicyArn: arn }))).Policy!);
+if (p.error && /NoSuchEntity|not found|cannot be found/i.test(p.error)) return new Response('Policy does not exist', { status: 404 });
+const doc = p.data ? await load(async () => decodeDoc((await iam.send(new GetPolicyVersionCommand({ PolicyArn: arn, VersionId: p.data!.DefaultVersionId! }))).PolicyVersion?.Document)) : undefined;
+const entities = tab === 'entities' ? await load(() => iam.send(new ListEntitiesForPolicyCommand({ PolicyArn: arn }))) : undefined;
+const versions = tab === 'versions' ? await load(async () => (await iam.send(new ListPolicyVersionsCommand({ PolicyArn: arn }))).Versions ?? []) : undefined;
+const tabs = [{ id: 'document', label: 'Policy document' }, { id: 'entities', label: 'Entities attached' }, { id: 'versions', label: 'Versions' }];
+---
+<Console title={p.data?.PolicyName ?? 'Policy'} crumbs={[{ label: 'Policies', href: '/iam/policies' }, { label: p.data?.PolicyName ?? arn }]} error={post.error}>
+  <PageHeader title={p.data?.PolicyName ?? 'Policy'} badge={isAws ? 'AWS managed' : 'Customer managed'}>
+    {!isAws && <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The policy is detached from every user, role and group, then deleted." data-confirm-title="Delete policy?" data-confirm-name={p.data?.PolicyName} data-confirm-type="delete" data-confirm-ok="Delete policy"><Icon name="trash-2" size={16} /> Delete</button></form>}
+  </PageHeader>
+  {p.error && <Flash type="error" text="Couldn't load the policy" detail={p.error} dismissible={false} />}
+  {p.data && <Card class="mb-4" title="Summary"><Details items={[{ label: 'ARN', value: copyable(arn), wide: true }, { label: 'Created', value: dateTime(p.data.CreateDate) }, { label: 'Last updated', value: dateTime(p.data.UpdateDate) }, { label: 'Attached entities', value: String(p.data.AttachmentCount ?? 0) }, { label: 'Description', value: p.data.Description }]} /></Card>}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    <div class="p-5">
+      {tab === 'document' && (doc?.error ? <Flash type="error" text="Couldn't load the document" detail={doc.error} dismissible={false} /> : isAws ? <JsonView value={doc?.data} maxHeight="560px" /> : (
+        <form method="post" class="space-y-3"><input type="hidden" name="intent" value="newVersion" />
+          <textarea name="document" class="textarea code-area" rows="20" data-code data-json spellcheck="false">{post.values.document ?? JSON.stringify(doc?.data, null, 2)}</textarea>
+          <button class="btn btn-primary" type="submit">Save as new version</button><p class="field-hint">Creates a new policy version and makes it the default.</p></form>
+      ))}
+      {tab === 'entities' && (entities?.error ? <Flash type="error" text="Couldn't list entities" detail={entities.error} dismissible={false} /> : (
+        <ul class="space-y-1">
+          {(entities?.data?.PolicyUsers ?? []).map((u) => <li>{badge('User', 'blue')} <a href={`/iam/users/${encodeURIComponent(u.UserName!)}`}>{u.UserName}</a></li>)}
+          {(entities?.data?.PolicyRoles ?? []).map((r) => <li>{badge('Role', 'orange')} <a href={`/iam/roles/${encodeURIComponent(r.RoleName!)}`}>{r.RoleName}</a></li>)}
+          {(entities?.data?.PolicyGroups ?? []).map((g) => <li>{badge('Group', 'green')} <a href={`/iam/groups/${encodeURIComponent(g.GroupName!)}`}>{g.GroupName}</a></li>)}
+          {!((entities?.data?.PolicyUsers?.length ?? 0) + (entities?.data?.PolicyRoles?.length ?? 0) + (entities?.data?.PolicyGroups?.length ?? 0)) && <li class="text-muted">This policy is not attached to anything.</li>}
+        </ul>
+      ))}
+      {tab === 'versions' && (versions?.error ? <Flash type="error" text="Couldn't list versions" detail={versions.error} dismissible={false} /> : (
+        <div class="tbl-wrap rounded-lg border border-line"><table class="tbl"><thead><tr><th>Version</th><th>Default</th><th>Created</th></tr></thead><tbody>
+          {(versions?.data ?? []).map((v) => <tr><td>{v.VersionId}</td><td>{v.IsDefaultVersion ? badge('Default', 'green') : '-'}</td><td class="nowrap">{dateTime(v.CreateDate)}</td></tr>)}
+        </tbody></table></div>
+      ))}
+    </div>
+  </div>
+</Console>

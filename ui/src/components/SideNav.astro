@@ -1,0 +1,34 @@
+---
+import type { ServiceDef } from '../lib/services';
+import ServiceTile from './ServiceTile.astro';
+interface Props { service: ServiceDef; path: string }
+const { service, path } = Astro.props;
+const items = service.nav ?? [];
+// The active entry is the one with the longest matching path prefix.
+const norm = (p: string) => p.replace(/\/+$/, '') || '/';
+const cur = norm(path);
+let active = '';
+for (const n of items) {
+  const h = norm(n.href);
+  if ((cur === h || cur.startsWith(h + '/')) && h.length > active.length) active = h;
+}
+// A service root entry shouldn't swallow every sub-page when more specific entries exist.
+let lastGroup: string | undefined;
+---
+<nav aria-label={`${service.name} navigation`} class="sidenav py-3">
+  <a href={service.href} class="!border-l-0 !px-5 !py-2 mb-1 gap-3 hover:!no-underline" style="color:inherit">
+    <ServiceTile icon={service.icon} category={service.category} size={28} />
+    <span class="font-bold text-[16px] leading-5">{service.name}</span>
+  </a>
+  <div class="border-t border-line my-2"></div>
+  {items.map((n) => {
+    const showGroup = n.group && n.group !== lastGroup;
+    lastGroup = n.group;
+    return (
+      <>
+        {showGroup && <div class="group">{n.group}</div>}
+        <a href={n.href} aria-current={norm(n.href) === active ? 'page' : undefined}>{n.label}</a>
+      </>
+    );
+  })}
+</nav>

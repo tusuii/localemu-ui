@@ -1,0 +1,64 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { GetDatabasesCommand, CreateTableCommand } from '@aws-sdk/client-glue';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str } from '../../../lib/action';
+import { UserError, load } from '../../../lib/errors';
+import { FORMATS, buildStorage, parseColumns } from '../../../lib/glue';
+
+const ctx = getCtx(Astro.cookies);
+const glue = aws.glue(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const db = required(f, 'db', 'Database');
+    const name = required(f, 'name', 'Table name');
+    if (!/^[a-z0-9_]{1,255}$/.test(name)) throw new UserError('Table names are lowercase letters, numbers and underscores.');
+    const location = required(f, 'location', 'Location');
+    const columns = parseColumns(required(f, 'columns', 'Columns'));
+    const parts = parseColumns(str(f, 'partitions'), 'Partition keys');
+    const format = str(f, 'format') || 'csv';
+    await glue.send(new CreateTableCommand({
+      DatabaseName: db,
+      TableInput: {
+        Name: name, TableType: 'EXTERNAL_TABLE', Description: str(f, 'description') || undefined, Parameters: { classification: format, EXTERNAL: 'TRUE' },
+        PartitionKeys: parts, StorageDescriptor: buildStorage(format, location, columns, str(f, 'delimiter')),
+      },
+    }));
+    return { message: `Table ${name} created.`, redirect: `/glue/tables/${encodeURIComponent(db)}/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const dbs = await load(async () => ((await glue.send(new GetDatabasesCommand({}))).DatabaseList ?? []).map((d) => d.Name!).sort());
+const v = post.values;
+const selDb = v.db ?? Astro.url.searchParams.get('db') ?? dbs.data?.[0];
+---
+<Console title="Create table" crumbs={[{ label: 'Tables', href: '/glue/tables' }, { label: 'Create table' }]} error={post.error ?? dbs.error}>
+  <PageHeader title="Create table" />
+  <form method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Table properties">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Database" for="db"><select id="db" name="db" class="select" required>{(dbs.data ?? []).map((d) => <option value={d} selected={d === selDb}>{d}</option>)}</select></FormField>
+        <FormField label="Table name" for="name"><input id="name" name="name" class="input" required autocomplete="off" value={v.name ?? ''} /></FormField>
+      </div>
+      <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={v.description ?? ''} /></FormField>
+    </Card>
+    <Card title="Data store">
+      <FormField label="S3 location" for="location"><input id="location" name="location" class="input" required placeholder="s3://bucket/path/" value={v.location ?? ''} /></FormField>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Data format" for="format"><select id="format" name="format" class="select">{Object.entries(FORMATS).map(([k, f]) => <option value={k} selected={v.format === k}>{f.label}</option>)}</select></FormField>
+        <div data-show-when="format:csv"><FormField label="Delimiter" for="delimiter"><input id="delimiter" name="delimiter" class="input" maxlength="1" value={v.delimiter ?? ','} /></FormField></div>
+      </div>
+    </Card>
+    <Card title="Schema">
+      <FormField label="Columns" for="columns" description="One column per line as “name type”, for example: id int"><textarea id="columns" name="columns" class="textarea code-area" rows="6" required placeholder={'id int\nname string\namount double'}>{v.columns ?? ''}</textarea></FormField>
+      <FormField label="Partition keys" for="partitions" optional description="One per line, same format."><textarea id="partitions" name="partitions" class="textarea code-area" rows="2" placeholder="dt string">{v.partitions ?? ''}</textarea></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/glue/tables">Cancel</a><button class="btn btn-primary" type="submit">Create table</button></div>
+  </form>
+</Console>

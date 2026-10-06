@@ -1,0 +1,34 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import FormField from '../../../components/FormField.astro';
+import { CreateUserCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, required, str } from '../../../lib/action';
+import { UserError } from '../../../lib/errors';
+
+const ctx = getCtx(Astro.cookies);
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    const name = required(f, 'name', 'User name');
+    if (!/^[\w+=,.@-]{1,64}$/.test(name)) throw new UserError('User names may contain letters, numbers and + = , . @ _ -');
+    await aws.iam(ctx).send(new CreateUserCommand({ UserName: name, Path: str(f, 'path') || undefined }));
+    return { message: `User ${name} created.`, redirect: `/iam/users/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+const v = post.values;
+---
+<Console title="Create user" crumbs={[{ label: 'Users', href: '/iam/users' }, { label: 'Create user' }]} error={post.error}>
+  <PageHeader title="Create user" />
+  <form data-cli="aws iam create-user --user-name {name} {path|--path}" method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="User details">
+      <FormField label="User name" for="name" hint="Up to 64 characters: letters, numbers and + = , . @ _ -"><input id="name" name="name" class="input" required autofocus autocomplete="off" value={v.name ?? ''} /></FormField>
+      <FormField label="Path" for="path" optional hint="Defaults to /."><input id="path" name="path" class="input font-mono" placeholder="/" value={v.path ?? ''} /></FormField>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/iam/users">Cancel</a><button class="btn btn-primary" type="submit">Create user</button></div>
+  </form>
+</Console>

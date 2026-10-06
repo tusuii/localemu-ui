@@ -1,0 +1,62 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import PermissionsPanel from '../../../components/PermissionsPanel.astro';
+import { GetRoleCommand, DeleteRoleCommand, UpdateAssumeRolePolicyCommand, ListPoliciesCommand } from '@aws-sdk/client-iam';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, jsonOf, str } from '../../../lib/action';
+import { load } from '../../../lib/errors';
+import { dateTime, duration } from '../../../lib/format';
+import { copyable } from '../../../lib/html';
+import { decodeDoc, getInline, listPerms, permissionHandlers, purgeIdentity } from '../../../lib/iam';
+
+const name = Astro.params.name!;
+const ctx = getCtx(Astro.cookies);
+const iam = aws.iam(ctx);
+const tab = ['permissions', 'trust'].includes(Astro.url.searchParams.get('tab') ?? '') ? Astro.url.searchParams.get('tab')! : 'permissions';
+const post = await handlePost(Astro, {
+  ...permissionHandlers(iam, 'role', name),
+  trust: async (f) => { jsonOf(f, 'trust', 'Trust policy'); await iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: name, PolicyDocument: str(f, 'trust') })); return { message: 'Trust policy updated.', redirect: `${Astro.url.pathname}?tab=trust` }; },
+  delete: async () => { await purgeIdentity(iam, 'role', name); await iam.send(new DeleteRoleCommand({ RoleName: name })); return { message: `Deleted role ${name}.`, redirect: '/iam/roles' }; },
+});
+if (post.response) return post.response;
+
+const r = await load(async () => (await iam.send(new GetRoleCommand({ RoleName: name }))).Role!);
+if (r.error && /NoSuchEntity|cannot be found/i.test(r.error)) return new Response(`Role "${name}" does not exist`, { status: 404 });
+const perms = tab === 'permissions' ? await load(async () => {
+  const p = await listPerms(iam, 'role', name);
+  const docs = Object.fromEntries(await Promise.all(p.inline.map(async (n) => [n, await getInline(iam, 'role', name, n)])));
+  const sug = (await iam.send(new ListPoliciesCommand({ Scope: 'All', MaxItems: 1000 }))).Policies ?? [];
+  return { p, docs, sug: sug.map((s) => ({ name: s.PolicyName!, arn: s.Arn! })) };
+}) : undefined;
+const trustDoc = r.data ? decodeDoc(r.data.AssumeRolePolicyDocument) : undefined;
+const tabs = [{ id: 'permissions', label: 'Permissions' }, { id: 'trust', label: 'Trust relationships' }];
+---
+<Console title={name} crumbs={[{ label: 'Roles', href: '/iam/roles' }, { label: name }]} error={post.error}>
+  <PageHeader title={name}>
+    <form method="post"><input type="hidden" name="intent" value="delete" /><button class="btn btn-danger" data-confirm="The role and its attached policies will be deleted." data-confirm-title="Delete role?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete role"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+  {r.error && <Flash type="error" text="Couldn't load the role" detail={r.error} dismissible={false} />}
+  {r.data && <Card class="mb-4" title="Summary"><Details items={[
+    { label: 'ARN', value: copyable(r.data.Arn ?? ''), wide: true }, { label: 'Created', value: dateTime(r.data.CreateDate) }, { label: 'Max session duration', value: r.data.MaxSessionDuration ? duration(r.data.MaxSessionDuration) : undefined },
+    { label: 'Path', value: r.data.Path }, { label: 'Description', value: r.data.Description },
+  ]} /></Card>}
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+    <div class="p-5">
+      {tab === 'permissions' && (perms?.error ? <Flash type="error" text="Couldn't load permissions" detail={perms.error} dismissible={false} /> : <PermissionsPanel perms={perms!.data!.p} inlineDocs={perms!.data!.docs} suggestions={perms!.data!.sug} />)}
+      {tab === 'trust' && (
+        <form method="post" class="space-y-3"><input type="hidden" name="intent" value="trust" />
+          <p class="text-muted">The trust policy defines who can assume this role.</p>
+          <textarea name="trust" class="textarea code-area" rows="16" data-code data-json spellcheck="false">{post.values.trust ?? JSON.stringify(trustDoc, null, 2)}</textarea>
+          <button class="btn btn-primary" type="submit">Update trust policy</button></form>
+      )}
+    </div>
+  </div>
+</Console>

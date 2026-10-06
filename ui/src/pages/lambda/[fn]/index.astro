@@ -1,0 +1,350 @@
+---
+import Console from '../../../layouts/Console.astro';
+import PageHeader from '../../../components/PageHeader.astro';
+import Card from '../../../components/Card.astro';
+import Tabs from '../../../components/Tabs.astro';
+import Details from '../../../components/Details.astro';
+import FormField from '../../../components/FormField.astro';
+import JsonView from '../../../components/JsonView.astro';
+import Flash from '../../../components/Flash.astro';
+import Icon from '../../../components/Icon.astro';
+import {
+  GetFunctionCommand, InvokeCommand, DeleteFunctionCommand, UpdateFunctionCodeCommand,
+  UpdateFunctionConfigurationCommand, ListEventSourceMappingsCommand, GetFunctionUrlConfigCommand, ListVersionsByFunctionCommand,
+  CreateEventSourceMappingCommand, UpdateEventSourceMappingCommand, DeleteEventSourceMappingCommand,
+  CreateFunctionUrlConfigCommand, UpdateFunctionUrlConfigCommand, DeleteFunctionUrlConfigCommand,
+  AddPermissionCommand, RemovePermissionCommand, GetPolicyCommand,
+} from '@aws-sdk/client-lambda';
+import { aws } from '../../../lib/aws';
+import { getCtx } from '../../../lib/context';
+import { handlePost, intOf, required, str, strs } from '../../../lib/action';
+import { bulk } from '../../../lib/bulk';
+import { UserError, load, soft } from '../../../lib/errors';
+import { bytes, dateTime } from '../../../lib/format';
+import { badge, copyable, mono, stateStatus } from '../../../lib/html';
+import { INVOKE_PRINCIPALS, envText, needsStartPosition, parseEnv, patchZip, policyRows, readZip, sourceKind } from '../../../lib/lambda';
+import { ListQueuesCommand } from '@aws-sdk/client-sqs';
+import { ListStreamsCommand } from '@aws-sdk/client-kinesis';
+import { ListTablesCommand, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
+
+const name = Astro.params.fn!;
+const ctx = getCtx(Astro.cookies);
+const lambda = aws.lambda(ctx);
+const ddb = aws.dynamodb(ctx);
+const sp = Astro.url.searchParams;
+const tab = ['code', 'test', 'configuration', 'triggers', 'versions'].includes(sp.get('tab') ?? '') ? sp.get('tab')! : 'code';
+
+async function fetchZip(): Promise<Uint8Array> {
+  const g = await lambda.send(new GetFunctionCommand({ FunctionName: name }));
+  const loc = g.Code?.Location;
+  if (!loc) throw new UserError('LocalEmu did not return a download location for this function\'s code.');
+  const res = await fetch(loc, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new UserError(`Downloading the deployment package failed (${res.status}).`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+const post = await handlePost(Astro, {
+  invoke: async (f) => {
+    const payloadText = String(f.get('payload') ?? '').trim() || '{}';
+    try { JSON.parse(payloadText); } catch (e) { throw new UserError(`The test event is not valid JSON: ${(e as Error).message}`); }
+    const started = Date.now();
+    const r = await lambda.send(new InvokeCommand({
+      FunctionName: name, Payload: Buffer.from(payloadText), InvocationType: (str(f, 'type') || 'RequestResponse') as never,
+      LogType: str(f, 'type') === 'RequestResponse' || !str(f, 'type') ? 'Tail' : undefined, Qualifier: str(f, 'qualifier') || undefined,
+    }));
+    const body = r.Payload ? Buffer.from(r.Payload).toString('utf8') : '';
+    return {
+      stay: true, message: r.FunctionError ? `The function returned an error (${r.FunctionError}).` : 'Execution completed.',
+      data: { status: r.StatusCode, error: r.FunctionError, version: r.ExecutedVersion, body, log: r.LogResult ? Buffer.from(r.LogResult, 'base64').toString('utf8') : '', ms: Date.now() - started },
+    };
+  },
+  saveCode: async (f) => {
+    const path = required(f, 'path', 'File');
+    const zip = patchZip(await fetchZip(), path, String(f.get('text') ?? ''));
+    await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: name, ZipFile: zip }));
+    return { message: `Deployed ${path}.`, redirect: `${Astro.url.pathname}?tab=code&file=${encodeURIComponent(path)}` };
+  },
+  uploadCode: async (f) => {
+    const file = f.get('zip');
+    if (!(file instanceof File) || file.size === 0) throw new UserError('Choose a .zip file.');
+    await lambda.send(new UpdateFunctionCodeCommand({ FunctionName: name, ZipFile: new Uint8Array(await file.arrayBuffer()) }));
+    return { message: 'Deployment package updated.', redirect: `${Astro.url.pathname}?tab=code` };
+  },
+  config: async (f) => {
+    let env: Record<string, string>;
+    try { env = parseEnv(String(f.get('env') ?? '')); } catch (e) { throw new UserError((e as Error).message); }
+    await lambda.send(new UpdateFunctionConfigurationCommand({
+      FunctionName: name, Handler: str(f, 'handler') || undefined, Description: str(f, 'description'),
+      MemorySize: intOf(f, 'memory', 'Memory'), Timeout: intOf(f, 'timeout', 'Timeout'), Role: str(f, 'role') || undefined,
+      Environment: { Variables: env },
+    }));
+    return { message: 'Configuration updated.', redirect: `${Astro.url.pathname}?tab=configuration` };
+  },
+  createEsm: async (f) => {
+    const arn = required(f, 'source', 'Event source ARN');
+    const start = str(f, 'start') || 'LATEST';
+    const batch = intOf(f, 'batch', 'Batch size');
+    await lambda.send(new CreateEventSourceMappingCommand({
+      FunctionName: name, EventSourceArn: arn, Enabled: f.get('enabled') === '1', BatchSize: batch,
+      MaximumBatchingWindowInSeconds: intOf(f, 'window', 'Batch window'),
+      ...(needsStartPosition(arn) ? { StartingPosition: start as never } : {}),
+    }));
+    return { message: `Added ${sourceKind(arn)} trigger.`, redirect: `${Astro.url.pathname}?tab=triggers` };
+  },
+  setEsm: async (f) => {
+    const enable = str(f, 'enable') === '1';
+    return { ...(await bulk(strs(f, 'uuid'), { verb: enable ? 'Enabled' : 'Disabled', noun: 'trigger' }, (u) => lambda.send(new UpdateEventSourceMappingCommand({ UUID: u, Enabled: enable })))), redirect: `${Astro.url.pathname}?tab=triggers` };
+  },
+  deleteEsm: async (f) => ({ ...(await bulk(strs(f, 'uuid'), { verb: 'Deleted', noun: 'trigger' }, (u) => lambda.send(new DeleteEventSourceMappingCommand({ UUID: u })))), redirect: `${Astro.url.pathname}?tab=triggers` }),
+  saveUrl: async (f) => {
+    const cors = {
+      AllowOrigins: str(f, 'origins').split(/[\s,]+/).filter(Boolean),
+      AllowMethods: str(f, 'methods').split(/[\s,]+/).filter(Boolean),
+      AllowHeaders: str(f, 'headers').split(/[\s,]+/).filter(Boolean),
+      AllowCredentials: f.get('credentials') === '1',
+      MaxAge: intOf(f, 'maxage', 'Max age'),
+    };
+    const hasCors = cors.AllowOrigins.length > 0;
+    const input = { FunctionName: name, AuthType: (str(f, 'auth') || 'NONE') as never, InvokeMode: (str(f, 'mode') || undefined) as never, ...(hasCors ? { Cors: { ...cors, AllowHeaders: cors.AllowHeaders.length ? cors.AllowHeaders : undefined, AllowMethods: cors.AllowMethods.length ? cors.AllowMethods : undefined } } : {}) };
+    if (str(f, 'exists') === '1') await lambda.send(new UpdateFunctionUrlConfigCommand(input));
+    else await lambda.send(new CreateFunctionUrlConfigCommand(input));
+    return { message: 'Function URL saved.', redirect: `${Astro.url.pathname}?tab=triggers` };
+  },
+  deleteUrl: async () => { await lambda.send(new DeleteFunctionUrlConfigCommand({ FunctionName: name })); return { message: 'Function URL deleted.', redirect: `${Astro.url.pathname}?tab=triggers` }; },
+  addPerm: async (f) => {
+    const principal = required(f, 'principal', 'Principal');
+    const sid = str(f, 'sid') || `console-${Date.now().toString(36)}`;
+    await lambda.send(new AddPermissionCommand({
+      FunctionName: name, StatementId: sid, Action: str(f, 'action') || 'lambda:InvokeFunction', Principal: principal,
+      SourceArn: str(f, 'sourceArn') || undefined, SourceAccount: str(f, 'sourceAccount') || undefined,
+      FunctionUrlAuthType: str(f, 'urlAuth') ? (str(f, 'urlAuth') as never) : undefined,
+    }));
+    return { message: `Permission "${sid}" added.`, redirect: `${Astro.url.pathname}?tab=triggers` };
+  },
+  removePerm: async (f) => ({ ...(await bulk(strs(f, 'sid'), { verb: 'Removed', noun: 'permission statement' }, (sid) => lambda.send(new RemovePermissionCommand({ FunctionName: name, StatementId: sid })))), redirect: `${Astro.url.pathname}?tab=triggers` }),
+  delete: async () => { await lambda.send(new DeleteFunctionCommand({ FunctionName: name })); return { message: `Deleted function "${name}".`, redirect: '/lambda' }; },
+});
+if (post.response) return post.response;
+
+const fn = await load(() => lambda.send(new GetFunctionCommand({ FunctionName: name })));
+if (fn.error && /ResourceNotFound|Function not found/i.test(fn.error)) return new Response(`Function "${name}" does not exist`, { status: 404 });
+const c = fn.data?.Configuration;
+const invoked = post.result?.data as { status: number; error?: string; version?: string; body: string; log: string; ms: number } | undefined;
+
+// ---- code tab ----
+let files: ReturnType<typeof readZip> = [];
+let codeError: string | undefined;
+let selected: (typeof files)[number] | undefined;
+if (tab === 'code' && c?.PackageType !== 'Image') {
+  const z = await load(async () => readZip(await fetchZip()));
+  if (z.error) codeError = z.error; else {
+    files = z.data!;
+    const want = sp.get('file');
+    selected = files.find((x) => x.path === want) ?? files.find((x) => !x.binary);
+  }
+}
+const triggers = tab === 'triggers' ? await load(async () => (await lambda.send(new ListEventSourceMappingsCommand({ FunctionName: name }))).EventSourceMappings ?? []) : undefined;
+const urlCfg = tab === 'triggers' ? await soft(() => lambda.send(new GetFunctionUrlConfigCommand({ FunctionName: name }))) : undefined;
+const policy = tab === 'triggers' ? await soft(() => lambda.send(new GetPolicyCommand({ FunctionName: name }))) : undefined;
+const stmts = policyRows((policy?.value as any)?.Policy);
+const candidates: string[] = [];
+if (tab === 'triggers') {
+  const [qs, ks, ts] = await Promise.all([
+    soft(() => aws.sqs(ctx).send(new ListQueuesCommand({ MaxResults: 100 }))),
+    soft(() => aws.kinesis(ctx).send(new ListStreamsCommand({ Limit: 100 }))),
+    soft(() => ddb.send(new ListTablesCommand({ Limit: 50 }))),
+  ]);
+  for (const u of (qs.value as any)?.QueueUrls ?? []) candidates.push(`arn:aws:sqs:${ctx.region}:${ctx.account}:${u.split('/').pop()}`);
+  for (const n of (ks.value as any)?.StreamNames ?? []) candidates.push(`arn:aws:kinesis:${ctx.region}:${ctx.account}:stream/${n}`);
+  const descs = await Promise.all(((ts.value as any)?.TableNames ?? []).map((n: string) => soft(() => ddb.send(new DescribeTableCommand({ TableName: n }))).then((d) => (d.value as any)?.Table?.LatestStreamArn as string | undefined)));
+  candidates.push(...(descs.filter(Boolean) as string[]));
+}
+const urlv = urlCfg?.value as any;
+const versions = tab === 'versions' ? await load(async () => (await lambda.send(new ListVersionsByFunctionCommand({ FunctionName: name }))).Versions ?? []) : undefined;
+const tabs = [{ id: 'code', label: 'Code' }, { id: 'test', label: 'Test' }, { id: 'configuration', label: 'Configuration' }, { id: 'triggers', label: 'Triggers' }, { id: 'versions', label: 'Versions' }];
+const v = post.values;
+const logGroup = c?.LoggingConfig?.LogGroup ?? `/aws/lambda/${name}`;
+---
+<Console title={name} crumbs={[{ label: 'Functions', href: '/lambda' }, { label: name }]} error={post.error} notice={post.result?.message && !invoked?.error ? { text: post.result.message } : null}>
+  <PageHeader title={name}>
+    <a class="btn btn-normal" href={`/logs/group?group=${encodeURIComponent(logGroup)}`}><Icon name="scroll-text" size={16} /> View logs</a>
+    <form method="post"><input type="hidden" name="intent" value="delete" />
+      <button class="btn btn-danger" data-confirm="The function will be permanently deleted." data-confirm-title="Delete function?" data-confirm-name={name} data-confirm-type="delete" data-confirm-ok="Delete function"><Icon name="trash-2" size={16} /> Delete</button></form>
+  </PageHeader>
+
+  {c && c.State === 'Failed' && <Flash type="error" class="mb-3" dismissible={false} text={`Function state: Failed${c.StateReasonCode ? ` (${c.StateReasonCode})` : ''}`} detail={`${c.StateReason ?? ''}${c.StateReason ? ' ' : ''}Lambda runs functions in Docker containers; make sure LocalEmu can reach the Docker daemon (mount /var/run/docker.sock).`} />}
+  {c && c.State === 'Pending' && <Flash type="info" class="mb-3" dismissible={false} text="The function is still being created." detail="Refresh in a few seconds." />}
+  {fn.error && <Flash type="error" text="Couldn't load the function" detail={fn.error} dismissible={false} />}
+
+  {c && (
+    <Card class="mb-4" title="Function overview">
+      <Details columns={4} items={[
+        { label: 'State', value: stateStatus(c.State ?? 'Active') }, { label: 'Runtime', value: c.Runtime ?? c.PackageType },
+        { label: 'Handler', value: c.Handler ? mono(c.Handler) : undefined }, { label: 'Last modified', value: dateTime(c.LastModified) },
+        { label: 'Memory', value: `${c.MemorySize} MB` }, { label: 'Timeout', value: `${c.Timeout} s` },
+        { label: 'Code size', value: bytes(c.CodeSize) }, { label: 'Architecture', value: c.Architectures?.join(', ') },
+        { label: 'Function ARN', value: copyable(c.FunctionArn ?? ''), wide: true },
+      ]} />
+    </Card>
+  )}
+
+  <div class="card">
+    <Tabs tabs={tabs} active={tab} />
+
+    {tab === 'code' && (
+      <div class="p-5">
+        {c?.PackageType === 'Image' ? <p class="text-muted">This function is packaged as a container image ({fn.data?.Code?.ImageUri}).</p>
+        : codeError ? <Flash type="warning" text="Couldn't read the deployment package" detail={codeError} dismissible={false} /> : (
+          <div class="grid gap-4 lg:grid-cols-[260px_1fr]">
+            <nav aria-label="Files" class="rounded-lg border border-line">
+              <div class="border-b border-line px-3 py-2 text-[12px] font-bold uppercase tracking-wide text-muted">{name}</div>
+              <ul class="max-h-[480px] overflow-auto py-1">
+                {files.map((x) => (
+                  <li><a href={`?tab=code&file=${encodeURIComponent(x.path)}`} class:list={['block truncate px-3 py-1 font-mono text-[13px] text-fg hover:bg-hover hover:no-underline', selected?.path === x.path && '!bg-selected font-bold']} title={`${x.size} bytes`}>{x.path}</a></li>
+                ))}
+              </ul>
+            </nav>
+            <div class="min-w-0">
+              {selected?.text !== undefined ? (
+                <form method="post" class="space-y-3">
+                  <input type="hidden" name="intent" value="saveCode" /><input type="hidden" name="path" value={selected.path} />
+                  <div class="flex items-center justify-between"><strong class="font-mono text-[13px]">{selected.path}</strong><button class="btn btn-primary btn-sm" type="submit"><Icon name="zap" size={14} /> Deploy</button></div>
+                  <textarea name="text" class="textarea code-area" rows="22" data-code spellcheck="false">{post.values.text ?? selected.text}</textarea>
+                </form>
+              ) : <p class="text-muted">{selected ? 'This file is binary or too large to edit in the browser.' : 'No editable files in the package.'}</p>}
+            </div>
+          </div>
+        )}
+        <form method="post" enctype="multipart/form-data" class="mt-6 flex flex-wrap items-end gap-3 border-t border-line pt-5">
+          <input type="hidden" name="intent" value="uploadCode" />
+          <div class="min-w-[260px] flex-1"><label class="field-label" for="zip">Upload a new deployment package (.zip)</label><input id="zip" type="file" name="zip" accept=".zip" class="input !py-1.5" required /></div>
+          <button class="btn btn-normal" type="submit"><Icon name="upload" size={16} /> Upload</button>
+        </form>
+      </div>
+    )}
+
+    {tab === 'test' && (
+      <div class="grid gap-6 p-5 xl:grid-cols-2">
+        <form method="post" class="space-y-1">
+          <input type="hidden" name="intent" value="invoke" />
+          <FormField label="Test event" for="payload" description="JSON passed to the handler as the event."><textarea id="payload" name="payload" class="textarea code-area" rows="14" data-json data-code spellcheck="false">{v.payload ?? '{\n  "key1": "value1",\n  "key2": "value2"\n}'}</textarea></FormField>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <FormField label="Invocation type" for="type"><select id="type" name="type" class="select"><option value="RequestResponse" selected={v.type !== 'Event' && v.type !== 'DryRun'}>Synchronous (RequestResponse)</option><option value="Event" selected={v.type === 'Event'}>Asynchronous (Event)</option><option value="DryRun" selected={v.type === 'DryRun'}>Validate only (DryRun)</option></select></FormField>
+            <FormField label="Qualifier" for="qualifier" optional><input id="qualifier" name="qualifier" class="input" placeholder="$LATEST" value={v.qualifier ?? ''} /></FormField>
+          </div>
+          <button class="btn btn-primary" type="submit"><Icon name="play" size={16} /> Invoke</button>
+        </form>
+        <div>
+          <h3 class="card-title mb-3">Execution result</h3>
+          {!invoked ? <p class="text-muted">Invoke the function to see its response and logs here.</p> : (
+            <div class="space-y-3">
+              <Flash type={invoked.error ? 'error' : 'success'} dismissible={false} text={invoked.error ? `Execution failed (${invoked.error})` : 'Execution succeeded'} detail={`HTTP ${invoked.status} · ${invoked.ms} ms${invoked.version ? ` · version ${invoked.version}` : ''}`} />
+              <div><div class="kv-label mb-1">Response</div><JsonView value={invoked.body || '(empty)'} maxHeight="240px" /></div>
+              {invoked.log && <div><div class="kv-label mb-1">Log output</div><pre class="code-block max-h-72">{invoked.log}</pre></div>}
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+
+    {tab === 'configuration' && c && (
+      <form method="post" class="max-w-3xl space-y-1 p-5">
+        <input type="hidden" name="intent" value="config" />
+        <div class="grid gap-4 sm:grid-cols-2">
+          <FormField label="Handler" for="handler"><input id="handler" name="handler" class="input font-mono" value={c.Handler ?? ''} /></FormField>
+          <FormField label="Execution role (ARN)" for="role"><input id="role" name="role" class="input font-mono" value={c.Role ?? ''} /></FormField>
+          <FormField label="Memory (MB)" for="memory"><input id="memory" name="memory" type="number" min="128" max="10240" class="input" value={c.MemorySize} /></FormField>
+          <FormField label="Timeout (seconds)" for="timeout"><input id="timeout" name="timeout" type="number" min="1" max="900" class="input" value={c.Timeout} /></FormField>
+        </div>
+        <FormField label="Description" for="description" optional><input id="description" name="description" class="input" value={c.Description ?? ''} /></FormField>
+        <FormField label="Environment variables" for="env" optional hint="One KEY=value per line."><textarea id="env" name="env" class="textarea code-area" rows="7" data-code>{v.env ?? envText(c.Environment?.Variables)}</textarea></FormField>
+        <button class="btn btn-primary" type="submit">Save</button>
+      </form>
+    )}
+
+    {tab === 'triggers' && (
+      <div class="space-y-8 p-5">
+        <section>
+          <h3 class="card-title mb-2">Event source mappings</h3>
+          <p class="card-desc mb-3">SQS queues, Kinesis streams and DynamoDB streams that invoke this function.</p>
+          {triggers?.error ? <Flash type="error" text="Couldn't list triggers" detail={triggers.error} dismissible={false} /> : (
+            <form method="post" data-table="esm" data-page-size="50" data-no-busy>
+              <div class="mb-2 flex flex-wrap gap-2">
+                <button class="btn btn-normal btn-sm" name="intent" value="setEsm" data-min="1" onclick="this.form.querySelector('[name=enable]').value='1'">Enable</button>
+                <button class="btn btn-normal btn-sm" name="intent" value="setEsm" data-min="1" onclick="this.form.querySelector('[name=enable]').value='0'">Disable</button>
+                <button class="btn btn-normal btn-sm" name="intent" value="deleteEsm" data-min="1" data-confirm="The selected triggers will be deleted." data-confirm-title="Delete triggers?" data-confirm-ok="Delete">Delete</button>
+                <input type="hidden" name="enable" value="1" />
+              </div>
+              {(triggers?.data ?? []).length === 0 ? <p class="text-muted">No event sources are mapped to this function.</p> : (
+                <div class="tbl-wrap"><table class="tbl"><thead><tr><th class="sel"><input type="checkbox" class="checkbox" data-select-all aria-label="Select all" /></th><th>Type</th><th>Source</th><th>State</th><th>Batch size</th><th>Starting position</th><th>UUID</th></tr></thead><tbody>
+                  {(triggers!.data as any[]).map((m) => <tr data-row><td class="sel"><input type="checkbox" class="checkbox" name="uuid" value={m.UUID} data-row-select aria-label={`Select ${m.UUID}`} /></td><td>{badge(sourceKind(m.EventSourceArn))}</td><td class="font-mono text-[13px]">{m.EventSourceArn}</td><td set:html={stateStatus(m.State).v} /><td>{m.BatchSize}</td><td>{m.StartingPosition ?? '-'}</td><td class="font-mono text-[13px]">{m.UUID}</td></tr>)}
+                </tbody></table></div>
+              )}
+            </form>
+          )}
+          <form method="post" class="mt-4 grid items-end gap-4 rounded-lg border border-line p-4 md:grid-cols-2 xl:grid-cols-4">
+            <input type="hidden" name="intent" value="createEsm" />
+            <FormField label="Event source ARN" for="esm-source" class="xl:col-span-2 !mb-0"><input id="esm-source" name="source" class="input font-mono" list="esm-candidates" placeholder="arn:aws:sqs:..." value={v.source ?? ''} required /><datalist id="esm-candidates">{candidates.map((a) => <option value={a} />)}</datalist></FormField>
+            <FormField label="Batch size" for="esm-batch" optional class="!mb-0"><input id="esm-batch" name="batch" type="number" min="1" max="10000" class="input" placeholder="default" /></FormField>
+            <FormField label="Batch window (s)" for="esm-window" optional class="!mb-0"><input id="esm-window" name="window" type="number" min="0" max="300" class="input" /></FormField>
+            <FormField label="Starting position" for="esm-start" hint="Kinesis and DynamoDB streams only." class="!mb-0"><select id="esm-start" name="start" class="select"><option value="LATEST">Latest</option><option value="TRIM_HORIZON">Trim horizon</option></select></FormField>
+            <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="enabled" value="1" checked /> Activate trigger</label>
+            <div><button class="btn btn-primary" type="submit"><Icon name="plus" size={16} /> Add trigger</button></div>
+          </form>
+        </section>
+
+        <section class="border-t border-line pt-6">
+          <h3 class="card-title mb-2">Function URL</h3>
+          {urlv && <Details columns={3} items={[{ label: 'URL', value: copyable(urlv.FunctionUrl), wide: true }, { label: 'Auth type', value: urlv.AuthType }, { label: 'Invoke mode', value: urlv.InvokeMode ?? 'BUFFERED' }, { label: 'CORS origins', value: (urlv.Cors?.AllowOrigins ?? []).join(', ') || '-' }]} />}
+          {!urlv && <p class="mb-3 text-muted">No function URL is configured.</p>}
+          <form method="post" class="mt-4 grid items-end gap-4 rounded-lg border border-line p-4 md:grid-cols-2 xl:grid-cols-4">
+            <input type="hidden" name="intent" value="saveUrl" /><input type="hidden" name="exists" value={urlv ? '1' : '0'} />
+            <FormField label="Auth type" for="url-auth" class="!mb-0"><select id="url-auth" name="auth" class="select"><option value="NONE" selected={urlv?.AuthType !== 'AWS_IAM'}>NONE (public)</option><option value="AWS_IAM" selected={urlv?.AuthType === 'AWS_IAM'}>AWS_IAM</option></select></FormField>
+            <FormField label="Invoke mode" for="url-mode" class="!mb-0"><select id="url-mode" name="mode" class="select"><option value="BUFFERED" selected={urlv?.InvokeMode !== 'RESPONSE_STREAM'}>BUFFERED</option><option value="RESPONSE_STREAM" selected={urlv?.InvokeMode === 'RESPONSE_STREAM'}>RESPONSE_STREAM</option></select></FormField>
+            <FormField label="CORS allowed origins" for="url-origins" optional hint="Space or comma separated; leave empty for no CORS." class="!mb-0"><input id="url-origins" name="origins" class="input" value={(urlv?.Cors?.AllowOrigins ?? []).join(', ')} placeholder="*" /></FormField>
+            <FormField label="Allowed methods" for="url-methods" optional class="!mb-0"><input id="url-methods" name="methods" class="input" value={(urlv?.Cors?.AllowMethods ?? []).join(', ')} placeholder="GET, POST" /></FormField>
+            <FormField label="Allowed headers" for="url-headers" optional class="!mb-0"><input id="url-headers" name="headers" class="input" value={(urlv?.Cors?.AllowHeaders ?? []).join(', ')} /></FormField>
+            <FormField label="Max age (s)" for="url-maxage" optional class="!mb-0"><input id="url-maxage" name="maxage" type="number" min="0" max="86400" class="input" value={urlv?.Cors?.MaxAge ?? ''} /></FormField>
+            <label class="mb-2 flex items-center gap-2"><input type="checkbox" class="checkbox" name="credentials" value="1" checked={!!urlv?.Cors?.AllowCredentials} /> Allow credentials</label>
+            <div class="flex gap-2"><button class="btn btn-primary" type="submit">{urlv ? 'Save URL' : 'Create function URL'}</button></div>
+          </form>
+          {urlv && <form method="post" class="mt-2"><input type="hidden" name="intent" value="deleteUrl" /><button class="btn btn-normal btn-sm" data-confirm="The function URL will stop working." data-confirm-title="Delete function URL?" data-confirm-ok="Delete"><Icon name="trash-2" size={14} /> Delete function URL</button></form>}
+        </section>
+
+        <section class="border-t border-line pt-6">
+          <h3 class="card-title mb-2">Resource-based policy</h3>
+          <p class="card-desc mb-3">Who may invoke this function (S3, SNS, EventBridge, other accounts ...).</p>
+          {policy?.error && <Flash type="warning" text="Couldn't read the policy" detail={policy.error} dismissible={false} />}
+          {stmts.length === 0 ? <p class="text-muted">No permission statements.</p> : (
+            <form method="post" data-table="perms" data-page-size="50" data-no-busy>
+              <div class="mb-2"><button class="btn btn-normal btn-sm" name="intent" value="removePerm" data-min="1" data-confirm="The selected statements will be removed." data-confirm-title="Remove permissions?" data-confirm-ok="Remove">Remove</button></div>
+              <div class="tbl-wrap"><table class="tbl"><thead><tr><th class="sel"><input type="checkbox" class="checkbox" data-select-all aria-label="Select all" /></th><th>Statement ID</th><th>Effect</th><th>Principal</th><th>Action</th><th>Condition</th></tr></thead><tbody>
+                {stmts.map((x) => <tr data-row><td class="sel"><input type="checkbox" class="checkbox" name="sid" value={x.sid} data-row-select aria-label={`Select ${x.sid}`} /></td><td class="font-mono text-[13px]">{x.sid}</td><td>{x.effect}</td><td class="font-mono text-[13px]">{x.principal}</td><td class="font-mono text-[13px]">{x.action}</td><td class="font-mono text-[12.5px]">{x.condition || '-'}</td></tr>)}
+              </tbody></table></div>
+            </form>
+          )}
+          <form method="post" class="mt-4 grid items-end gap-4 rounded-lg border border-line p-4 md:grid-cols-2 xl:grid-cols-4">
+            <input type="hidden" name="intent" value="addPerm" />
+            <FormField label="Service" for="perm-preset" class="!mb-0"><select id="perm-preset" class="select" onchange="document.getElementById('perm-principal').value=this.value">{INVOKE_PRINCIPALS.map((p) => <option value={p.principal} title={p.sourceHint}>{p.label}</option>)}</select></FormField>
+            <FormField label="Principal" for="perm-principal" class="!mb-0"><input id="perm-principal" name="principal" class="input font-mono" value="s3.amazonaws.com" required /></FormField>
+            <FormField label="Source ARN" for="perm-source" optional class="!mb-0"><input id="perm-source" name="sourceArn" class="input font-mono" placeholder="arn:aws:s3:::bucket" /></FormField>
+            <FormField label="Source account" for="perm-acct" optional class="!mb-0"><input id="perm-acct" name="sourceAccount" class="input font-mono" placeholder={ctx.account} /></FormField>
+            <FormField label="Statement ID" for="perm-sid" optional class="!mb-0"><input id="perm-sid" name="sid" class="input" /></FormField>
+            <FormField label="Action" for="perm-action" class="!mb-0"><select id="perm-action" name="action" class="select"><option>lambda:InvokeFunction</option><option>lambda:InvokeFunctionUrl</option></select></FormField>
+            <div><button class="btn btn-primary" type="submit"><Icon name="plus" size={16} /> Add permission</button></div>
+          </form>
+        </section>
+      </div>
+    )}
+
+    {tab === 'versions' && (
+      <div class="p-5">
+        {versions?.error ? <Flash type="error" text="Couldn't list versions" detail={versions.error} dismissible={false} /> : (
+          <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Version</th><th>Runtime</th><th>Last modified</th><th>Code size</th><th>Description</th></tr></thead><tbody>
+            {(versions?.data ?? []).map((x: any) => <tr><td>{badge(x.Version)}</td><td>{x.Runtime}</td><td class="nowrap">{dateTime(x.LastModified)}</td><td>{bytes(x.CodeSize)}</td><td>{x.Description || '-'}</td></tr>)}
+          </tbody></table></div>
+        )}
+      </div>
+    )}
+  </div>
+</Console>

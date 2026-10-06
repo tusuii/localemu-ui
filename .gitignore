@@ -22,6 +22,10 @@ localemu/infra/
 
 /node_modules/
 package-lock.json
+!/ui/package-lock.json
+/ui/node_modules/
+/ui/dist/
+/ui/.astro/
 
 # Astro typegen artifacts (no Astro project in this repo; defensive against
 # accidental landings from a sibling website checkout).
@@ -52,6 +56,9 @@ node_modules/
 
 **/obj/**
 **/lib/**
+# ...but the web console's source modules live in ui/src/lib
+!/ui/src/lib/
+!/ui/src/lib/**
 
 !bin/docker-entrypoint.sh
 

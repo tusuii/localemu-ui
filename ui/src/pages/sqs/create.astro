@@ -1,0 +1,78 @@
+---
+import Console from '../../layouts/Console.astro';
+import PageHeader from '../../components/PageHeader.astro';
+import Card from '../../components/Card.astro';
+import FormField from '../../components/FormField.astro';
+import { CreateQueueCommand, ListQueuesCommand, GetQueueAttributesCommand } from '@aws-sdk/client-sqs';
+import { aws } from '../../lib/aws';
+import { getCtx } from '../../lib/context';
+import { handlePost, intOf, required, str } from '../../lib/action';
+import { UserError, load } from '../../lib/errors';
+import { queueName } from '../../lib/sqs';
+
+const ctx = getCtx(Astro.cookies);
+const sqs = aws.sqs(ctx);
+
+const post = await handlePost(Astro, {
+  create: async (f) => {
+    let name = required(f, 'name', 'Queue name');
+    const fifo = str(f, 'type') === 'fifo';
+    if (fifo && !name.endsWith('.fifo')) name += '.fifo';
+    if (!/^[A-Za-z0-9_-]{1,80}(\.fifo)?$/.test(name)) throw new UserError('Queue names are up to 80 characters: letters, numbers, hyphens and underscores.');
+    const attrs: Record<string, string> = {};
+    const set = (k: string, v: number | undefined) => { if (v !== undefined) attrs[k] = String(v); };
+    set('VisibilityTimeout', intOf(f, 'visibility', 'Visibility timeout'));
+    set('MessageRetentionPeriod', intOf(f, 'retention', 'Retention period'));
+    set('DelaySeconds', intOf(f, 'delay', 'Delivery delay'));
+    set('MaximumMessageSize', intOf(f, 'maxsize', 'Maximum message size'));
+    set('ReceiveMessageWaitTimeSeconds', intOf(f, 'wait', 'Receive wait time'));
+    if (fifo) {
+      attrs.FifoQueue = 'true';
+      if (str(f, 'dedup') === '1') attrs.ContentBasedDeduplication = 'true';
+    }
+    const dlq = str(f, 'dlq');
+    if (dlq) attrs.RedrivePolicy = JSON.stringify({ deadLetterTargetArn: dlq, maxReceiveCount: intOf(f, 'maxReceive', 'Maximum receives') ?? 5 });
+    await sqs.send(new CreateQueueCommand({ QueueName: name, Attributes: attrs }));
+    return { message: `Queue ${name} created successfully.`, redirect: `/sqs/${encodeURIComponent(name)}` };
+  },
+});
+if (post.response) return post.response;
+
+const existing = await load(async () => {
+  const urls = (await sqs.send(new ListQueuesCommand({}))).QueueUrls ?? [];
+  return Promise.all(urls.map(async (u) => ({ name: queueName(u), arn: (await sqs.send(new GetQueueAttributesCommand({ QueueUrl: u, AttributeNames: ['QueueArn'] }))).Attributes?.QueueArn })));
+});
+const v = post.values;
+---
+<Console title="Create queue" crumbs={[{ label: 'Queues', href: '/sqs' }, { label: 'Create queue' }]} error={post.error}>
+  <PageHeader title="Create queue" />
+  <form data-cli="aws sqs create-queue --queue-name {name}{?type=fifo|.fifo} {?type=fifo|--attributes FifoQueue=true} {?dedup=1|--attributes ContentBasedDeduplication=true} {visibility|--attributes VisibilityTimeout=} {retention|--attributes MessageRetentionPeriod=} {delay|--attributes DelaySeconds=} {maxsize|--attributes MaximumMessageSize=} {wait|--attributes ReceiveMessageWaitTimeSeconds=}" method="post" class="max-w-3xl space-y-4">
+    <input type="hidden" name="intent" value="create" />
+    <Card title="Details">
+      <div class="mb-4 space-y-2">
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="standard" checked={(v.type ?? 'standard') === 'standard'} /><span><strong>Standard</strong><br /><span class="text-muted">At-least-once delivery, best-effort ordering, nearly unlimited throughput.</span></span></label>
+        <label class="flex items-start gap-2"><input type="radio" class="radio mt-0.5" name="type" value="fifo" checked={v.type === 'fifo'} /><span><strong>FIFO</strong><br /><span class="text-muted">First-in-first-out delivery and exactly-once processing. The name will end with <code>.fifo</code>.</span></span></label>
+      </div>
+      <FormField label="Name" for="name"><input id="name" name="name" class="input" required autofocus autocomplete="off" maxlength="80" value={v.name ?? ''} /></FormField>
+      <label class="flex items-center gap-2" data-show-when="type:fifo" hidden><input type="checkbox" class="checkbox" name="dedup" value="1" checked={v.dedup === '1'} /> Content-based deduplication</label>
+    </Card>
+    <Card title="Configuration" description="Leave blank to use the defaults.">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Visibility timeout (seconds)" for="visibility"><input id="visibility" name="visibility" type="number" min="0" max="43200" class="input" placeholder="30" value={v.visibility ?? ''} /></FormField>
+        <FormField label="Message retention period (seconds)" for="retention"><input id="retention" name="retention" type="number" min="60" max="1209600" class="input" placeholder="345600 (4 days)" value={v.retention ?? ''} /></FormField>
+        <FormField label="Delivery delay (seconds)" for="delay"><input id="delay" name="delay" type="number" min="0" max="900" class="input" placeholder="0" value={v.delay ?? ''} /></FormField>
+        <FormField label="Maximum message size (bytes)" for="maxsize"><input id="maxsize" name="maxsize" type="number" min="1024" max="262144" class="input" placeholder="262144" value={v.maxsize ?? ''} /></FormField>
+        <FormField label="Receive message wait time (seconds)" for="wait"><input id="wait" name="wait" type="number" min="0" max="20" class="input" placeholder="0" value={v.wait ?? ''} /></FormField>
+      </div>
+    </Card>
+    <Card title="Dead-letter queue" description="Send messages that fail processing to another queue.">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <FormField label="Dead-letter queue" for="dlq" optional>
+          <select id="dlq" name="dlq" class="select"><option value="">None</option>{(existing.data ?? []).filter((q) => q.arn).map((q) => <option value={q.arn} selected={v.dlq === q.arn}>{q.name}</option>)}</select>
+        </FormField>
+        <FormField label="Maximum receives" for="maxReceive"><input id="maxReceive" name="maxReceive" type="number" min="1" max="1000" class="input" value={v.maxReceive ?? '5'} /></FormField>
+      </div>
+    </Card>
+    <div class="flex justify-end gap-2"><a class="btn btn-normal" href="/sqs">Cancel</a><button class="btn btn-primary" type="submit">Create queue</button></div>
+  </form>
+</Console>
