@@ -5,7 +5,7 @@ const { links, count, noun = 'items' } = Astro.props;
 const on = 'btn btn-normal btn-sm';
 const off = 'btn btn-normal btn-sm opacity-50 pointer-events-none';
 ---
-<nav class="flex items-center justify-between gap-3 px-4 py-2 text-sm border-t border-border" aria-label="Pagination" data-server-pager>
+<nav class="flex items-center justify-between gap-3 px-4 py-2 text-sm border-t border-line" aria-label="Pagination" data-server-pager>
   <span class="text-muted">Page {links.index + 1} · {count} {noun} shown{links.next ? ' · more available' : ''}</span>
   <span class="flex gap-2">
     {links.first ? <a class={on} href={links.first}>First</a> : <span class={off} aria-disabled="true">First</span>}
