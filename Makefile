@@ -133,6 +133,18 @@ asf-regenerate:                   ## Regenerate ASF APIs
 init-precommit:    		  ## install te pre-commit hook into your local git repository
 	($(VENV_RUN); pre-commit install)
 
+ui-install:               ## Install dependencies of the web console (ui/)
+	cd ui && npm ci
+
+ui-dev: ui-install        ## Run the web console in dev mode on http://localhost:4321
+	cd ui && npm run dev
+
+ui-build: ui-install      ## Build the web console for production (ui/dist)
+	cd ui && npm run build
+
+ui-start:                 ## Serve the production build of the web console (run ui-build first)
+	cd ui && npm start
+
 docker-build:
 	IMAGE_NAME=$(IMAGE_NAME) PLATFORM=$(PLATFORM) ./bin/docker-helper.sh build
 
@@ -148,4 +160,4 @@ clean-dist:				  ## Clean up python distribution directories
 	rm -rf dist/ build/
 	rm -rf src/*.egg-info
 
-.PHONY: usage freeze install-basic install-runtime install-test install-dev install entrypoints dist publish coveralls start docker-run-tests docker-cp-coverage test test-coverage lint lint-modified format format-modified asf-regenerate init-precommit clean clean-dist upgrade-pinned-dependencies
+.PHONY: ui-install ui-dev ui-build ui-start usage freeze install-basic install-runtime install-test install-dev install entrypoints dist publish coveralls start docker-run-tests docker-cp-coverage test test-coverage lint lint-modified format format-modified asf-regenerate init-precommit clean clean-dist upgrade-pinned-dependencies

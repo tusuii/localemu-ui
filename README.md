@@ -155,6 +155,21 @@ The dashboard shows:
 
 The dashboard starts automatically with LocalEmu. No configuration needed.
 
+## Web Console
+
+For a fuller, AWS-console style experience there is a standalone web UI in [`ui/`](ui/README.md)
+(Astro + Tailwind). Browse and manage what exists on your local server: S3 buckets and objects,
+DynamoDB items, SQS/SNS, Lambda code and test events, EC2, IAM, Secrets Manager, SSM, KMS, logs,
+EventBridge, Step Functions, CloudFormation and more, with region and account switching and a dark
+theme.
+
+```bash
+docker compose up --build        # LocalEmu on :4566 + the console on http://localhost:4321
+
+# or, against a LocalEmu you already run:
+cd ui && npm ci && npm run dev
+```
+
 ## Simulation Features
 
 Test real AWS behavior locally with opt-in feature flags:
