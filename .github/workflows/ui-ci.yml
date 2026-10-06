@@ -109,6 +109,9 @@ jobs:
       # ECS. The tests (and baselines) assume the state-only behaviour, so turn those backends off.
       EC2_VM_MANAGER: none
       ECS_DOCKER_BACKEND: '0'
+      # Baselines are rendered on a developer machine; fonts (notably monospace) differ slightly on
+      # the runner. Allow a few hundred differing pixels; real layout changes differ by thousands.
+      MAX_DIFF_PIXELS: '300'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
