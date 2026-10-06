@@ -48,12 +48,12 @@ If LocalEmu is not on `http://localhost:4566`, set `LOCALEMU_ENDPOINT` (see belo
 | Area | Capabilities |
 |---|---|
 | **Console Home** | Resource counts for the current account and region, LocalEmu health, recently visited services, recent API calls |
-| **S3** | Create / empty / delete buckets; browse objects and folders; upload; download; view and edit text objects; pre-signed URLs; versioning, bucket policy, CORS; lifecycle and notification rules (read-only) |
-| **DynamoDB** | Create / delete tables; scan and query (with sort-key conditions and index selection); create, edit and delete items as plain JSON or DynamoDB JSON; table overview and indexes |
+| **S3** | Create / empty / delete buckets; browse objects and folders; upload; download; view and edit text objects; pre-signed URLs; folder and multi-file upload, zip download, server-side paging and prefix search; versioning, bucket policy, CORS; editors for lifecycle rules, event notifications and static website hosting |
+| **DynamoDB** | Create / delete tables; scan and query (with sort-key conditions and index selection); server-side paging; filters; create, edit and delete items as plain JSON or DynamoDB JSON; import (JSON, JSON Lines, CSV) and export (JSON, CSV); table overview and indexes |
 | **SQS** | Standard and FIFO queues with dead-letter queue; send, poll (peek or consume) and delete messages; edit settings; purge; delete |
 | **SNS** | Topics (standard / FIFO); subscriptions (SQS, Lambda, HTTP(S), email…); publish with attributes; delete |
-| **Lambda** | Create from inline code or a zip; browse and edit code in the browser; deploy; test events with logs; configuration and environment; triggers; versions; layers |
-| **EC2** | Launch, start, stop, reboot, terminate instances; AMIs; volumes and snapshots; security groups with rule editing; key pairs (private key shown once); Elastic IPs; VPCs, subnets, internet gateways, route tables |
+| **Lambda** | Create from inline code or a zip; browse and edit code in the browser; deploy; test events with logs; configuration and environment; trigger editors (event source mappings, function URL, resource policy); versions; layers |
+| **EC2** | Launch, start, stop, reboot, terminate instances; AMIs; volumes and snapshots; security groups with rule editing; key pairs (private key shown once); Elastic IPs; VPCs, subnets, internet gateways, route tables with a route and association editor |
 | **IAM** | Users (access keys, groups), roles (trust policy presets), groups, customer and AWS managed policies (versions, attached entities), inline policies; cascade delete |
 | **Secrets Manager** | Create, reveal on demand, new versions, recovery window or immediate deletion, restore |
 | **Systems Manager** | Parameter Store with String / StringList / SecureString and history |
@@ -61,9 +61,14 @@ If LocalEmu is not on `http://localhost:4566`, set `LOCALEMU_ENDPOINT` (see belo
 | **CloudWatch** | Logs: groups, streams, filter-pattern search, live refresh, write test events, retention · Alarms · Metrics (list and publish) |
 | **EventBridge** | Buses, rules (pattern or schedule), targets, send custom events |
 | **Step Functions** | State machines, edit definition, start executions, execution history |
-| **CloudFormation** | Create / update / delete stacks, outputs, resources, events, template |
+| **CloudFormation** | Create / update / delete stacks (template from file, URL or paste, with validation), change sets, outputs, resources, events, template |
 | **Kinesis · Route 53** | Streams with put/read records · hosted zones and record sets |
 | **CloudTrail** | Event history of every API call LocalEmu served, with request details |
+| **API Gateway** | REST, HTTP and WebSocket APIs: resources, methods and integrations, routes, deployments and stages |
+| **RDS** | DB instances and clusters (create, start/stop/reboot, modify, delete), snapshots with restore, subnet groups, parameter groups |
+| **ECS · ECR** | Clusters, services, tasks and task definitions · repositories, images, repository and lifecycle policies |
+| **Cognito · ACM** | User pools with users, groups and app clients · request / import / inspect certificates |
+| **ELB · Athena · Glue** | Load balancers, listeners, rules and target groups · SQL query editor, history, workgroups · data catalog databases and tables, crawlers, jobs |
 | **Everything else** | All 130+ services get a tile in the Services menu; those without a purpose-built console open a generic read-only resource browser with their emulation tier (live / metadata / stub) and a getting-started command |
 
 Handy details: **Alt+S** searches services and resources, **Alt+C** opens CloudShell, **?** shows all shortcuts, **/** focuses the table filter, the top bar switches
@@ -182,9 +187,9 @@ tests/e2e/                     Playwright flows that drive the real UI against a
 * Lambda updates, deletion and invocation need LocalEmu to reach a Docker daemon; without it
   functions end up in the `Failed` state and the console shows the reason.
 * EC2 instances are API metadata unless LocalEmu has Docker (then each is a real container).
-* Lists show the first page (up to a few hundred items) with client-side filtering and paging.
-* Some detail is read-only here (S3 lifecycle and notifications, route tables, Lambda triggers);
-  use the CLI, Terraform or CloudFormation for those.
+* S3, DynamoDB, Lambda, SQS and SNS lists page on the server; other lists show the first page (up to a few hundred items) with client-side filtering and paging.
+* Athena queries need LocalEmu's SQL engine to be able to fetch its extensions; offline they end in `Failed` and the console shows the reason.
+* Some detail is still read-only or missing: S3 replication and access logging, Cognito app-client editing, ELB listener editing, API Gateway API keys, RDS parameter editing.
 
 ## Prebuilt image
 
